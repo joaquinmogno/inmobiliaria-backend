@@ -1,0 +1,177 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+
+datasource db {
+  provider = "postgresql"
+}
+
+
+// Enums
+enum RolUsuario {
+  ADMIN
+  AGENTE
+}
+
+enum EstadoContrato {
+  ACTIVO
+  PAPELERA
+  FINALIZADO
+}
+
+// Modelos
+
+// Raíz para multi-tenancy
+model Inmobiliaria {
+  id                Int      @id @default(autoincrement())
+  nombre            String
+  fechaCreacion     DateTime @default(now())
+  fechaActualizacion DateTime @updatedAt
+
+  // Relaciones
+  usuarios      Usuario[]
+  propiedades   Propiedad[]
+  propietarios  Propietario[]
+  inquilinos    Inquilino[]
+  contratos     Contrato[]
+}
+
+model Usuario {
+  id                Int        @id @default(autoincrement())
+  email             String     @unique
+  password          String
+  nombreCompleto    String
+  rol               RolUsuario @default(AGENTE)
+  fechaCreacion     DateTime   @default(now())
+  fechaActualizacion DateTime   @updatedAt
+
+  // Multi-tenancy
+  inmobiliariaId Int
+  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+
+  // Auditoría
+  propietariosCreados     Propietario[] @relation("PropietarioCreadoPor")
+  propietariosActualizados Propietario[] @relation("PropietarioActualizadoPor")
+  inquilinosCreados       Inquilino[]   @relation("InquilinoCreadoPor")
+  inquilinosActualizados  Inquilino[]   @relation("InquilinoActualizadoPor")
+  propiedadesCreadas      Propiedad[]   @relation("PropiedadCreadaPor")
+  propiedadesActualizadas Propiedad[]   @relation("PropiedadActualizadaPor")
+  contratosCreados        Contrato[]    @relation("ContratoCreadoPor")
+  contratosActualizados   Contrato[]    @relation("ContratoActualizadoPor")
+}
+
+model Propietario {
+  id                Int      @id @default(autoincrement())
+  nombreCompleto    String
+  telefono          String?
+  email             String?
+  fechaCreacion     DateTime @default(now())
+  fechaActualizacion DateTime @updatedAt
+
+  // Multi-tenancy
+  inmobiliariaId Int
+  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+
+  // Auditoría
+  creadoPorId    Int?
+  creadoPor      Usuario? @relation("PropietarioCreadoPor", fields: [creadoPorId], references: [id])
+  actualizadoPorId Int?
+  actualizadoPor   Usuario? @relation("PropietarioActualizadoPor", fields: [actualizadoPorId], references: [id])
+
+  // Relaciones
+  propiedades Propiedad[]
+  contratos   Contrato[]
+}
+
+model Inquilino {
+  id                Int      @id @default(autoincrement())
+  nombreCompleto    String
+  telefono          String?
+  email             String?
+  fechaCreacion     DateTime @default(now())
+  fechaActualizacion DateTime @updatedAt
+
+  // Multi-tenancy
+  inmobiliariaId Int
+  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+
+  // Auditoría
+  creadoPorId    Int?
+  creadoPor      Usuario? @relation("InquilinoCreadoPor", fields: [creadoPorId], references: [id])
+  actualizadoPorId Int?
+  actualizadoPor   Usuario? @relation("InquilinoActualizadoPor", fields: [actualizadoPorId], references: [id])
+
+  // Relaciones
+  contratos Contrato[]
+}
+
+model Propiedad {
+  id                Int      @id @default(autoincrement())
+  direccion         String
+  piso              String?
+  departamento      String?  // Unidad
+  fechaCreacion     DateTime @default(now())
+  fechaActualizacion DateTime @updatedAt
+
+  // Multi-tenancy
+  inmobiliariaId Int
+  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+
+  // Auditoría
+  creadoPorId    Int?
+  creadoPor      Usuario? @relation("PropiedadCreadaPor", fields: [creadoPorId], references: [id])
+  actualizadoPorId Int?
+  actualizadoPor   Usuario? @relation("PropiedadActualizadaPor", fields: [actualizadoPorId], references: [id])
+
+  // Relaciones
+  propietarioId Int
+  propietario   Propietario @relation(fields: [propietarioId], references: [id])
+  contratos     Contrato[]
+}
+
+model Contrato {
+  id              Int            @id @default(autoincrement())
+  fechaInicio     DateTime @db.Date
+  fechaFin        DateTime @db.Date
+  estado          EstadoContrato @default(ACTIVO)
+  rutaPdf         String?        // Ruta al archivo PDF del contrato principal
+  observaciones   String?        @db.Text
+  eliminadoEn     DateTime?      // Para borrado lógico (PAPELERA)
+  fechaCreacion   DateTime       @default(now())
+  fechaActualizacion DateTime     @updatedAt
+  fechaProximaActualizacion DateTime? @db.Date
+
+  // Multi-tenancy
+  inmobiliariaId Int
+  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+
+  // Auditoría
+  creadoPorId    Int?
+  creadoPor      Usuario? @relation("ContratoCreadoPor", fields: [creadoPorId], references: [id])
+  actualizadoPorId Int?
+  actualizadoPor   Usuario? @relation("ContratoActualizadoPor", fields: [actualizadoPorId], references: [id])
+
+  // Relaciones
+  propiedadId Int
+  propiedad   Propiedad @relation(fields: [propiedadId], references: [id])
+
+  propietarioId Int
+  propietario   Propietario @relation(fields: [propietarioId], references: [id])
+
+  inquilinoId Int
+  inquilino   Inquilino @relation(fields: [inquilinoId], references: [id])
+
+  adjuntos AdjuntoContrato[]
+}
+
+model AdjuntoContrato {
+  id            Int      @id @default(autoincrement())
+  rutaArchivo   String
+  nombreArchivo String?
+  fechaCreacion DateTime @default(now())
+
+  contratoId Int
+  contrato   Contrato @relation(fields: [contratoId], references: [id], onDelete: Cascade)
+}

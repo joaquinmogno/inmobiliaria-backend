@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "Contrato" ALTER COLUMN "fechaInicio" SET DATA TYPE DATE,
+ALTER COLUMN "fechaFin" SET DATA TYPE DATE,
+ALTER COLUMN "fechaProximaActualizacion" SET DATA TYPE DATE;
