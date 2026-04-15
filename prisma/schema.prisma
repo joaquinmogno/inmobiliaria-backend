@@ -1,16 +1,298 @@
 generator client {
-  provider = "prisma-client-js"
-  output   = "../src/generated/prisma"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
-
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
+model Inmobiliaria {
+  id                 Int              @id @default(autoincrement())
+  nombre             String
+  activa             Boolean          @default(true)
+  fechaCreacion      DateTime         @default(now())
+  fechaActualizacion DateTime         @updatedAt
+  direccion          String?
+  email              String?
+  logoUrl            String?
+  slogan             String?
+  telefono           String?
+  auditLogs          AuditLog[]
+  contratos          Contrato[]
+  liquidaciones      Liquidacion[]
+  movimientosCaja    MovimientoCaja[]
+  pagos              Pago[]
+  personas           Persona[]
+  propiedades        Propiedad[]
+  usuarios           Usuario[]
+  planesCuotas       PlanCuotas[]
+  sueldos            PagoSueldo[]
+}
 
-// Enums
+model Usuario {
+  id                      Int              @id @default(autoincrement())
+  email                   String           @unique
+  password                String
+  nombreCompleto          String
+  rol                     RolUsuario       @default(AGENTE)
+  fechaCreacion           DateTime         @default(now())
+  fechaActualizacion      DateTime         @updatedAt
+  inmobiliariaId          Int
+  auditLogs               AuditLog[]
+  contratosActualizados   Contrato[]       @relation("ContratoActualizadoPor")
+  contratosCreados        Contrato[]       @relation("ContratoCreadoPor")
+  liquidacionesCerradas   Liquidacion[]    @relation("LiquidacionCerradaPor")
+  liquidacionesCreadas    Liquidacion[]    @relation("LiquidacionCreadaPor")
+  movimientosCajaCreados  MovimientoCaja[] @relation("MovimientoCajaCreadoPor")
+  pagosCreados            Pago[]           @relation("PagoCreadoPor")
+  personasActualizadas    Persona[]        @relation("PersonaActualizadaPor")
+  personasCreadas         Persona[]        @relation("PersonaCreadaPor")
+  propiedadesActualizadas Propiedad[]      @relation("PropiedadActualizadaPor")
+  propiedadesCreadas      Propiedad[]      @relation("PropiedadCreadaPor")
+  actualizacionesRealizadas ActualizacionContrato[]
+  sueldosRecibidos        PagoSueldo[]     @relation("SueldoParaUsuario")
+  sueldosPagados          PagoSueldo[]     @relation("SueldoCreadoPor")
+  inmobiliaria            Inmobiliaria     @relation(fields: [inmobiliariaId], references: [id])
+}
+
+model Persona {
+  id                   Int                   @id @default(autoincrement())
+  nombreCompleto       String
+  dni                  String?
+  telefono             String?
+  email                String?
+  direccion            String?
+  estado               EstadoPersona         @default(ACTIVO)
+  fechaCreacion        DateTime              @default(now())
+  fechaActualizacion   DateTime              @updatedAt
+  inmobiliariaId       Int
+  creadoPorId          Int?
+  actualizadoPorId     Int?
+  contratosGarante     Contrato[]            @relation("GaranteContrato")
+  contratosInquilino   ContratoInquilino[]   @relation("PersonaInquilino")
+  contratosPropietario ContratoPropietario[] @relation("PersonaPropietario")
+  actualizadoPor       Usuario?              @relation("PersonaActualizadaPor", fields: [actualizadoPorId], references: [id])
+  creadoPor            Usuario?              @relation("PersonaCreadaPor", fields: [creadoPorId], references: [id])
+  inmobiliaria         Inmobiliaria          @relation(fields: [inmobiliariaId], references: [id])
+
+  @@index([inmobiliariaId])
+  @@index([dni])
+}
+
+model Propiedad {
+  id                 Int             @id @default(autoincrement())
+  direccion          String
+  piso               String?
+  departamento       String?
+  fechaCreacion      DateTime        @default(now())
+  fechaActualizacion DateTime        @updatedAt
+  inmobiliariaId     Int
+  actualizadoPorId   Int?
+  creadoPorId        Int?
+  estado             EstadoPropiedad @default(DISPONIBLE)
+  observaciones      String?
+  tipo               TipoPropiedad   @default(DEPARTAMENTO)
+  contratos          Contrato[]
+  actualizadoPor     Usuario?        @relation("PropiedadActualizadaPor", fields: [actualizadoPorId], references: [id])
+  creadoPor          Usuario?        @relation("PropiedadCreadaPor", fields: [creadoPorId], references: [id])
+  inmobiliaria       Inmobiliaria    @relation(fields: [inmobiliariaId], references: [id])
+
+  @@index([inmobiliariaId])
+}
+
+model Contrato {
+  id                        Int                   @id @default(autoincrement())
+  fechaInicio               DateTime              @db.Date
+  fechaFin                  DateTime              @db.Date
+  estado                    EstadoContrato        @default(ACTIVO)
+  rutaPdf                   String?
+  observaciones             String?
+  eliminadoEn               DateTime?
+  fechaCreacion             DateTime              @default(now())
+  fechaActualizacion        DateTime              @updatedAt
+  inmobiliariaId            Int
+  propiedadId               Int
+  fechaProximaActualizacion DateTime?             @db.Date
+  actualizadoPorId          Int?
+  creadoPorId               Int?
+  diaVencimiento            Int                   @default(10)
+  garanteId                 Int?
+  montoAlquiler             Decimal               @db.Decimal(10, 2)
+  montoHonorarios           Decimal               @db.Decimal(10, 2)
+  porcentajeActualizacion   Decimal?              @db.Decimal(5, 2)
+  pagaHonorarios            PagadorHonorarios     @default(INQUILINO)
+  porcentajeHonorarios      Decimal?              @db.Decimal(5, 2)
+  tipoAjuste                String?
+  administrado              Boolean               @default(true)
+  adjuntos                  AdjuntoContrato[]
+  actualizadoPor            Usuario?              @relation("ContratoActualizadoPor", fields: [actualizadoPorId], references: [id])
+  creadoPor                 Usuario?              @relation("ContratoCreadoPor", fields: [creadoPorId], references: [id])
+  garante                   Persona?              @relation("GaranteContrato", fields: [garanteId], references: [id])
+  inmobiliaria              Inmobiliaria          @relation(fields: [inmobiliariaId], references: [id])
+  propiedad                 Propiedad             @relation(fields: [propiedadId], references: [id])
+  inquilinos                ContratoInquilino[]
+  propietarios              ContratoPropietario[]
+  liquidaciones             Liquidacion[]
+  movimientosCaja           MovimientoCaja[]
+  pagos                     Pago[]
+  actualizaciones           ActualizacionContrato[]
+  planesCuotas              PlanCuotas[]
+
+  @@index([inmobiliariaId])
+  @@index([propiedadId])
+  @@index([garanteId])
+  @@index([estado])
+}
+
+model ContratoInquilino {
+  id          Int      @id @default(autoincrement())
+  contratoId  Int
+  personaId   Int
+  esPrincipal Boolean  @default(false)
+  contrato    Contrato @relation(fields: [contratoId], references: [id], onDelete: Cascade)
+  persona     Persona  @relation("PersonaInquilino", fields: [personaId], references: [id])
+
+  @@index([contratoId])
+  @@index([personaId])
+}
+
+model ContratoPropietario {
+  id          Int      @id @default(autoincrement())
+  contratoId  Int
+  personaId   Int
+  esPrincipal Boolean  @default(false)
+  contrato    Contrato @relation(fields: [contratoId], references: [id], onDelete: Cascade)
+  persona     Persona  @relation("PersonaPropietario", fields: [personaId], references: [id])
+
+  @@index([contratoId])
+  @@index([personaId])
+}
+
+model AdjuntoContrato {
+  id            Int      @id @default(autoincrement())
+  rutaArchivo   String
+  nombreArchivo String?
+  fechaCreacion DateTime @default(now())
+  contratoId    Int
+  contrato      Contrato @relation(fields: [contratoId], references: [id], onDelete: Cascade)
+}
+
+model Liquidacion {
+  id                    Int               @id @default(autoincrement())
+  periodo               DateTime          @db.Date
+  estado                EstadoLiquidacion @default(BORRADOR)
+  fechaCreacion         DateTime          @default(now())
+  inmobiliariaId        Int
+  creadoPorId           Int?
+  cerradoPorId          Int?
+  contratoId            Int
+  fechaLiquidacion      DateTime?
+  netoACobrar           Decimal           @default(0) @db.Decimal(10, 2)
+  totalDescuentos       Decimal           @default(0) @db.Decimal(10, 2)
+  totalIngresos         Decimal           @default(0) @db.Decimal(10, 2)
+  montoHonorarios       Decimal           @default(0) @db.Decimal(10, 2)
+  porcentajeHonorarios  Decimal?          @db.Decimal(5, 2)
+  fechaPagoPropietario  DateTime?         @db.Date
+  metodoPagoPropietario MetodoPago?
+  cerradoPor            Usuario?          @relation("LiquidacionCerradaPor", fields: [cerradoPorId], references: [id])
+  contrato              Contrato          @relation(fields: [contratoId], references: [id])
+  creadoPor             Usuario?          @relation("LiquidacionCreadaPor", fields: [creadoPorId], references: [id])
+  inmobiliaria          Inmobiliaria      @relation(fields: [inmobiliariaId], references: [id])
+  movimientos           Movimiento[]
+  movimientosCaja       MovimientoCaja[]
+  pagos                 Pago[]
+  cuotas                CuotaPlan[]
+
+  @@unique([contratoId, periodo])
+  @@index([inmobiliariaId])
+  @@index([contratoId])
+  @@index([periodo])
+  @@index([estado])
+}
+
+model Movimiento {
+  id            Int            @id @default(autoincrement())
+  tipo          TipoMovimiento
+  concepto      String
+  monto         Decimal        @db.Decimal(10, 2)
+  observaciones String?
+  fechaCreacion DateTime       @default(now())
+  liquidacionId Int
+  liquidacion   Liquidacion    @relation(fields: [liquidacionId], references: [id], onDelete: Cascade)
+  cuota         CuotaPlan?
+  esParaInmobiliaria Boolean @default(false)
+
+  @@index([liquidacionId])
+}
+
+model Pago {
+  id             Int          @id @default(autoincrement())
+  monto          Decimal      @db.Decimal(10, 2)
+  fechaPago      DateTime     @db.Date
+  metodoPago     MetodoPago   @default(EFECTIVO)
+  comprobante    String?
+  observaciones  String?
+  fechaCreacion  DateTime     @default(now())
+  inmobiliariaId Int
+  creadoPorId    Int?
+  contratoId     Int
+  liquidacionId  Int
+  contrato       Contrato     @relation(fields: [contratoId], references: [id])
+  creadoPor      Usuario?     @relation("PagoCreadoPor", fields: [creadoPorId], references: [id])
+  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+  liquidacion    Liquidacion  @relation(fields: [liquidacionId], references: [id])
+
+  @@index([inmobiliariaId])
+  @@index([contratoId])
+  @@index([liquidacionId])
+  @@index([fechaPago])
+}
+
+model AuditLog {
+  id             Int          @id @default(autoincrement())
+  accion         String
+  entidad        String
+  entidadId      Int?
+  detalle        String?
+  fechaCreacion  DateTime     @default(now())
+  usuarioId      Int?
+  inmobiliariaId Int
+  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+  usuario        Usuario?     @relation(fields: [usuarioId], references: [id])
+
+  @@index([inmobiliariaId])
+  @@index([fechaCreacion])
+}
+
+model MovimientoCaja {
+  id             Int            @id @default(autoincrement())
+  tipo           TipoMovimiento
+  concepto       String         @db.VarChar(255)
+  monto          Decimal        @db.Decimal(10, 2)
+  fecha          DateTime       @db.Date
+  metodoPago     MetodoPago     @default(EFECTIVO)
+  cuenta         CuentaCaja     @default(CAJA)
+  observaciones  String?
+  fechaCreacion  DateTime       @default(now())
+  inmobiliariaId Int
+  creadoPorId    Int?
+  contratoId     Int?
+  liquidacionId  Int?
+  contrato       Contrato?      @relation(fields: [contratoId], references: [id])
+  creadoPor      Usuario?       @relation("MovimientoCajaCreadoPor", fields: [creadoPorId], references: [id])
+  inmobiliaria   Inmobiliaria   @relation(fields: [inmobiliariaId], references: [id])
+  liquidacion    Liquidacion?   @relation(fields: [liquidacionId], references: [id])
+
+  @@index([inmobiliariaId])
+  @@index([fecha])
+  @@index([tipo])
+  @@index([cuenta])
+}
+
 enum RolUsuario {
+  SUPERADMIN
   ADMIN
   AGENTE
 }
@@ -19,159 +301,144 @@ enum EstadoContrato {
   ACTIVO
   PAPELERA
   FINALIZADO
+  RESCINDIDO
 }
 
-// Modelos
+enum PagadorHonorarios {
+  INQUILINO
+  PROPIETARIO
+}
 
-// Raíz para multi-tenancy
-model Inmobiliaria {
+enum EstadoLiquidacion {
+  BORRADOR
+  PENDIENTE_PAGO
+  PAGADA_POR_INQUILINO
+  LIQUIDADA
+}
+
+enum TipoMovimiento {
+  INGRESO
+  DESCUENTO
+  EGRESO
+}
+
+enum MetodoPago {
+  EFECTIVO
+  TRANSFERENCIA
+  CHEQUE
+  OTROS
+}
+
+enum EstadoPersona {
+  ACTIVO
+  INACTIVO
+}
+
+enum TipoPropiedad {
+  DEPARTAMENTO
+  CASA
+  LOCAL
+  OTRO
+}
+
+enum EstadoPropiedad {
+  DISPONIBLE
+  ALQUILADO
+  INACTIVO
+}
+
+enum CuentaCaja {
+  CAJA
+  BANCO
+}
+
+model ActualizacionContrato {
   id                Int      @id @default(autoincrement())
-  nombre            String
-  fechaCreacion     DateTime @default(now())
-  fechaActualizacion DateTime @updatedAt
-
-  // Relaciones
-  usuarios      Usuario[]
-  propiedades   Propiedad[]
-  propietarios  Propietario[]
-  inquilinos    Inquilino[]
-  contratos     Contrato[]
-}
-
-model Usuario {
-  id                Int        @id @default(autoincrement())
-  email             String     @unique
-  password          String
-  nombreCompleto    String
-  rol               RolUsuario @default(AGENTE)
-  fechaCreacion     DateTime   @default(now())
-  fechaActualizacion DateTime   @updatedAt
-
-  // Multi-tenancy
-  inmobiliariaId Int
-  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
-
+  fechaActualizacion DateTime @default(now())
+  montoAnterior     Decimal  @db.Decimal(10, 2)
+  montoNuevo        Decimal  @db.Decimal(10, 2)
+  fechaProximaAnterior DateTime? @db.Date
+  fechaProximaNueva    DateTime  @db.Date
+  observaciones     String?  @db.Text
+  
   // Auditoría
-  propietariosCreados     Propietario[] @relation("PropietarioCreadoPor")
-  propietariosActualizados Propietario[] @relation("PropietarioActualizadoPor")
-  inquilinosCreados       Inquilino[]   @relation("InquilinoCreadoPor")
-  inquilinosActualizados  Inquilino[]   @relation("InquilinoActualizadoPor")
-  propiedadesCreadas      Propiedad[]   @relation("PropiedadCreadaPor")
-  propiedadesActualizadas Propiedad[]   @relation("PropiedadActualizadaPor")
-  contratosCreados        Contrato[]    @relation("ContratoCreadoPor")
-  contratosActualizados   Contrato[]    @relation("ContratoActualizadoPor")
-}
-
-model Propietario {
-  id                Int      @id @default(autoincrement())
-  nombreCompleto    String
-  telefono          String?
-  email             String?
-  fechaCreacion     DateTime @default(now())
-  fechaActualizacion DateTime @updatedAt
-
-  // Multi-tenancy
-  inmobiliariaId Int
-  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
-
-  // Auditoría
-  creadoPorId    Int?
-  creadoPor      Usuario? @relation("PropietarioCreadoPor", fields: [creadoPorId], references: [id])
-  actualizadoPorId Int?
-  actualizadoPor   Usuario? @relation("PropietarioActualizadoPor", fields: [actualizadoPorId], references: [id])
-
+  usuarioId         Int?
+  usuario           Usuario? @relation(fields: [usuarioId], references: [id])
+  
   // Relaciones
-  propiedades Propiedad[]
-  contratos   Contrato[]
+  contratoId        Int
+  contrato          Contrato @relation(fields: [contratoId], references: [id], onDelete: Cascade)
+
+  @@index([contratoId])
+  @@index([fechaActualizacion])
 }
 
-model Inquilino {
-  id                Int      @id @default(autoincrement())
-  nombreCompleto    String
-  telefono          String?
-  email             String?
-  fechaCreacion     DateTime @default(now())
-  fechaActualizacion DateTime @updatedAt
+model PlanCuotas {
+  id               Int               @id @default(autoincrement())
+  concepto         String
+  montoTotal       Decimal           @db.Decimal(10, 2)
+  tipoMovimiento   TipoMovimiento    
+  estado           EstadoPlanCuotas  @default(ACTIVO)
+  fechaCreacion    DateTime          @default(now())
+  inmobiliariaId   Int
+  contratoId       Int
+  esParaInmobiliaria Boolean @default(false)
+  
+  cuotas           CuotaPlan[]
+  inmobiliaria     Inmobiliaria      @relation(fields: [inmobiliariaId], references: [id])
+  contrato         Contrato          @relation(fields: [contratoId], references: [id], onDelete: Cascade)
 
-  // Multi-tenancy
-  inmobiliariaId Int
-  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
-
-  // Auditoría
-  creadoPorId    Int?
-  creadoPor      Usuario? @relation("InquilinoCreadoPor", fields: [creadoPorId], references: [id])
-  actualizadoPorId Int?
-  actualizadoPor   Usuario? @relation("InquilinoActualizadoPor", fields: [actualizadoPorId], references: [id])
-
-  // Relaciones
-  contratos Contrato[]
+  @@index([contratoId])
+  @@index([inmobiliariaId])
 }
 
-model Propiedad {
-  id                Int      @id @default(autoincrement())
-  direccion         String
-  piso              String?
-  departamento      String?  // Unidad
-  fechaCreacion     DateTime @default(now())
-  fechaActualizacion DateTime @updatedAt
+model CuotaPlan {
+  id               Int               @id @default(autoincrement())
+  planId           Int
+  numeroCuota      Int
+  monto            Decimal           @db.Decimal(10, 2)
+  estado           EstadoCuota       @default(PENDIENTE)
+  movimientoId     Int?              @unique
+  liquidacionId    Int?              // Para saber en qué liquidación se "programó" o cobró
+  
+  plan             PlanCuotas        @relation(fields: [planId], references: [id], onDelete: Cascade)
+  movimiento       Movimiento?       @relation(fields: [movimientoId], references: [id], onDelete: SetNull)
+  liquidacion      Liquidacion?      @relation(fields: [liquidacionId], references: [id], onDelete: SetNull)
 
-  // Multi-tenancy
-  inmobiliariaId Int
-  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
-
-  // Auditoría
-  creadoPorId    Int?
-  creadoPor      Usuario? @relation("PropiedadCreadaPor", fields: [creadoPorId], references: [id])
-  actualizadoPorId Int?
-  actualizadoPor   Usuario? @relation("PropiedadActualizadaPor", fields: [actualizadoPorId], references: [id])
-
-  // Relaciones
-  propietarioId Int
-  propietario   Propietario @relation(fields: [propietarioId], references: [id])
-  contratos     Contrato[]
+  @@index([planId])
+  @@index([liquidacionId])
 }
 
-model Contrato {
-  id              Int            @id @default(autoincrement())
-  fechaInicio     DateTime @db.Date
-  fechaFin        DateTime @db.Date
-  estado          EstadoContrato @default(ACTIVO)
-  rutaPdf         String?        // Ruta al archivo PDF del contrato principal
-  observaciones   String?        @db.Text
-  eliminadoEn     DateTime?      // Para borrado lógico (PAPELERA)
-  fechaCreacion   DateTime       @default(now())
-  fechaActualizacion DateTime     @updatedAt
-  fechaProximaActualizacion DateTime? @db.Date
-
-  // Multi-tenancy
-  inmobiliariaId Int
-  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
-
-  // Auditoría
-  creadoPorId    Int?
-  creadoPor      Usuario? @relation("ContratoCreadoPor", fields: [creadoPorId], references: [id])
-  actualizadoPorId Int?
-  actualizadoPor   Usuario? @relation("ContratoActualizadoPor", fields: [actualizadoPorId], references: [id])
-
-  // Relaciones
-  propiedadId Int
-  propiedad   Propiedad @relation(fields: [propiedadId], references: [id])
-
-  propietarioId Int
-  propietario   Propietario @relation(fields: [propietarioId], references: [id])
-
-  inquilinoId Int
-  inquilino   Inquilino @relation(fields: [inquilinoId], references: [id])
-
-  adjuntos AdjuntoContrato[]
+enum EstadoPlanCuotas {
+  ACTIVO
+  FINALIZADO
+  CANCELADO
 }
 
-model AdjuntoContrato {
-  id            Int      @id @default(autoincrement())
-  rutaArchivo   String
-  nombreArchivo String?
-  fechaCreacion DateTime @default(now())
+enum EstadoCuota {
+  PENDIENTE
+  PAGADA
+}
 
-  contratoId Int
-  contrato   Contrato @relation(fields: [contratoId], references: [id], onDelete: Cascade)
+model PagoSueldo {
+  id              Int          @id @default(autoincrement())
+  monto           Decimal      @db.Decimal(10, 2)
+  fecha           DateTime     @db.Date
+  periodo         String       // Formato "MM-YYYY"
+  metodoPago      MetodoPago   @default(EFECTIVO)
+  observaciones   String?      @db.Text
+  fechaCreacion   DateTime     @default(now())
+  
+  usuarioId       Int
+  usuario         Usuario      @relation("SueldoParaUsuario", fields: [usuarioId], references: [id])
+  
+  inmobiliariaId  Int
+  inmobiliaria    Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+  
+  creadoPorId     Int
+  creadoPor       Usuario      @relation("SueldoCreadoPor", fields: [creadoPorId], references: [id])
+
+  @@index([usuarioId])
+  @@index([inmobiliariaId])
+  @@index([periodo])
 }

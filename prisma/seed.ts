@@ -1,17 +1,13 @@
 import "dotenv/config";
-import { PrismaClient } from "../src/generated/prisma";
-import { Pool } from "pg";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient, EstadoPersona, TipoPropiedad, EstadoPropiedad } from "@prisma/client";
 import bcrypt from "bcrypt";
 
-const connectionString = process.env.DATABASE_URL;
-const pool = new Pool({ connectionString });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
+const prisma = new PrismaClient();
 
 async function main() {
     const passwordHash = await bcrypt.hash("admin123", 10);
 
+    // 1. Inmobiliaria
     const inmobiliaria = await prisma.inmobiliaria.upsert({
         where: { id: 1 },
         update: { nombre: "Ricardo Lavalle Propiedades" },
@@ -21,6 +17,7 @@ async function main() {
         },
     });
 
+    // 2. Admin
     const admin = await prisma.usuario.upsert({
         where: { email: "admin@lavalle.com" },
         update: {
@@ -38,8 +35,10 @@ async function main() {
         },
     });
 
-    console.log("Inmobiliaria:", inmobiliaria.nombre);
-    console.log("Admin user updated/created:", admin.email);
+    // 3. Personas y Propiedades removidas
+    // La base de datos iniciará limpia sin datos falsos.
+
+    console.log("Seed ejecutado correctamente 🚀");
 }
 
 main()

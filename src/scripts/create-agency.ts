@@ -1,11 +1,12 @@
 import { prisma } from '../prisma';
 import bcrypt from 'bcrypt';
+import { Prisma } from '@prisma/client';
 
 async function createAgency(nombre: string, adminEmail: string, adminPassword: string, adminNombre: string) {
     try {
         const passwordHash = await bcrypt.hash(adminPassword, 10);
 
-        const result = await prisma.$transaction(async (tx) => {
+        const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
             const inmobiliaria = await tx.inmobiliaria.create({
                 data: {
                     nombre: nombre,

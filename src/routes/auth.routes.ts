@@ -3,12 +3,36 @@ import { prisma } from '../prisma';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
+import { loginLimiter } from '../middlewares/rateLimiter.middleware';
+import { z } from 'zod';
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key_change_me';
 
-router.post('/login', async (req, res) => {
-    const { email, password } = req.body;
+const loginSchema = z.object({
+    email: z.string().email('Email inválido'),
+    password: z.string().min(6, 'La contraseña debe tener al menos 6 caracteres')
+});
+
+const changePasswordSchema = z.object({
+    currentPassword: z.string().min(1, 'La contraseña actual es requerida'),
+    newPassword: z.string().min(6, 'La nueva contraseña debe tener al menos 6 caracteres')
+});
+
+const resetPasswordSchema = z.object({
+    newPassword: z.string().min(6, 'La nueva contraseña debe tener al menos 6 caracteres')
+});
+
+router.post('/login', loginLimiter, async (req, res) => {
+    const validation = loginSchema.safeParse(req.body);
+    if (!validation.success) {
+        return res.status(400).json({ 
+            message: 'Datos de entrada inválidos',
+            errors: validation.error.issues.map((e: z.ZodIssue) => e.message)
+        });
+    }
+
+    const { email, password } = validation.data;
 
     try {
         const user = await prisma.usuario.findUnique({
@@ -55,8 +79,16 @@ router.post('/login', async (req, res) => {
 
 // Change password (logged in user)
 router.post('/change-password', authenticateToken, async (req, res) => {
+    const validation = changePasswordSchema.safeParse(req.body);
+    if (!validation.success) {
+        return res.status(400).json({ 
+            message: 'Datos de entrada inválidos',
+            errors: validation.error.issues.map((e: z.ZodIssue) => e.message)
+        });
+    }
+
     const { id } = (req as AuthRequest).user!;
-    const { currentPassword, newPassword } = req.body;
+    const { currentPassword, newPassword } = validation.data;
 
     try {
         const user = await prisma.usuario.findUnique({ where: { id } });
@@ -79,9 +111,17 @@ router.post('/change-password', authenticateToken, async (req, res) => {
 
 // Reset password (admin only)
 router.post('/reset-password/:userId', authenticateToken, async (req, res) => {
+    const validation = resetPasswordSchema.safeParse(req.body);
+    if (!validation.success) {
+        return res.status(400).json({ 
+            message: 'Datos de entrada inválidos',
+            errors: validation.error.issues.map((e: z.ZodIssue) => e.message)
+        });
+    }
+
     const { role, inmobiliariaId } = (req as AuthRequest).user!;
     const { userId } = req.params;
-    const { newPassword } = req.body;
+    const { newPassword } = validation.data;
 
     if (role !== 'ADMIN') {
         return res.status(403).json({ message: 'Acceso denegado' });
@@ -103,6 +143,58 @@ router.post('/reset-password/:userId', authenticateToken, async (req, res) => {
         res.json({ message: 'Contraseña reseteada con éxito' });
     } catch (error) {
         res.status(500).json({ message: 'Error al resetear contraseña' });
+    }
+});
+
+// Setup Initial SuperAdmin (Solo se puede usar si no existe ninguno)
+router.post('/setup-superadmin', async (req, res) => {
+    try {
+        const existingSuperAdmin = await prisma.usuario.findFirst({
+            where: { rol: 'SUPERADMIN' }
+        });
+        
+        if (existingSuperAdmin) {
+            return res.status(403).json({ message: 'Ya existe un administrador global configurado' });
+        }
+
+        const { email, password, nombreCompleto } = req.body;
+        
+        if (!email || !password || !nombreCompleto) {
+            return res.status(400).json({ message: 'Faltan datos obligatorios para inicializar' });
+        }
+
+        // Enlazar al super admin a la primera inmobiliaria existente (Foreign Key)
+        // El rol de SUPERADMIN ignora la restricción de inmobiliariaId posteriormente.
+        let rootInmo = await prisma.inmobiliaria.findFirst();
+
+        if (!rootInmo) {
+            rootInmo = await prisma.inmobiliaria.create({
+                data: {
+                    nombre: 'SaaS Platform Home',
+                    activa: true
+                }
+            });
+        }
+        
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        const superAdmin = await prisma.usuario.create({
+            data: {
+                email,
+                password: hashedPassword,
+                nombreCompleto,
+                rol: 'SUPERADMIN',
+                inmobiliariaId: rootInmo.id
+            }
+        });
+        
+        res.status(201).json({ 
+            message: 'Super Administrador inicializado con éxito', 
+            email: superAdmin.email 
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Error crítico de inicialización' });
     }
 });
 

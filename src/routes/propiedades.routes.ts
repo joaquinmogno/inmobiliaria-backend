@@ -9,10 +9,17 @@ router.use(authenticateToken);
 // Get all properties
 router.get('/', async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
+    const { search } = req.query;
+
     try {
         const properties = await prisma.propiedad.findMany({
-            where: { inmobiliariaId },
-            include: { propietario: true },
+            where: {
+                inmobiliariaId,
+                ...(search ? {
+                    direccion: { contains: String(search), mode: 'insensitive' }
+                } : {})
+            },
+            // propietario removed from include as it is no longer directly linked
             orderBy: { direccion: 'asc' }
         });
         res.json(properties);
@@ -24,24 +31,17 @@ router.get('/', async (req, res) => {
 // Create property
 router.post('/', async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
-    const { direccion, piso, departamento, propietarioId } = req.body;
+    const { direccion, piso, departamento, tipo, estado, observaciones } = req.body;
 
     try {
-        // Verify owner exists and belongs to agency
-        const owner = await prisma.propietario.findFirst({
-            where: { id: Number(propietarioId), inmobiliariaId }
-        });
-
-        if (!owner) {
-            return res.status(400).json({ message: 'Propietario inválido' });
-        }
-
         const property = await prisma.propiedad.create({
             data: {
                 direccion,
                 piso,
                 departamento,
-                propietarioId: Number(propietarioId),
+                tipo,
+                estado,
+                observaciones,
                 inmobiliariaId,
                 creadoPorId: (req as AuthRequest).user!.id
             }
@@ -56,7 +56,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { direccion, piso, departamento, propietarioId } = req.body;
+    const { direccion, piso, departamento, tipo, estado, observaciones } = req.body;
 
     try {
         const existing = await prisma.propiedad.findFirst({
@@ -67,22 +67,15 @@ router.put('/:id', async (req, res) => {
             return res.status(404).json({ message: 'Propiedad no encontrada' });
         }
 
-        if (propietarioId) {
-            const owner = await prisma.propietario.findFirst({
-                where: { id: Number(propietarioId), inmobiliariaId }
-            });
-            if (!owner) {
-                return res.status(400).json({ message: 'Propietario inválido' });
-            }
-        }
-
         const property = await prisma.propiedad.update({
             where: { id: Number(id) },
             data: {
                 direccion,
                 piso,
                 departamento,
-                propietarioId: propietarioId ? Number(propietarioId) : undefined,
+                tipo,
+                estado,
+                observaciones,
                 actualizadoPorId: (req as AuthRequest).user!.id
             }
         });
