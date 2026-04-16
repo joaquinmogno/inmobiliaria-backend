@@ -36,6 +36,7 @@ COPY --from=builder /app/tsconfig.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/scripts ./scripts
 RUN mkdir -p /app/uploads
 COPY docker-entrypoint.sh /app/
 RUN chmod +x /app/docker-entrypoint.sh

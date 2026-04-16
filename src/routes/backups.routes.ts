@@ -74,12 +74,15 @@ router.post('/db', isAdmin, async (req, res) => {
         const command = `pg_dump "${dbUrl}" > "${filepath}"`;
 
         console.log(`Ejecutando backup manual de DB: ${filename}`);
-        await execPromise(command);
+        const { stdout, stderr } = await execPromise(command);
+        if (stderr && stderr.toLowerCase().includes('error')) {
+            console.error('pg_dump stderr:', stderr);
+        }
 
         res.status(201).json({ message: 'Backup de base de datos generado', filename });
-    } catch (error) {
+    } catch (error: any) {
         console.error('Error generating manual DB backup:', error);
-        res.status(500).json({ message: 'Error al generar backup de base de datos' });
+        res.status(500).json({ message: 'Error al generar backup', details: error.message || String(error) });
     }
 });
 
