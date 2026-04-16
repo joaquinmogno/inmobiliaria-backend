@@ -22,6 +22,7 @@ import { apiLimiter } from './middlewares/rateLimiter.middleware';
 import helmet from 'helmet';
 
 const app = express();
+app.set('trust proxy', 1);
 
 // Security middlewares
 app.use(helmet({
