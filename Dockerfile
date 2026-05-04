@@ -2,6 +2,7 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 ENV PRISMA_ENGINES_CACHE_DIR=/app/prisma-engines
+RUN mkdir -p /app/prisma-engines
 
 ARG DATABASE_URL
 
