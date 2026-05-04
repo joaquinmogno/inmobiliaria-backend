@@ -1,19 +1,26 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
+import { requireAdmin } from '../middlewares/permissions.middleware';
+import { validateBody, requiredText } from '../middlewares/validation.middleware';
 import bcrypt from 'bcrypt';
+import { z } from 'zod';
 
 const router = Router();
 
 router.use(authenticateToken);
 
-// Middleware to check if user is ADMIN
-const isAdmin = (req: AuthRequest, res: any, next: any) => {
-    if (req.user?.role !== 'ADMIN') {
-        return res.status(403).json({ message: 'Acceso denegado. Se requiere rol de administrador.' });
-    }
-    next();
-};
+const createUserSchema = z.object({
+    email: z.string().trim().toLowerCase().email('Email inválido').max(254),
+    password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres').max(128),
+    nombreCompleto: requiredText('El nombre completo', 120),
+    rol: z.enum(['ADMIN', 'AGENTE']).optional().default('AGENTE')
+});
+
+const updateUserSchema = createUserSchema.omit({ password: true }).partial().refine(
+    data => Object.keys(data).length > 0,
+    { message: 'Debe indicar al menos un campo para actualizar' }
+);
 
 // Get all users of the agency
 router.get('/', async (req, res) => {
@@ -37,7 +44,7 @@ router.get('/', async (req, res) => {
 });
 
 // Create user
-router.post('/', isAdmin, async (req, res) => {
+router.post('/', requireAdmin, validateBody(createUserSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { email, password, nombreCompleto, rol } = req.body;
 
@@ -67,7 +74,7 @@ router.post('/', isAdmin, async (req, res) => {
 });
 
 // Update user
-router.put('/:id', isAdmin, async (req, res) => {
+router.put('/:id', requireAdmin, validateBody(updateUserSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { email, nombreCompleto, rol } = req.body;
@@ -98,7 +105,7 @@ router.put('/:id', isAdmin, async (req, res) => {
 });
 
 // Delete user
-router.delete('/:id', isAdmin, async (req, res) => {
+router.delete('/:id', requireAdmin, async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 

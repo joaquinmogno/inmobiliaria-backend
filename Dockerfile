@@ -1,6 +1,7 @@
 FROM node:20-alpine AS builder
 
 WORKDIR /app
+ENV PRISMA_ENGINES_CACHE_DIR=/app/prisma-engines
 
 ARG DATABASE_URL
 
@@ -30,10 +31,12 @@ ENV JWT_SECRET=${JWT_SECRET}
 ENV PORT=${PORT}
 ENV UPLOAD_DIR=${UPLOAD_DIR}
 ENV NODE_ENV=production
+ENV PRISMA_ENGINES_CACHE_DIR=/app/prisma-engines
 
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/tsconfig.json ./
 COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/prisma-engines ./prisma-engines
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/scripts ./scripts

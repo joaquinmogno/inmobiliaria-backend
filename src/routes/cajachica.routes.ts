@@ -3,8 +3,21 @@ import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
 import { TipoMovimiento, MetodoPago, CuentaCaja } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
+import { validateBody, requiredText, positiveDecimal, dateOnlyString, optionalText } from '../middlewares/validation.middleware';
+import { z } from 'zod';
+import { auditService } from '../services/audit.service';
 
 const router = Router();
+
+const movimientoCajaSchema = z.object({
+    tipo: z.enum(['INGRESO', 'DESCUENTO', 'EGRESO']),
+    concepto: requiredText('El concepto', 255),
+    monto: positiveDecimal('El monto'),
+    fecha: dateOnlyString('La fecha'),
+    metodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional().default('EFECTIVO'),
+    cuenta: z.enum(['CAJA', 'BANCO']).optional(),
+    observaciones: optionalText(1000)
+});
 
 // Obtener movimientos de caja con filtros y paginación
 router.get('/', authenticateToken, async (req, res) => {
@@ -158,7 +171,7 @@ router.get('/', authenticateToken, async (req, res) => {
 });
 
 // Crear nuevo movimiento manual
-router.post('/', authenticateToken, async (req, res) => {
+router.post('/', authenticateToken, validateBody(movimientoCajaSchema), async (req, res) => {
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
     const { tipo, concepto, monto, fecha, metodoPago, cuenta, observaciones } = req.body;
 
@@ -184,6 +197,15 @@ router.post('/', authenticateToken, async (req, res) => {
                 observaciones,
                 creadoPorId: usuarioId
             }
+        });
+
+        await auditService.log({
+            usuarioId,
+            inmobiliariaId,
+            accion: 'CREAR_MOVIMIENTO_CAJA',
+            entidad: 'MovimientoCaja',
+            entidadId: movimiento.id,
+            detalle: `${movimiento.tipo}: ${movimiento.concepto} por $${movimiento.monto}`
         });
 
         res.status(201).json(movimiento);

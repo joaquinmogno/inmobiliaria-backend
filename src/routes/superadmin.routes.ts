@@ -1,20 +1,13 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
-import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
+import { authenticateToken } from '../middlewares/auth.middleware';
+import { requireSuperAdmin } from '../middlewares/permissions.middleware';
 import bcrypt from 'bcrypt';
 
 const router = Router();
 
-// Middleware de verificación exclusiva para SUPERADMIN
-const isSuperAdmin = (req: AuthRequest, res: any, next: any) => {
-    if (req.user?.role !== 'SUPERADMIN') {
-        return res.status(403).json({ message: 'Acceso exclusivo para Super Administradores' });
-    }
-    next();
-};
-
 router.use(authenticateToken);
-router.use(isSuperAdmin);
+router.use(requireSuperAdmin);
 
 // Métricas Globales
 router.get('/metrics', async (req, res) => {

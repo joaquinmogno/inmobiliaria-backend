@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
+import { requireAdmin } from '../middlewares/permissions.middleware';
 import { Decimal } from '@prisma/client/runtime/library';
 import { auditService } from '../services/audit.service';
 
@@ -47,13 +48,9 @@ router.get('/', async (req, res) => {
 });
 
 // Create salary payment (Admin only)
-router.post('/', async (req, res) => {
-    const { id: adminId, role, inmobiliariaId } = (req as AuthRequest).user!;
+router.post('/', requireAdmin, async (req, res) => {
+    const { id: adminId, inmobiliariaId } = (req as AuthRequest).user!;
     const { usuarioId, monto, fecha, periodo, metodoPago, observaciones } = req.body;
-
-    if (role !== 'ADMIN' && role !== 'SUPERADMIN') {
-        return res.status(403).json({ message: 'No tiene permisos para registrar sueldos' });
-    }
 
     if (!usuarioId || !monto || !fecha || !periodo) {
         return res.status(400).json({ message: 'Faltan datos obligatorios' });

@@ -4,8 +4,18 @@ import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
 import { MetodoPago, EstadoLiquidacion } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { auditService } from '../services/audit.service';
+import { validateBody, positiveDecimal, optionalDateOnlyString, optionalText } from '../middlewares/validation.middleware';
+import { z } from 'zod';
 
 const router = Router();
+
+const pagoSchema = z.object({
+    contratoId: z.coerce.number().int().positive('Contrato inválido'),
+    monto: positiveDecimal('El monto'),
+    fechaPago: optionalDateOnlyString('La fecha de pago'),
+    metodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional().default('EFECTIVO'),
+    observaciones: optionalText(1000)
+});
 
 /**
  * Obtener todos los pagos de la inmobiliaria (Global) con paginación y búsqueda
@@ -38,6 +48,9 @@ router.get('/', authenticateToken, async (req, res) => {
         const pagos = await prisma.pago.findMany({
             where: whereClause,
             include: {
+                creadoPor: {
+                    select: { id: true, nombreCompleto: true, email: true }
+                },
                 liquidacion: {
                     include: {
                         contrato: {
@@ -55,8 +68,27 @@ router.get('/', authenticateToken, async (req, res) => {
             take: limitNum
         });
 
+        const auditLogs = await prisma.auditLog.findMany({
+            where: {
+                inmobiliariaId,
+                entidad: 'Pago',
+                entidadId: { in: pagos.map(p => p.id) }
+            },
+            include: {
+                usuario: {
+                    select: { id: true, nombreCompleto: true, email: true }
+                }
+            },
+            orderBy: { fechaCreacion: 'desc' }
+        });
+
+        const pagosConAuditoria = pagos.map(pago => ({
+            ...pago,
+            auditLogs: auditLogs.filter(log => log.entidadId === pago.id)
+        }));
+
         res.json({
-            data: pagos,
+            data: pagosConAuditoria,
             meta: {
                 total,
                 page: pageNum,
@@ -74,15 +106,19 @@ router.get('/', authenticateToken, async (req, res) => {
  * Registrar un pago entregado por el inquilino.
  * El monto se distribuye automáticamente entre las liquidaciones adeudadas más antiguas.
  */
-router.post('/', authenticateToken, async (req, res) => {
+router.post('/', authenticateToken, validateBody(pagoSchema), async (req, res) => {
     const { contratoId, monto, fechaPago, metodoPago, observaciones } = req.body;
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
 
-    if (!contratoId || !monto || monto <= 0) {
-        return res.status(400).json({ message: 'Datos de pago inválidos' });
-    }
-
     try {
+        const contrato = await prisma.contrato.findFirst({
+            where: { id: Number(contratoId), inmobiliariaId }
+        });
+
+        if (!contrato) {
+            return res.status(404).json({ message: 'Contrato no encontrado' });
+        }
+
         // Ejecutamos todo en una transacción para asegurar integridad
         const result = await prisma.$transaction(async (tx) => {
             // 1. Buscar liquidaciones del contrato que no sean borrador y no estén pagadas del todo
@@ -181,8 +217,6 @@ router.post('/', authenticateToken, async (req, res) => {
             };
         });
 
-        res.status(201).json(result);
-
         await auditService.log({
             usuarioId,
             inmobiliariaId,
@@ -191,6 +225,26 @@ router.post('/', authenticateToken, async (req, res) => {
             entidadId: Number(contratoId),
             detalle: `Pago registrado por $${monto} aplicado a ${result.pagos.length} liquidaciones.`
         });
+
+        await Promise.all(result.pagos.map((pago) => auditService.log({
+            usuarioId,
+            inmobiliariaId,
+            accion: 'REGISTRAR_PAGO',
+            entidad: 'Pago',
+            entidadId: pago.id,
+            detalle: `Pago registrado por $${pago.monto} para liquidación ${pago.liquidacionId}`
+        })));
+
+        await Promise.all(result.pagos.map((pago) => auditService.log({
+            usuarioId,
+            inmobiliariaId,
+            accion: 'REGISTRAR_PAGO_LIQUIDACION',
+            entidad: 'Liquidacion',
+            entidadId: pago.liquidacionId,
+            detalle: `Pago de inquilino registrado por $${pago.monto}`
+        })));
+
+        res.status(201).json(result);
     } catch (error: any) {
         console.error(error);
         res.status(400).json({ message: error.message || 'Error al registrar el pago' });
@@ -211,6 +265,9 @@ router.get('/contrato/:id', authenticateToken, async (req, res) => {
                 inmobiliariaId
             },
             include: {
+                creadoPor: {
+                    select: { id: true, nombreCompleto: true, email: true }
+                },
                 liquidacion: {
                     select: { periodo: true, netoACobrar: true }
                 }

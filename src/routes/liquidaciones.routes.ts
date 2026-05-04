@@ -5,10 +5,48 @@ import { Decimal } from '@prisma/client/runtime/library';
 import { EstadoLiquidacion } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { auditService } from '../services/audit.service';
+import {
+    validateBody,
+    requiredText,
+    positiveDecimal,
+    nonNegativeDecimal,
+    dateOnlyString,
+    optionalDateOnlyString,
+    optionalText
+} from '../middlewares/validation.middleware';
+import { z } from 'zod';
 
 const router = Router();
 
 router.use(authenticateToken);
+
+const liquidacionCreateSchema = z.object({
+    contratoId: z.coerce.number().int().positive('Contrato inválido'),
+    periodo: dateOnlyString('El período'),
+    montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional().default(0),
+    porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional()),
+    cuotasIds: z.array(z.coerce.number().int().positive()).optional()
+});
+
+const movimientoSchema = z.object({
+    tipo: z.enum(['INGRESO', 'DESCUENTO', 'EGRESO']),
+    concepto: requiredText('El concepto', 255),
+    monto: positiveDecimal('El monto'),
+    observaciones: optionalText(1000)
+});
+
+const honorariosSchema = z.object({
+    montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional(),
+    porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional())
+}).refine(data => data.montoHonorarios !== undefined || data.porcentajeHonorarios !== undefined, {
+    message: 'Debe indicar monto o porcentaje de honorarios'
+});
+
+const pagoPropietarioSchema = z.object({
+    fechaPago: optionalDateOnlyString('La fecha de pago'),
+    metodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional().default('EFECTIVO'),
+    observaciones: optionalText(1000)
+});
 
 // Helper para generar concepto descriptivo de movimientos de caja
 function generarConcepto(tipo: string, liquidacion: any): string {
@@ -139,7 +177,19 @@ router.get('/:id', async (req, res) => {
                         propietarios: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } }
                     }
                 },
-                pagos: true
+                pagos: {
+                    include: {
+                        creadoPor: {
+                            select: { id: true, nombreCompleto: true, email: true }
+                        }
+                    }
+                },
+                creadoPor: {
+                    select: { id: true, nombreCompleto: true, email: true }
+                },
+                cerradoPor: {
+                    select: { id: true, nombreCompleto: true, email: true }
+                }
             }
         }) as any;
 
@@ -147,14 +197,20 @@ router.get('/:id', async (req, res) => {
             return res.status(404).json({ message: 'Liquidación no encontrada' });
         }
 
-        res.json(liquidacion);
+        const auditLogs = await auditService.history({
+            inmobiliariaId,
+            entidad: 'Liquidacion',
+            entidadId: Number(id)
+        });
+
+        res.json({ ...liquidacion, auditLogs });
     } catch (error) {
         res.status(500).json({ message: 'Error al obtener detalle de liquidación' });
     }
 });
 
 // Crear una nueva liquidación (Borrador)
-router.post('/', async (req, res) => {
+router.post('/', validateBody(liquidacionCreateSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { contratoId, periodo, montoHonorarios, porcentajeHonorarios, cuotasIds } = req.body; // periodo: "YYYY-MM-01"
 
@@ -247,7 +303,7 @@ router.post('/', async (req, res) => {
 });
 
 // Agregar un movimiento
-router.post('/:id/movimientos', async (req, res) => {
+router.post('/:id/movimientos', validateBody(movimientoSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { tipo, concepto, monto, observaciones } = req.body;
@@ -317,6 +373,16 @@ router.delete('/movimientos/:movimientoId', async (req, res) => {
         });
 
         const actualizada = await recalcularTotales(movimiento.liquidacionId);
+
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId,
+            accion: 'ELIMINAR_MOVIMIENTO',
+            entidad: 'Liquidacion',
+            entidadId: movimiento.liquidacionId,
+            detalle: `${movimiento.tipo}: ${movimiento.concepto} por monto ${movimiento.monto}`
+        });
+
         res.json(actualizada);
     } catch (error) {
         res.status(500).json({ message: 'Error al eliminar movimiento' });
@@ -373,7 +439,7 @@ router.patch('/:id/confirmar', async (req, res) => {
 
 
 // Actualizar honorarios de una liquidación
-router.patch('/:id/honorarios', async (req, res) => {
+router.patch('/:id/honorarios', validateBody(honorariosSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { montoHonorarios, porcentajeHonorarios } = req.body;
@@ -408,6 +474,18 @@ router.patch('/:id/honorarios', async (req, res) => {
                     } 
                 }
             }
+        });
+
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId,
+            accion: 'ACTUALIZAR_HONORARIOS_LIQUIDACION',
+            entidad: 'Liquidacion',
+            entidadId: Number(id),
+            detalle: JSON.stringify({
+                montoHonorarios: { anterior: liquidacion.montoHonorarios.toString(), nuevo: montoHonorarios },
+                porcentajeHonorarios: { anterior: liquidacion.porcentajeHonorarios?.toString() || null, nuevo: porcentajeHonorarios }
+            })
         });
 
         res.json(actualizada);
@@ -454,7 +532,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Registrar pago al propietario
-router.patch('/:id/pagar-propietario', async (req, res) => {
+router.patch('/:id/pagar-propietario', validateBody(pagoPropietarioSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { fechaPago, metodoPago, observaciones } = req.body;
@@ -495,7 +573,9 @@ router.patch('/:id/pagar-propietario', async (req, res) => {
                 data: {
                     estado: 'LIQUIDADA',
                     fechaPagoPropietario: new Date(fechaPago || new Date()),
-                    metodoPagoPropietario: metodoPago || 'EFECTIVO'
+                    metodoPagoPropietario: metodoPago || 'EFECTIVO',
+                    cerradoPorId: (req as AuthRequest).user!.id,
+                    fechaLiquidacion: new Date()
                 }
             });
 

@@ -3,23 +3,38 @@ import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
 import { TipoMovimiento, EstadoPlanCuotas, EstadoCuota } from '@prisma/client';
 import { auditService } from '../services/audit.service';
+import { validateBody, requiredText, positiveDecimal, booleanFromForm } from '../middlewares/validation.middleware';
+import { z } from 'zod';
 
 const router = Router();
 
 router.use(authenticateToken);
 
+const planCuotasSchema = z.object({
+    contratoId: z.coerce.number().int().positive('Contrato inválido'),
+    concepto: requiredText('El concepto', 255),
+    montoTotal: positiveDecimal('El monto total'),
+    cantidadCuotas: z.coerce.number().int().min(1, 'Debe tener al menos una cuota').max(120, 'Máximo 120 cuotas'),
+    tipoMovimiento: z.enum(['INGRESO', 'DESCUENTO', 'EGRESO']),
+    esParaInmobiliaria: booleanFromForm.optional().default(false)
+});
+
 /**
  * Crear un nuevo plan de cuotas
  */
-router.post('/', async (req, res) => {
+router.post('/', validateBody(planCuotasSchema), async (req, res) => {
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
     const { contratoId, concepto, montoTotal, cantidadCuotas, tipoMovimiento, esParaInmobiliaria } = req.body;
 
-    if (!contratoId || !concepto || !montoTotal || !cantidadCuotas || !tipoMovimiento) {
-        return res.status(400).json({ message: 'Faltan datos requeridos' });
-    }
-
     try {
+        const contrato = await prisma.contrato.findFirst({
+            where: { id: Number(contratoId), inmobiliariaId }
+        });
+
+        if (!contrato) {
+            return res.status(404).json({ message: 'Contrato no encontrado' });
+        }
+
         const montoCuota = Number(montoTotal) / Number(cantidadCuotas);
 
         const plan = await prisma.$transaction(async (tx) => {

@@ -10,8 +10,14 @@ const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_key_change_me';
 
 const loginSchema = z.object({
-    email: z.string().email('Email inválido'),
-    password: z.string().min(6, 'La contraseña debe tener al menos 6 caracteres')
+    email: z.string()
+        .trim()
+        .toLowerCase()
+        .email('Email inválido')
+        .max(254, 'Email demasiado largo'),
+    password: z.string()
+        .min(6, 'La contraseña debe tener al menos 6 caracteres')
+        .max(128, 'Contraseña demasiado larga')
 });
 
 const changePasswordSchema = z.object({
@@ -21,6 +27,12 @@ const changePasswordSchema = z.object({
 
 const resetPasswordSchema = z.object({
     newPassword: z.string().min(6, 'La nueva contraseña debe tener al menos 6 caracteres')
+});
+
+const setupSuperAdminSchema = z.object({
+    email: z.string().trim().toLowerCase().email('Email inválido').max(254, 'Email demasiado largo'),
+    password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres').max(128, 'Contraseña demasiado larga'),
+    nombreCompleto: z.string().trim().min(2, 'El nombre es obligatorio').max(120, 'Nombre demasiado largo')
 });
 
 router.post('/login', loginLimiter, async (req, res) => {
@@ -42,6 +54,10 @@ router.post('/login', loginLimiter, async (req, res) => {
 
         if (!user) {
             return res.status(401).json({ message: 'Credenciales inválidas' });
+        }
+
+        if (user.rol !== 'SUPERADMIN' && (!user.inmobiliaria || !user.inmobiliaria.activa)) {
+            return res.status(403).json({ message: 'Cuenta suspendida, contacte al administrador' });
         }
 
         const validPassword = await bcrypt.compare(password, user.password);
@@ -149,6 +165,14 @@ router.post('/reset-password/:userId', authenticateToken, async (req, res) => {
 // Setup Initial SuperAdmin (Solo se puede usar si no existe ninguno)
 router.post('/setup-superadmin', async (req, res) => {
     try {
+        const validation = setupSuperAdminSchema.safeParse(req.body);
+        if (!validation.success) {
+            return res.status(400).json({
+                message: 'Datos de entrada inválidos',
+                errors: validation.error.issues.map((e: z.ZodIssue) => e.message)
+            });
+        }
+
         const existingSuperAdmin = await prisma.usuario.findFirst({
             where: { rol: 'SUPERADMIN' }
         });
@@ -157,11 +181,7 @@ router.post('/setup-superadmin', async (req, res) => {
             return res.status(403).json({ message: 'Ya existe un administrador global configurado' });
         }
 
-        const { email, password, nombreCompleto } = req.body;
-        
-        if (!email || !password || !nombreCompleto) {
-            return res.status(400).json({ message: 'Faltan datos obligatorios para inicializar' });
-        }
+        const { email, password, nombreCompleto } = validation.data;
 
         // Enlazar al super admin a la primera inmobiliaria existente (Foreign Key)
         // El rol de SUPERADMIN ignora la restricción de inmobiliariaId posteriormente.

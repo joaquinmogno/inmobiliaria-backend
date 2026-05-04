@@ -1,11 +1,14 @@
 import { Router } from 'express';
-import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
+import { authenticateToken } from '../middlewares/auth.middleware';
+import { AuthRequest } from '../middlewares/auth.middleware';
+import { requireAdmin } from '../middlewares/permissions.middleware';
+import { auditService } from '../services/audit.service';
 import path from 'path';
 import fs from 'fs';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 
-const execPromise = promisify(exec);
+const execFilePromise = promisify(execFile);
 const router = Router();
 
 // Directorios de backups e scripts
@@ -14,31 +17,43 @@ const SCRIPTS_DIR = process.env.SCRIPTS_DIR || path.join(__dirname, '../../scrip
 const DB_BACKUPS_DIR = path.join(BACKUPS_ROOT, 'db');
 const UPLOADS_BACKUPS_DIR = path.join(BACKUPS_ROOT, 'uploads');
 const BACKUP_SCRIPT_PATH = path.join(SCRIPTS_DIR, 'backup-uploads.sh');
+const BACKUP_FILENAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
 
 router.use(authenticateToken);
 
-// Middleware para verificar que sea ADMIN
-const isAdmin = (req: AuthRequest, res: any, next: any) => {
-    if (req.user?.role !== 'ADMIN') {
-        return res.status(403).json({ message: 'Acceso denegado: Se requiere rol de Administrador' });
-    }
-    next();
+const getBackupDir = (type: string) => {
+    if (type === 'db') return DB_BACKUPS_DIR;
+    if (type === 'uploads') return UPLOADS_BACKUPS_DIR;
+    return null;
+};
+
+const resolveBackupPath = (type: string, filename: string) => {
+    const baseDir = getBackupDir(type);
+    if (!baseDir || !BACKUP_FILENAME_PATTERN.test(filename)) return null;
+
+    const resolvedBase = path.resolve(baseDir);
+    const resolvedFile = path.resolve(resolvedBase, filename);
+
+    if (!resolvedFile.startsWith(`${resolvedBase}${path.sep}`)) return null;
+    return resolvedFile;
 };
 
 // Listar todos los backups
-router.get('/', isAdmin, async (req, res) => {
+router.get('/', requireAdmin, async (req, res) => {
     try {
         const getFiles = (dir: string, type: 'db' | 'uploads') => {
             if (!fs.existsSync(dir)) return [];
             return fs.readdirSync(dir)
-                .map(file => {
+                .filter(file => BACKUP_FILENAME_PATTERN.test(file))
+                .flatMap(file => {
                     const stats = fs.statSync(path.join(dir, file));
-                    return {
+                    if (!stats.isFile()) return [];
+                    return [{
                         name: file,
                         size: stats.size,
                         date: stats.mtime,
                         type
-                    };
+                    }];
                 })
                 .sort((a, b) => b.date.getTime() - a.date.getTime());
         };
@@ -54,7 +69,7 @@ router.get('/', isAdmin, async (req, res) => {
 });
 
 // Generar backup manual de DB
-router.post('/db', isAdmin, async (req, res) => {
+router.post('/db', requireAdmin, async (req, res) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `manual-db-backup-${timestamp}.sql`;
     const filepath = path.join(DB_BACKUPS_DIR, filename);
@@ -70,14 +85,19 @@ router.post('/db', isAdmin, async (req, res) => {
             throw new Error('DATABASE_URL no está definida');
         }
 
-        // Forma rápida de ejecutar pg_dump usando la URL directamente
-        const command = `pg_dump "${dbUrl}" > "${filepath}"`;
-
         console.log(`Ejecutando backup manual de DB: ${filename}`);
-        const { stdout, stderr } = await execPromise(command);
+        const { stderr } = await execFilePromise('pg_dump', [dbUrl, '-f', filepath]);
         if (stderr && stderr.toLowerCase().includes('error')) {
             console.error('pg_dump stderr:', stderr);
         }
+
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId,
+            accion: 'CREAR_BACKUP_DB',
+            entidad: 'Backup',
+            detalle: filename
+        });
 
         res.status(201).json({ message: 'Backup de base de datos generado', filename });
     } catch (error: any) {
@@ -87,15 +107,23 @@ router.post('/db', isAdmin, async (req, res) => {
 });
 
 // Generar backup manual de Uploads
-router.post('/uploads', isAdmin, async (req, res) => {
+router.post('/uploads', requireAdmin, async (req, res) => {
     try {
         console.log('Ejecutando backup manual de archivos...');
-        const { stdout } = await execPromise(`sh ${BACKUP_SCRIPT_PATH}`, {
+        const { stdout } = await execFilePromise('sh', [BACKUP_SCRIPT_PATH], {
             env: {
                 ...process.env,
                 BACKUPS_DIR: BACKUPS_ROOT,
                 UPLOAD_DIR: process.env.UPLOAD_DIR || path.join(__dirname, '../../../uploads')
             }
+        });
+
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId,
+            accion: 'CREAR_BACKUP_UPLOADS',
+            entidad: 'Backup',
+            detalle: stdout || 'Backup de archivos generado'
         });
         
         res.status(201).json({ message: 'Backup de archivos iniciado', output: stdout });
@@ -106,12 +134,11 @@ router.post('/uploads', isAdmin, async (req, res) => {
 });
 
 // Descargar un backup
-router.get('/download/:type/:filename', isAdmin, (req, res) => {
+router.get('/download/:type/:filename', requireAdmin, (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
-    const baseDir = type === 'db' ? DB_BACKUPS_DIR : UPLOADS_BACKUPS_DIR;
-    const filepath = path.join(baseDir, filename);
+    const filepath = resolveBackupPath(type, filename);
 
-    if (!fs.existsSync(filepath)) {
+    if (!filepath || !fs.existsSync(filepath)) {
         return res.status(404).json({ message: 'Archivo no encontrado' });
     }
 
@@ -119,14 +146,22 @@ router.get('/download/:type/:filename', isAdmin, (req, res) => {
 });
 
 // Eliminar un backup
-router.delete('/:type/:filename', isAdmin, (req, res) => {
+router.delete('/:type/:filename', requireAdmin, (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
-    const baseDir = type === 'db' ? DB_BACKUPS_DIR : UPLOADS_BACKUPS_DIR;
-    const filepath = path.join(baseDir, filename);
+    const filepath = resolveBackupPath(type, filename);
 
     try {
-        if (fs.existsSync(filepath)) {
+        if (filepath && fs.existsSync(filepath)) {
             fs.unlinkSync(filepath);
+
+            auditService.log({
+                usuarioId: (req as AuthRequest).user!.id,
+                inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId,
+                accion: 'ELIMINAR_BACKUP',
+                entidad: 'Backup',
+                detalle: `${type}/${filename}`
+            });
+
             res.json({ message: 'Backup eliminado exitosamente' });
         } else {
             res.status(404).json({ message: 'Archivo no encontrado' });

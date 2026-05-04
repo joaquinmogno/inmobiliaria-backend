@@ -24,5 +24,29 @@ export const auditService = {
       console.error('Error recording audit log:', error);
       // No lanzamos el error para no bloquear la acción principal
     }
+  },
+
+  history: async (params: {
+    inmobiliariaId: number;
+    entidad: string;
+    entidadId: number;
+  }) => {
+    return prisma.auditLog.findMany({
+      where: {
+        inmobiliariaId: params.inmobiliariaId,
+        entidad: params.entidad,
+        entidadId: params.entidadId
+      },
+      include: {
+        usuario: {
+          select: {
+            id: true,
+            nombreCompleto: true,
+            email: true
+          }
+        }
+      },
+      orderBy: { fechaCreacion: 'desc' }
+    });
   }
 };
