@@ -38,6 +38,12 @@ const resolveBackupPath = (type: string, filename: string) => {
     return resolvedFile;
 };
 
+const getPgDumpUrl = (databaseUrl: string) => {
+    const url = new URL(databaseUrl);
+    url.searchParams.delete('schema');
+    return url.toString();
+};
+
 // Listar todos los backups
 router.get('/', requireAdmin, async (req, res) => {
     try {
@@ -86,7 +92,10 @@ router.post('/db', requireAdmin, async (req, res) => {
         }
 
         console.log(`Ejecutando backup manual de DB: ${filename}`);
-        const { stderr } = await execFilePromise('pg_dump', [dbUrl, '-f', filepath]);
+        const pgDumpUrl = getPgDumpUrl(dbUrl);
+        const { stderr } = await execFilePromise('pg_dump', ['-f', filepath, pgDumpUrl], {
+            maxBuffer: 1024 * 1024 * 10
+        });
         if (stderr && stderr.toLowerCase().includes('error')) {
             console.error('pg_dump stderr:', stderr);
         }

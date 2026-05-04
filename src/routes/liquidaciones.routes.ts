@@ -541,7 +541,14 @@ router.patch('/:id/pagar-propietario', validateBody(pagoPropietarioSchema), asyn
         const result = await prisma.$transaction(async (tx) => {
             const liquidacion = await tx.liquidacion.findFirst({
                 where: { id: Number(id), inmobiliariaId },
-                include: { contrato: true }
+                include: {
+                    contrato: {
+                        include: {
+                            propiedad: true,
+                            propietarios: { where: { esPrincipal: true }, include: { persona: true } }
+                        }
+                    }
+                }
             });
 
             if (!liquidacion) {
@@ -598,7 +605,13 @@ router.patch('/:id/pagar-propietario', validateBody(pagoPropietarioSchema), asyn
                 });
             }
 
-            return actualizada;
+            return {
+                ...actualizada,
+                montoPropietario: montoPropietario.toString(),
+                propiedadDireccion: liquidacion.contrato?.propiedad?.direccion || 'Sin dirección',
+                propietarioNombre: liquidacion.contrato?.propietarios?.[0]?.persona?.nombreCompleto || 'Sin propietario',
+                periodoTexto: new Date(liquidacion.periodo).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+            };
         });
 
         await auditService.log({
@@ -607,7 +620,7 @@ router.patch('/:id/pagar-propietario', validateBody(pagoPropietarioSchema), asyn
             accion: 'PAGO_PROPIETARIO',
             entidad: 'Liquidacion',
             entidadId: Number(id),
-            detalle: `Pago al propietario registrado por liquidación ${id}`
+            detalle: `Pago a ${result.propietarioNombre} por $${Number(result.montoPropietario).toLocaleString('es-AR')} - ${result.propiedadDireccion} - ${result.periodoTexto}`
         });
 
         res.json(result);

@@ -226,23 +226,51 @@ router.post('/', authenticateToken, validateBody(pagoSchema), async (req, res) =
             detalle: `Pago registrado por $${monto} aplicado a ${result.pagos.length} liquidaciones.`
         });
 
-        await Promise.all(result.pagos.map((pago) => auditService.log({
+        const pagosConDetalle = await prisma.pago.findMany({
+            where: { id: { in: result.pagos.map(p => p.id) } },
+            include: {
+                liquidacion: {
+                    include: {
+                        contrato: {
+                            include: {
+                                propiedad: true,
+                                inquilinos: { where: { esPrincipal: true }, include: { persona: true } }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        await Promise.all(pagosConDetalle.map((pago) => {
+            const periodo = new Date(pago.liquidacion.periodo).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+            const propiedad = pago.liquidacion.contrato?.propiedad?.direccion || 'Sin dirección';
+            const inquilino = pago.liquidacion.contrato?.inquilinos?.[0]?.persona?.nombreCompleto || 'Sin inquilino';
+            const detalle = `Cobro a ${inquilino} por $${Number(pago.monto).toLocaleString('es-AR')} - ${propiedad} - ${periodo}`;
+
+            return auditService.log({
             usuarioId,
             inmobiliariaId,
             accion: 'REGISTRAR_PAGO',
             entidad: 'Pago',
             entidadId: pago.id,
-            detalle: `Pago registrado por $${pago.monto} para liquidación ${pago.liquidacionId}`
-        })));
+            detalle
+        });
+        }));
 
-        await Promise.all(result.pagos.map((pago) => auditService.log({
+        await Promise.all(pagosConDetalle.map((pago) => {
+            const periodo = new Date(pago.liquidacion.periodo).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+            const propiedad = pago.liquidacion.contrato?.propiedad?.direccion || 'Sin dirección';
+
+            return auditService.log({
             usuarioId,
             inmobiliariaId,
             accion: 'REGISTRAR_PAGO_LIQUIDACION',
             entidad: 'Liquidacion',
             entidadId: pago.liquidacionId,
-            detalle: `Pago de inquilino registrado por $${pago.monto}`
-        })));
+            detalle: `Cobro de inquilino por $${Number(pago.monto).toLocaleString('es-AR')} - ${propiedad} - ${periodo}`
+        });
+        }));
 
         res.status(201).json(result);
     } catch (error: any) {
