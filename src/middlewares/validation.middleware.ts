@@ -24,8 +24,14 @@ export const idParamSchema = z.coerce.number().int().positive('ID inválido');
 
 export const optionalText = (max = 255) =>
     z.preprocess(
-        value => value === '' ? undefined : value,
+        value => (value === '' || value === null) ? undefined : value,
         z.string().trim().max(max, `Máximo ${max} caracteres`).optional()
+    );
+
+export const optionalEmail = () =>
+    z.preprocess(
+        value => (value === '' || value === null) ? undefined : value,
+        z.string().trim().toLowerCase().email('Email inválido').max(254).optional()
     );
 
 export const requiredText = (field: string, max = 255) =>
@@ -48,7 +54,7 @@ export const dateOnlyString = (field: string) =>
 
 export const optionalDateOnlyString = (field: string) =>
     z.preprocess(
-        value => value === '' ? undefined : value,
+        value => (value === '' || value === null) ? undefined : value,
         dateOnlyString(field).optional()
     );
 

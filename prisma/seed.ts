@@ -5,7 +5,21 @@ import bcrypt from "bcrypt";
 const prisma = new PrismaClient();
 
 async function main() {
-    const passwordHash = await bcrypt.hash("admin123", 10);
+    if (process.env.RUN_DEMO_SEED !== "true") {
+        console.log("Seed omitido. Defina RUN_DEMO_SEED=true solo en entornos demo/desarrollo.");
+        return;
+    }
+
+    if (process.env.NODE_ENV === "production") {
+        throw new Error("RUN_DEMO_SEED no puede ejecutarse en produccion");
+    }
+
+    const demoPassword = process.env.DEMO_ADMIN_PASSWORD;
+    if (!demoPassword || demoPassword.length < 12) {
+        throw new Error("DEMO_ADMIN_PASSWORD debe tener al menos 12 caracteres para ejecutar el seed demo");
+    }
+
+    const passwordHash = await bcrypt.hash(demoPassword, 10);
 
     // 1. Inmobiliaria
     const inmobiliaria = await prisma.inmobiliaria.upsert({

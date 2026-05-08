@@ -33,8 +33,10 @@ app.use(helmet({
 app.use(apiLimiter);
 
 const allowedOrigins = [
-  'http://localhost:5173', // Vite default
-  'http://localhost:3000', // Local backend
+  ...(process.env.NODE_ENV === 'production' ? [] : [
+    'http://localhost:5173',
+    'http://localhost:3000'
+  ]),
   process.env.FRONTEND_URL
 ].filter(Boolean) as string[];
 

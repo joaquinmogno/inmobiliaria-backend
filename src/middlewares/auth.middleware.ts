@@ -1,8 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../prisma';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'secret_key_change_me';
+import { env } from '../config/env';
 
 export interface AuthRequest extends Request {
     user?: {
@@ -21,7 +20,7 @@ export const authenticateToken = (req: Request, res: Response, next: NextFunctio
         return res.status(401).json({ message: 'Token no proporcionado' });
     }
 
-    jwt.verify(token, JWT_SECRET, async (err: any, user: any) => {
+    jwt.verify(token, env.jwtSecret, async (err: any, user: any) => {
         if (err) {
             return res.status(403).json({ message: 'Token inválido' });
         }

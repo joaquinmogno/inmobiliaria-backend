@@ -5,9 +5,9 @@ import jwt from 'jsonwebtoken';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
 import { loginLimiter } from '../middlewares/rateLimiter.middleware';
 import { z } from 'zod';
+import { env } from '../config/env';
 
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'secret_key_change_me';
 
 const loginSchema = z.object({
     email: z.string()
@@ -73,7 +73,7 @@ router.post('/login', loginLimiter, async (req, res) => {
                 role: user.rol,
                 inmobiliariaId: user.inmobiliariaId
             },
-            JWT_SECRET,
+            env.jwtSecret,
             { expiresIn: '8h' }
         );
 

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
-import { validateBody, requiredText, optionalText } from '../middlewares/validation.middleware';
+import { validateBody, requiredText, optionalText, optionalEmail } from '../middlewares/validation.middleware';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
 
@@ -12,10 +12,7 @@ router.use(authenticateToken);
 const personaSchema = z.object({
     nombreCompleto: requiredText('El nombre completo', 140),
     dni: optionalText(30),
-    email: z.preprocess(
-        value => value === '' ? undefined : value,
-        z.string().trim().toLowerCase().email('Email inválido').max(254).optional()
-    ),
+    email: optionalEmail(),
     telefono: optionalText(40),
     direccion: optionalText(180),
     estado: z.enum(['ACTIVO', 'INACTIVO']).optional().default('ACTIVO')
