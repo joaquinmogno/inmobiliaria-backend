@@ -67,7 +67,7 @@ const propertyCandidateSchema = z.object({
     observaciones: optionalText(1000)
 });
 
-const contractCreateSchema = z.object({
+const contractCreateSchemaBase = z.object({
     fechaInicio: dateOnlyString('La fecha de inicio'),
     fechaFin: dateOnlyString('La fecha de fin'),
     fechaActualizacion: optionalDateOnlyString('La fecha de actualización'),
@@ -88,7 +88,9 @@ const contractCreateSchema = z.object({
     administrado: optionalBooleanFromForm.default(true),
     honorarioInicial: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El honorario inicial').optional()),
     honorarioInicialMetodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional()
-}).superRefine((value, ctx) => {
+});
+
+const contractCreateSchema = contractCreateSchemaBase.superRefine((value, ctx) => {
     if (!value.propiedadId && !value.propiedad) {
         ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -130,7 +132,7 @@ const contractCreateSchema = z.object({
     }
 });
 
-const contractUpdateSchema = contractCreateSchema
+const contractUpdateSchema = contractCreateSchemaBase
     .omit({ propiedadId: true, propietarioIds: true, inquilinoIds: true, honorarioInicial: true, honorarioInicialMetodoPago: true })
     .partial();
 
