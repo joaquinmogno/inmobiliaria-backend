@@ -11,13 +11,28 @@ import {
     nonNegativeDecimal,
     positiveDecimal,
     optionalText,
-    optionalBooleanFromForm
+    optionalBooleanFromForm,
+    optionalEmail,
+    requiredText
 } from '../middlewares/validation.middleware';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
+import { logger } from '../services/logger.service';
+import { AppError } from '../errors/app-error';
 
 const router = Router();
 
 router.use(authenticateToken);
+
+const parseJsonField = <T extends z.ZodTypeAny>(schema: T) => z.preprocess(value => {
+    if (typeof value !== 'string') return value;
+
+    try {
+        return JSON.parse(value);
+    } catch {
+        return value;
+    }
+}, schema);
 
 const idListFromForm = z.preprocess(value => {
     if (Array.isArray(value)) return value;
@@ -25,14 +40,44 @@ const idListFromForm = z.preprocess(value => {
     return value;
 }, z.array(z.coerce.number().int().positive()).min(1, 'Debe seleccionar al menos una persona'));
 
+const personCandidateSchema = z.object({
+    id: z.coerce.number().int().positive().optional(),
+    nombreCompleto: optionalText(140),
+    dni: optionalText(30),
+    email: optionalEmail(),
+    telefono: optionalText(40),
+    direccion: optionalText(180),
+    estado: z.enum(['ACTIVO', 'INACTIVO']).optional().default('ACTIVO')
+}).superRefine((value, ctx) => {
+    if (!value.id && !value.nombreCompleto) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['nombreCompleto'],
+            message: 'El nombre completo es obligatorio para una persona nueva'
+        });
+    }
+});
+
+const propertyCandidateSchema = z.object({
+    direccion: requiredText('La dirección', 180),
+    piso: optionalText(30),
+    departamento: optionalText(30),
+    tipo: z.enum(['DEPARTAMENTO', 'CASA', 'LOCAL', 'OTRO']).optional().default('DEPARTAMENTO'),
+    estado: z.enum(['DISPONIBLE', 'ALQUILADO', 'INACTIVO']).optional().default('DISPONIBLE'),
+    observaciones: optionalText(1000)
+});
+
 const contractCreateSchema = z.object({
     fechaInicio: dateOnlyString('La fecha de inicio'),
     fechaFin: dateOnlyString('La fecha de fin'),
     fechaActualizacion: optionalDateOnlyString('La fecha de actualización'),
     observaciones: optionalText(2000),
-    propiedadId: z.coerce.number().int().positive('Propiedad inválida'),
-    propietarioIds: idListFromForm,
-    inquilinoIds: idListFromForm,
+    propiedadId: z.coerce.number().int().positive('Propiedad inválida').optional(),
+    propiedad: parseJsonField(propertyCandidateSchema).optional(),
+    propietarioIds: idListFromForm.optional(),
+    inquilinoIds: idListFromForm.optional(),
+    propietarios: parseJsonField(z.array(personCandidateSchema).min(1, 'Debe seleccionar al menos un propietario')).optional(),
+    inquilinos: parseJsonField(z.array(personCandidateSchema).min(1, 'Debe seleccionar al menos un inquilino')).optional(),
     montoAlquiler: positiveDecimal('El monto de alquiler'),
     montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional().default(0),
     porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional()),
@@ -43,6 +88,46 @@ const contractCreateSchema = z.object({
     administrado: optionalBooleanFromForm.default(true),
     honorarioInicial: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El honorario inicial').optional()),
     honorarioInicialMetodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional()
+}).superRefine((value, ctx) => {
+    if (!value.propiedadId && !value.propiedad) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['propiedad'],
+            message: 'Debe seleccionar una propiedad existente o cargar una nueva'
+        });
+    }
+
+    if (!value.propietarioIds && !value.propietarios) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['propietarios'],
+            message: 'Debe indicar al menos un propietario'
+        });
+    }
+
+    if (!value.inquilinoIds && !value.inquilinos) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['inquilinos'],
+            message: 'Debe indicar al menos un inquilino'
+        });
+    }
+
+    if (parseDateOnly(value.fechaInicio) > parseDateOnly(value.fechaFin)) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['fechaFin'],
+            message: 'La fecha de fin debe ser posterior o igual a la fecha de inicio'
+        });
+    }
+
+    if (value.fechaActualizacion && parseDateOnly(value.fechaActualizacion) < parseDateOnly(value.fechaInicio)) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['fechaActualizacion'],
+            message: 'La próxima actualización no puede ser anterior al inicio del contrato'
+        });
+    }
 });
 
 const contractUpdateSchema = contractCreateSchema
@@ -163,73 +248,235 @@ function compactChanges(changes: Record<string, { anterior: unknown; nuevo: unkn
     });
 }
 
+type PersonCandidate = z.infer<typeof personCandidateSchema>;
+type PropertyCandidate = z.infer<typeof propertyCandidateSchema>;
+type ContractCreateInput = z.infer<typeof contractCreateSchema>;
+type TxClient = Prisma.TransactionClient;
+
+const ensureExistingProperty = async (tx: TxClient, inmobiliariaId: number, propiedadId: number) => {
+    const propiedad = await tx.propiedad.findFirst({
+        where: { id: propiedadId, inmobiliariaId }
+    });
+
+    if (!propiedad) {
+        throw new AppError('La propiedad seleccionada no existe o no pertenece a la inmobiliaria', {
+            statusCode: 400,
+            code: 'INVALID_PROPERTY_REFERENCE'
+        });
+    }
+
+    return propiedad;
+};
+
+const ensureExistingPeople = async (
+    tx: TxClient,
+    inmobiliariaId: number,
+    ids: number[],
+    roleLabel: 'propietario' | 'inquilino'
+) => {
+    const people = await tx.persona.findMany({
+        where: {
+            id: { in: ids },
+            inmobiliariaId
+        }
+    });
+
+    if (people.length !== ids.length) {
+        throw new AppError(`Uno o más ${roleLabel}s seleccionados no existen o no pertenecen a la inmobiliaria`, {
+            statusCode: 400,
+            code: 'INVALID_PERSON_REFERENCE'
+        });
+    }
+
+    const peopleById = new Map(people.map(person => [person.id, person.id]));
+    return ids.map(id => peopleById.get(id)!);
+};
+
+const createPropertyIfNeeded = async (
+    tx: TxClient,
+    payload: ContractCreateInput,
+    inmobiliariaId: number,
+    userId: number
+) => {
+    if (payload.propiedadId) {
+        return ensureExistingProperty(tx, inmobiliariaId, payload.propiedadId);
+    }
+
+    const propertyInput = payload.propiedad as PropertyCandidate | undefined;
+    if (!propertyInput) {
+        throw new AppError('Faltan los datos de la propiedad', {
+            statusCode: 400,
+            code: 'MISSING_PROPERTY_DATA'
+        });
+    }
+
+    return tx.propiedad.create({
+        data: {
+            ...propertyInput,
+            inmobiliariaId,
+            creadoPorId: userId
+        }
+    });
+};
+
+const createPeopleIfNeeded = async (
+    tx: TxClient,
+    candidates: PersonCandidate[] | undefined,
+    legacyIds: number[] | undefined,
+    inmobiliariaId: number,
+    userId: number,
+    roleLabel: 'propietario' | 'inquilino'
+) => {
+    if (candidates && candidates.length > 0) {
+        const resolvedIds: number[] = [];
+
+        for (const candidate of candidates) {
+            if (candidate.id) {
+                const existing = await tx.persona.findFirst({
+                    where: { id: candidate.id, inmobiliariaId }
+                });
+
+                if (!existing) {
+                    throw new AppError(`El ${roleLabel} seleccionado no existe o no pertenece a la inmobiliaria`, {
+                        statusCode: 400,
+                        code: 'INVALID_PERSON_REFERENCE'
+                    });
+                }
+
+                resolvedIds.push(existing.id);
+                continue;
+            }
+
+            if (candidate.dni) {
+                const duplicate = await tx.persona.findFirst({
+                    where: { dni: candidate.dni, inmobiliariaId }
+                });
+
+                if (duplicate) {
+                    throw new AppError(`Ya existe un ${roleLabel} con el DNI ${candidate.dni}`, {
+                        statusCode: 409,
+                        code: 'PERSON_DUPLICATE_DNI'
+                    });
+                }
+            }
+
+            const created = await tx.persona.create({
+                data: {
+                    nombreCompleto: candidate.nombreCompleto!,
+                    dni: candidate.dni,
+                    email: candidate.email,
+                    telefono: candidate.telefono,
+                    direccion: candidate.direccion,
+                    estado: candidate.estado || 'ACTIVO',
+                    inmobiliariaId,
+                    creadoPorId: userId
+                }
+            });
+
+            resolvedIds.push(created.id);
+        }
+
+        return resolvedIds;
+    }
+
+    if (!legacyIds || legacyIds.length === 0) {
+        throw new AppError(`Debe indicar al menos un ${roleLabel}`, {
+            statusCode: 400,
+            code: 'MISSING_CONTRACT_PARTY'
+        });
+    }
+
+    return ensureExistingPeople(tx, inmobiliariaId, legacyIds, roleLabel);
+};
+
+const buildContractCreateError = (error: unknown, req: AuthRequest) => {
+    if (error instanceof AppError) {
+        return error;
+    }
+
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        return new AppError('No se pudo guardar el contrato por un conflicto de datos en la base', {
+            statusCode: 409,
+            code: 'DATABASE_CONFLICT',
+            details: {
+                prismaCode: error.code,
+                target: error.meta?.target,
+                requestId: req.requestId
+            }
+        });
+    }
+
+    if (error instanceof Prisma.PrismaClientValidationError) {
+        return new AppError('Los datos del contrato son inválidos para persistir en la base', {
+            statusCode: 400,
+            code: 'DATABASE_VALIDATION_ERROR',
+            details: { requestId: req.requestId }
+        });
+    }
+
+    return new AppError('Ocurrió un error inesperado al crear el contrato', {
+        statusCode: 500,
+        code: 'CONTRACT_CREATE_FAILED',
+        details: { requestId: req.requestId }
+    });
+};
+
 // Create contract
 router.post('/', upload.single('pdf'), validateBody(contractCreateSchema), async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
-    const {
-        fechaInicio,
-        fechaFin,
-        fechaActualizacion,
-        observaciones,
-        propiedadId,
-        propietarioIds, // Expecting array
-        inquilinoIds,   // Expecting array
-        montoAlquiler,
-        montoHonorarios,
-        porcentajeHonorarios,
-        pagaHonorarios,
-        diaVencimiento,
-        porcentajeActualizacion,
-        tipoAjuste,
-        administrado
-    } = req.body;
+    const authReq = req as AuthRequest;
+    const { inmobiliariaId, id: userId } = authReq.user!;
+    const payload = req.body as ContractCreateInput;
 
     const pdfPath = req.file ? `inmobiliaria-${inmobiliariaId}/${req.file.filename}` : null;
 
     try {
-        const pIds = Array.isArray(propietarioIds) ? propietarioIds.map(Number) : [Number(propietarioIds)];
-        const iIds = Array.isArray(inquilinoIds) ? inquilinoIds.map(Number) : [Number(inquilinoIds)];
-
-        // Verify entities exist and belong to agency
-        const [propiedad, propietarios, inquilinos] = await Promise.all([
-            prisma.propiedad.findFirst({ where: { id: Number(propiedadId), inmobiliariaId } }),
-            prisma.persona.findMany({ where: { id: { in: pIds }, inmobiliariaId } }),
-            prisma.persona.findMany({ where: { id: { in: iIds }, inmobiliariaId } })
-        ]);
-
-        if (!propiedad || propietarios.length === 0 || inquilinos.length === 0) {
-            return res.status(400).json({ message: 'Entidades relacionadas inválidas o faltantes' });
-        }
-
         const contract = await prisma.$transaction(async (tx) => {
+            const propiedad = await createPropertyIfNeeded(tx, payload, inmobiliariaId, userId);
+            const propietariosIds = await createPeopleIfNeeded(
+                tx,
+                payload.propietarios,
+                payload.propietarioIds,
+                inmobiliariaId,
+                userId,
+                'propietario'
+            );
+            const inquilinosIds = await createPeopleIfNeeded(
+                tx,
+                payload.inquilinos,
+                payload.inquilinoIds,
+                inmobiliariaId,
+                userId,
+                'inquilino'
+            );
+
             const newContract = await tx.contrato.create({
                 data: {
-                    fechaInicio: parseDateOnly(fechaInicio),
-                    fechaFin: parseDateOnly(fechaFin),
-                    fechaProximaActualizacion: fechaActualizacion
-                        ? parseDateOnly(fechaActualizacion)
+                    fechaInicio: parseDateOnly(payload.fechaInicio),
+                    fechaFin: parseDateOnly(payload.fechaFin),
+                    fechaProximaActualizacion: payload.fechaActualizacion
+                        ? parseDateOnly(payload.fechaActualizacion)
                         : null,
-                    observaciones,
+                    observaciones: payload.observaciones,
                     rutaPdf: pdfPath,
-                    propiedadId: Number(propiedadId),
+                    propiedadId: propiedad.id,
                     inmobiliariaId,
-                    montoAlquiler: new Decimal(montoAlquiler || 0),
-                    montoHonorarios: new Decimal(montoHonorarios || 0),
-                    porcentajeHonorarios: porcentajeHonorarios ? new Decimal(porcentajeHonorarios) : null,
-                    pagaHonorarios: pagaHonorarios || 'INQUILINO',
-                    diaVencimiento: diaVencimiento ? Number(diaVencimiento) : 10,
-                    porcentajeActualizacion: porcentajeActualizacion ? new Decimal(porcentajeActualizacion) : null,
-                    tipoAjuste: tipoAjuste || null,
-                    administrado: administrado === 'true' || administrado === true,
-                    creadoPorId: (req as AuthRequest).user!.id,
+                    montoAlquiler: new Decimal(payload.montoAlquiler || 0),
+                    montoHonorarios: new Decimal(payload.montoHonorarios || 0),
+                    porcentajeHonorarios: payload.porcentajeHonorarios ? new Decimal(payload.porcentajeHonorarios) : null,
+                    pagaHonorarios: payload.pagaHonorarios || 'INQUILINO',
+                    diaVencimiento: payload.diaVencimiento ? Number(payload.diaVencimiento) : 10,
+                    porcentajeActualizacion: payload.porcentajeActualizacion ? new Decimal(payload.porcentajeActualizacion) : null,
+                    tipoAjuste: payload.tipoAjuste || null,
+                    administrado: Boolean(payload.administrado),
+                    creadoPorId: userId,
                     propietarios: {
-                        create: pIds.map((id, index) => ({
+                        create: propietariosIds.map((id, index) => ({
                             personaId: id,
                             esPrincipal: index === 0
                         }))
                     },
                     inquilinos: {
-                        create: iIds.map((id, index) => ({
+                        create: inquilinosIds.map((id, index) => ({
                             personaId: id,
                             esPrincipal: index === 0
                         }))
@@ -237,37 +484,50 @@ router.post('/', upload.single('pdf'), validateBody(contractCreateSchema), async
                 }
             });
 
-            if (req.body.honorarioInicial && Number(req.body.honorarioInicial) > 0) {
+            if (payload.honorarioInicial && Number(payload.honorarioInicial) > 0) {
                 await tx.movimientoCaja.create({
                     data: {
                         inmobiliariaId,
                         tipo: 'INGRESO',
                         concepto: `Honorarios por Alta de Contrato - ${propiedad.direccion}`,
-                        monto: new Decimal(req.body.honorarioInicial),
+                        monto: new Decimal(payload.honorarioInicial),
                         fecha: new Date(), // Utilizamos la fecha actual de cobro
-                        creadoPorId: (req as AuthRequest).user!.id,
+                        creadoPorId: userId,
                         contratoId: newContract.id,
-                        metodoPago: req.body.honorarioInicialMetodoPago || 'EFECTIVO'
+                        metodoPago: payload.honorarioInicialMetodoPago || 'EFECTIVO'
                     }
                 });
             }
 
-            return newContract;
+            return { newContract, propiedad };
         });
 
         await auditService.log({
-            usuarioId: (req as AuthRequest).user!.id,
+            usuarioId: userId,
             inmobiliariaId,
             accion: 'CREAR_CONTRATO',
             entidad: 'Contrato',
-            entidadId: contract.id,
-            detalle: `Contrato creado para propiedad: ${propiedad.direccion}`
+            entidadId: contract.newContract.id,
+            detalle: `Contrato creado para propiedad: ${contract.propiedad.direccion}`
         });
 
-        res.status(201).json(contract);
+        res.status(201).json(contract.newContract);
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: 'Error al crear contrato' });
+        const appError = buildContractCreateError(error, authReq);
+        logger.error('Error creating contract', {
+            requestId: authReq.requestId,
+            inmobiliariaId,
+            userId,
+            code: appError.code,
+            error
+        });
+
+        res.status(appError.statusCode).json({
+            message: appError.message,
+            code: appError.code,
+            details: appError.details,
+            requestId: authReq.requestId
+        });
     }
 });
 

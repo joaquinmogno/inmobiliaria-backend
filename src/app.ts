@@ -20,11 +20,15 @@ import sueldosRoutes from './routes/sueldos.routes';
 import filesRoutes from './routes/files.routes';
 import { apiLimiter } from './middlewares/rateLimiter.middleware';
 import multer from 'multer';
+import { requestContext } from './middlewares/request-context.middleware';
+import { logger } from './services/logger.service';
+import { AppError } from './errors/app-error';
 
 import helmet from 'helmet';
 
 const app = express();
 app.set('trust proxy', 1);
+app.use(requestContext);
 
 // Security middlewares
 app.use(helmet({
@@ -70,19 +74,59 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
-app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
-    return res.status(413).json({ message: 'El archivo supera el límite máximo de 30 MB' });
-  }
-  if (err instanceof Error && err.message.includes('Tipo de archivo no permitido')) {
-    return res.status(400).json({ message: err.message });
-  }
-  if (err instanceof Error && err.message.includes('contrato principal')) {
-    return res.status(400).json({ message: err.message });
+app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const requestId = req.requestId;
+
+  if (err instanceof AppError) {
+    logger.warn('Application error', {
+      requestId,
+      method: req.method,
+      path: req.originalUrl,
+      code: err.code,
+      details: err.details
+    });
+
+    return res.status(err.statusCode).json({
+      message: err.message,
+      code: err.code,
+      details: err.details,
+      requestId
+    });
   }
 
-  console.error('Unhandled error:', err);
-  res.status(500).json({ message: 'Error interno del servidor' });
+  if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({
+      message: 'El archivo supera el límite máximo de 30 MB',
+      code: 'FILE_TOO_LARGE',
+      requestId
+    });
+  }
+  if (err instanceof Error && err.message.includes('Tipo de archivo no permitido')) {
+    return res.status(400).json({
+      message: err.message,
+      code: 'INVALID_FILE_TYPE',
+      requestId
+    });
+  }
+  if (err instanceof Error && err.message.includes('contrato principal')) {
+    return res.status(400).json({
+      message: err.message,
+      code: 'INVALID_MAIN_CONTRACT_FILE',
+      requestId
+    });
+  }
+
+  logger.error('Unhandled error', {
+    requestId,
+    method: req.method,
+    path: req.originalUrl,
+    error: err
+  });
+  res.status(500).json({
+    message: 'Error interno del servidor',
+    code: 'INTERNAL_SERVER_ERROR',
+    requestId
+  });
 });
 
 export default app;
