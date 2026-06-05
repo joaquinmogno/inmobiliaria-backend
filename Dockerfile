@@ -21,7 +21,7 @@ RUN npm run build
 FROM node:20-alpine
 
 WORKDIR /app
-RUN apk add --no-cache openssl postgresql-client
+RUN apk add --no-cache openssl postgresql-client su-exec
 ENV PORT=3000
 ENV UPLOAD_DIR=/app/uploads
 ENV NODE_ENV=production
@@ -39,8 +39,6 @@ RUN mkdir -p /app/uploads /app/backups /app/.seed-data \
 COPY docker-entrypoint.sh /app/
 RUN chmod +x /app/docker-entrypoint.sh
 EXPOSE 3000
-
-USER node
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["node", "dist/server.js"]

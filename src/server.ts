@@ -1,18 +1,19 @@
 import 'dotenv/config';
 import './config/env';
 import app from './app';
+import { logger } from './services/logger.service';
 
 const PORT = process.env.PORT || 3000;
 
 const server = app.listen(PORT, () => {
-  console.log(`Backend corriendo en puerto ${PORT}`);
+  logger.info('Backend started', { port: PORT });
 });
 
 server.on('error', (error: any) => {
   if (error.code === 'EADDRINUSE') {
-    console.error(`Error: El puerto ${PORT} ya está en uso.`);
+    logger.error('Port already in use', { port: PORT, error });
   } else {
-    console.error('Error al iniciar el servidor:', error);
+    logger.error('Error starting server', { port: PORT, error });
   }
   process.exit(1);
 });
