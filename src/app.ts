@@ -75,7 +75,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  const requestId = req.requestId;
+  const requestId = (req as express.Request & { requestId?: string }).requestId;
 
   if (err instanceof AppError) {
     logger.warn('Application error', {

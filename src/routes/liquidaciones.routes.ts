@@ -15,6 +15,8 @@ import {
     optionalText
 } from '../middlewares/validation.middleware';
 import { z } from 'zod';
+import { requirePermission } from '../middlewares/permissions.middleware';
+import { getContractDebtSummary } from '../services/debt.service';
 
 const router = Router();
 
@@ -102,7 +104,7 @@ async function recalcularTotales(liquidacionId: number) {
 }
 
 // Obtener todas las liquidaciones de la inmobiliaria
-router.get('/', async (req, res) => {
+router.get('/', requirePermission('liquidaciones.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { contratoId, page, limit, search } = req.query;
 
@@ -161,7 +163,7 @@ router.get('/', async (req, res) => {
 });
 
 // Obtener detalle de una liquidación
-router.get('/:id', async (req, res) => {
+router.get('/:id', requirePermission('liquidaciones.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
@@ -210,7 +212,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // Crear una nueva liquidación (Borrador)
-router.post('/', validateBody(liquidacionCreateSchema), async (req, res) => {
+router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidacionCreateSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { contratoId, periodo, montoHonorarios, porcentajeHonorarios, cuotasIds } = req.body; // periodo: "YYYY-MM-01"
 
@@ -303,7 +305,7 @@ router.post('/', validateBody(liquidacionCreateSchema), async (req, res) => {
 });
 
 // Agregar un movimiento
-router.post('/:id/movimientos', validateBody(movimientoSchema), async (req, res) => {
+router.post('/:id/movimientos', requirePermission('liquidaciones.editar'), validateBody(movimientoSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { tipo, concepto, monto, observaciones } = req.body;
@@ -350,7 +352,7 @@ router.post('/:id/movimientos', validateBody(movimientoSchema), async (req, res)
 });
 
 // Eliminar un movimiento
-router.delete('/movimientos/:movimientoId', async (req, res) => {
+router.delete('/movimientos/:movimientoId', requirePermission('liquidaciones.editar'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { movimientoId } = req.params;
 
@@ -390,7 +392,7 @@ router.delete('/movimientos/:movimientoId', async (req, res) => {
 });
 
 // Confirmar liquidación (Borrador -> Pendiente de Pago)
-router.patch('/:id/confirmar', async (req, res) => {
+router.patch('/:id/confirmar', requirePermission('liquidaciones.editar'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
@@ -439,7 +441,7 @@ router.patch('/:id/confirmar', async (req, res) => {
 
 
 // Actualizar honorarios de una liquidación
-router.patch('/:id/honorarios', validateBody(honorariosSchema), async (req, res) => {
+router.patch('/:id/honorarios', requirePermission('liquidaciones.editar'), validateBody(honorariosSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { montoHonorarios, porcentajeHonorarios } = req.body;
@@ -496,7 +498,7 @@ router.patch('/:id/honorarios', validateBody(honorariosSchema), async (req, res)
 });
 
 // Eliminar liquidación (Solo si es borrador)
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('liquidaciones.eliminar'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
@@ -532,7 +534,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Registrar pago al propietario
-router.patch('/:id/pagar-propietario', validateBody(pagoPropietarioSchema), async (req, res) => {
+router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.editar'), validateBody(pagoPropietarioSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { fechaPago, metodoPago, observaciones } = req.body;
@@ -643,8 +645,56 @@ const formatDatePdf = (date: Date | string | null | undefined) => {
 const formatPeriodPdf = (date: Date | string) =>
     new Date(date).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 
+const ensurePdfSpace = (doc: PDFKit.PDFDocument, y: number, requiredHeight = 100) => {
+    if (y + requiredHeight < doc.page.height - 70) return y;
+    doc.addPage();
+    return 50;
+};
+
+const drawDebtSummaryPdf = (
+    doc: PDFKit.PDFDocument,
+    y: number,
+    pageWidth: number,
+    debtSummary: Awaited<ReturnType<typeof getContractDebtSummary>>,
+    title = 'DEUDA ANTERIOR DEL CONTRATO'
+) => {
+    if (debtSummary.totalDeuda <= 0) return y;
+
+    y = ensurePdfSpace(doc, y, 120);
+    doc.fillColor('#B45309').fontSize(11).font('Helvetica-Bold').text(title, 50, y);
+    doc.moveTo(50, y + 14).lineTo(50 + pageWidth, y + 14).strokeColor('#F59E0B').lineWidth(1).stroke();
+    y += 22;
+
+    doc.rect(50, y, pageWidth, 20).fill('#FFFBEB');
+    doc.fillColor('#92400E').fontSize(8).font('Helvetica-Bold')
+        .text('PERÍODO', 58, y + 6)
+        .text('NETO', 190, y + 6, { width: 70, align: 'right' })
+        .text('PAGADO', 300, y + 6, { width: 70, align: 'right' })
+        .text('DEUDA', 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
+    y += 20;
+
+    debtSummary.detalle.forEach(item => {
+        y = ensurePdfSpace(doc, y, 45);
+        doc.fillColor('#111827').fontSize(9).font('Helvetica')
+            .text(formatPeriodPdf(item.periodo), 58, y + 5)
+            .text(formatCurrencyPdf(item.neto), 190, y + 5, { width: 70, align: 'right' })
+            .text(formatCurrencyPdf(item.pagado), 300, y + 5, { width: 70, align: 'right' });
+        doc.fillColor('#B91C1C').font('Helvetica-Bold')
+            .text(formatCurrencyPdf(item.deuda), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
+        doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#FDE68A').lineWidth(0.5).stroke();
+        y += 20;
+    });
+
+    doc.rect(50, y, pageWidth, 22).fill('#FEF3C7');
+    doc.fillColor('#92400E').fontSize(9).font('Helvetica-Bold')
+        .text('TOTAL DEUDA ANTERIOR', 58, y + 7)
+        .text(formatCurrencyPdf(debtSummary.totalDeuda), 50 + pageWidth - 120, y + 7, { width: 110, align: 'right' });
+
+    return y + 34;
+};
+
 // ─── PDF Inquilino (Comprobante de pago) ─────────────────────────────────────
-router.get('/:id/pdf', async (req, res) => {
+router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
@@ -665,6 +715,7 @@ router.get('/:id/pdf', async (req, res) => {
         });
 
         if (!liquidacion) return res.status(404).json({ message: 'Liquidación no encontrada' });
+        const deudaAnterior = await getContractDebtSummary(liquidacion.contratoId, inmobiliariaId, Number(id));
 
         const doc = new PDFDocument({ margin: 50, size: 'A4' });
         res.setHeader('Content-Type', 'application/pdf');
@@ -793,6 +844,19 @@ router.get('/:id/pdf', async (req, res) => {
             doc.fillColor('#991B1B').fontSize(9).font('Helvetica-Bold')
                 .text('SALDO PENDIENTE', 58, y)
                 .text(formatCurrencyPdf(saldoPendiente), 50 + pageWidth - 80, y, { width: 70, align: 'right' });
+            y += 18;
+        }
+
+        if (deudaAnterior.totalDeuda > 0) {
+            y += 12;
+            y = drawDebtSummaryPdf(doc, y, pageWidth, deudaAnterior);
+
+            const totalARegularizar = Math.max(saldoPendiente, 0) + deudaAnterior.totalDeuda;
+            y = ensurePdfSpace(doc, y, 50);
+            doc.rect(50, y, pageWidth, 34).fill('#7F1D1D');
+            doc.fillColor('white').fontSize(11).font('Helvetica-Bold')
+                .text('TOTAL A REGULARIZAR', 58, y + 11)
+                .text(formatCurrencyPdf(totalARegularizar), 50 + pageWidth - 120, y + 11, { width: 110, align: 'right' });
         }
 
         // Footer
@@ -809,7 +873,7 @@ router.get('/:id/pdf', async (req, res) => {
 });
 
 // ─── PDF Propietario (Liquidación con honorarios y datos del contrato) ────────
-router.get('/:id/pdf-propietario', async (req, res) => {
+router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
@@ -830,6 +894,7 @@ router.get('/:id/pdf-propietario', async (req, res) => {
         });
 
         if (!liquidacion) return res.status(404).json({ message: 'Liquidación no encontrada' });
+        const deudaAnterior = await getContractDebtSummary(liquidacion.contratoId, inmobiliariaId, Number(id));
 
         const doc = new PDFDocument({ margin: 50, size: 'A4' });
         res.setHeader('Content-Type', 'application/pdf');
@@ -986,6 +1051,17 @@ router.get('/:id/pdf-propietario', async (req, res) => {
                 doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
                 y += 20;
             });
+        }
+
+        if (deudaAnterior.totalDeuda > 0) {
+            y += 18;
+            y = drawDebtSummaryPdf(
+                doc,
+                y,
+                pageWidth,
+                deudaAnterior,
+                'DEUDA ANTERIOR PENDIENTE DEL INQUILINO'
+            );
         }
 
         // Footer

@@ -5,6 +5,8 @@ import { MetodoPago, EstadoLiquidacion } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { auditService } from '../services/audit.service';
 import { validateBody, positiveDecimal, optionalDateOnlyString, optionalText } from '../middlewares/validation.middleware';
+import { requirePermission } from '../middlewares/permissions.middleware';
+import { getContractDebtSummary } from '../services/debt.service';
 import { z } from 'zod';
 
 const router = Router();
@@ -20,7 +22,7 @@ const pagoSchema = z.object({
 /**
  * Obtener todos los pagos de la inmobiliaria (Global) con paginación y búsqueda
  */
-router.get('/', authenticateToken, async (req, res) => {
+router.get('/', authenticateToken, requirePermission('pagos.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { page, limit, search } = req.query;
 
@@ -106,7 +108,7 @@ router.get('/', authenticateToken, async (req, res) => {
  * Registrar un pago entregado por el inquilino.
  * El monto se distribuye automáticamente entre las liquidaciones adeudadas más antiguas.
  */
-router.post('/', authenticateToken, validateBody(pagoSchema), async (req, res) => {
+router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBody(pagoSchema), async (req, res) => {
     const { contratoId, monto, fechaPago, metodoPago, observaciones } = req.body;
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
 
@@ -282,7 +284,7 @@ router.post('/', authenticateToken, validateBody(pagoSchema), async (req, res) =
 /**
  * Obtener historial de pagos de un contrato
  */
-router.get('/contrato/:id', authenticateToken, async (req, res) => {
+router.get('/contrato/:id', authenticateToken, requirePermission('pagos.ver'), async (req, res) => {
     const { id } = req.params;
     const { inmobiliariaId } = (req as AuthRequest).user!;
 
@@ -314,40 +316,15 @@ router.get('/contrato/:id', authenticateToken, async (req, res) => {
 /**
  * Obtener resumen de deuda de un contrato
  */
-router.get('/deuda/contrato/:id', authenticateToken, async (req, res) => {
+router.get('/deuda/contrato/:id', authenticateToken, requirePermission('pagos.ver'), async (req, res) => {
     const { id } = req.params;
     const { inmobiliariaId } = (req as AuthRequest).user!;
+    const excludeLiquidacionId = req.query.excludeLiquidacionId
+        ? Number(req.query.excludeLiquidacionId)
+        : undefined;
 
     try {
-        const liquidaciones = await prisma.liquidacion.findMany({
-            where: {
-                contratoId: Number(id),
-                inmobiliariaId,
-                estado: { not: EstadoLiquidacion.BORRADOR }
-            },
-            include: {
-                pagos: true
-            }
-        });
-
-        const resumen = liquidaciones.map(liq => {
-            const totalPagado = liq.pagos.reduce((acc, p) => acc.plus(p.monto), new Decimal(0));
-            const deuda = new Decimal(liq.netoACobrar.toString()).minus(totalPagado);
-            return {
-                periodo: liq.periodo,
-                neto: liq.netoACobrar,
-                pagado: totalPagado,
-                deuda: deuda.greaterThan(0) ? deuda : new Decimal(0),
-                estado: liq.estado
-            };
-        }).filter(r => r.deuda.greaterThan(0));
-
-        const totalDeuda = resumen.reduce((acc, r) => acc.plus(r.deuda), new Decimal(0));
-
-        res.json({
-            totalDeuda,
-            detalle: resumen
-        });
+        res.json(await getContractDebtSummary(Number(id), inmobiliariaId, excludeLiquidacionId));
     } catch (error) {
         res.status(500).json({ message: 'Error al obtener deuda' });
     }

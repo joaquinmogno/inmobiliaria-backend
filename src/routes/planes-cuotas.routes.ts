@@ -5,6 +5,7 @@ import { TipoMovimiento, EstadoPlanCuotas, EstadoCuota } from '@prisma/client';
 import { auditService } from '../services/audit.service';
 import { validateBody, requiredText, positiveDecimal, booleanFromForm } from '../middlewares/validation.middleware';
 import { z } from 'zod';
+import { requirePermission } from '../middlewares/permissions.middleware';
 
 const router = Router();
 
@@ -22,7 +23,7 @@ const planCuotasSchema = z.object({
 /**
  * Crear un nuevo plan de cuotas
  */
-router.post('/', validateBody(planCuotasSchema), async (req, res) => {
+router.post('/', requirePermission('liquidaciones.editar'), validateBody(planCuotasSchema), async (req, res) => {
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
     const { contratoId, concepto, montoTotal, cantidadCuotas, tipoMovimiento, esParaInmobiliaria } = req.body;
 
@@ -86,7 +87,7 @@ router.post('/', validateBody(planCuotasSchema), async (req, res) => {
 /**
  * Obtener planes de cuotas de un contrato
  */
-router.get('/contrato/:contratoId', async (req, res) => {
+router.get('/contrato/:contratoId', requirePermission('liquidaciones.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { contratoId } = req.params;
 
@@ -118,7 +119,7 @@ router.get('/contrato/:contratoId', async (req, res) => {
 /**
  * Obtener cuotas pendientes por contrato (para sugerir en liquidación)
  */
-router.get('/contrato/:contratoId/pendientes', async (req, res) => {
+router.get('/contrato/:contratoId/pendientes', requirePermission('liquidaciones.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { contratoId } = req.params;
 
@@ -153,7 +154,7 @@ router.get('/contrato/:contratoId/pendientes', async (req, res) => {
 /**
  * Eliminar un plan de cuotas (Solo si no tiene cuotas pagadas)
  */
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('liquidaciones.editar'), async (req, res) => {
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
     const { id } = req.params;
 

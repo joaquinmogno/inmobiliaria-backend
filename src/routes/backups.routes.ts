@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authenticateToken } from '../middlewares/auth.middleware';
 import { AuthRequest } from '../middlewares/auth.middleware';
-import { requireAdmin } from '../middlewares/permissions.middleware';
+import { requirePermission } from '../middlewares/permissions.middleware';
 import { auditService } from '../services/audit.service';
 import path from 'path';
 import fs from 'fs';
@@ -45,7 +45,7 @@ const getPgDumpUrl = (databaseUrl: string) => {
 };
 
 // Listar todos los backups
-router.get('/', requireAdmin, async (req, res) => {
+router.get('/', requirePermission('configuracion.backups.ver'), async (req, res) => {
     try {
         const getFiles = (dir: string, type: 'db' | 'uploads') => {
             if (!fs.existsSync(dir)) return [];
@@ -75,7 +75,7 @@ router.get('/', requireAdmin, async (req, res) => {
 });
 
 // Generar backup manual de DB
-router.post('/db', requireAdmin, async (req, res) => {
+router.post('/db', requirePermission('configuracion.backups.crear'), async (req, res) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `manual-db-backup-${timestamp}.sql`;
     const filepath = path.join(DB_BACKUPS_DIR, filename);
@@ -116,7 +116,7 @@ router.post('/db', requireAdmin, async (req, res) => {
 });
 
 // Generar backup manual de Uploads
-router.post('/uploads', requireAdmin, async (req, res) => {
+router.post('/uploads', requirePermission('configuracion.backups.crear'), async (req, res) => {
     try {
         console.log('Ejecutando backup manual de archivos...');
         const { stdout } = await execFilePromise('sh', [BACKUP_SCRIPT_PATH], {
@@ -143,7 +143,7 @@ router.post('/uploads', requireAdmin, async (req, res) => {
 });
 
 // Descargar un backup
-router.get('/download/:type/:filename', requireAdmin, (req, res) => {
+router.get('/download/:type/:filename', requirePermission('configuracion.backups.descargar'), (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
     const filepath = resolveBackupPath(type, filename);
 
@@ -155,7 +155,7 @@ router.get('/download/:type/:filename', requireAdmin, (req, res) => {
 });
 
 // Eliminar un backup
-router.delete('/:type/:filename', requireAdmin, (req, res) => {
+router.delete('/:type/:filename', requirePermission('configuracion.backups.eliminar'), (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
     const filepath = resolveBackupPath(type, filename);
 
