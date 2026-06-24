@@ -17,6 +17,8 @@ import {
 import { z } from 'zod';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { getContractDebtSummary } from '../services/debt.service';
+import { formatCurrency } from '../utils/currency';
+import { assertSameCurrency } from '../services/currency-rules.service';
 
 const router = Router();
 
@@ -235,28 +237,7 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
             return res.status(400).json({ message: 'Ya existe una liquidación para este periodo' });
         }
 
-        const liquidacion = await prisma.liquidacion.create({
-            data: {
-                periodo: new Date(periodo),
-                estado: 'BORRADOR',
-                contratoId: Number(contratoId),
-                inmobiliariaId,
-                creadoPorId: (req as AuthRequest).user!.id,
-                montoHonorarios: montoHonorarios ? Number(montoHonorarios) : 0,
-                porcentajeHonorarios: porcentajeHonorarios ? Number(porcentajeHonorarios) : null
-            }
-        });
-
-        await prisma.movimiento.create({
-            data: {
-                tipo: 'INGRESO',
-                concepto: 'Alquiler Mensual',
-                monto: contrato.montoAlquiler,
-                liquidacionId: liquidacion.id
-            }
-        });
-
-        // Crear movimientos para cuotas seleccionadas
+        const cuotasSeleccionadas = [];
         if (cuotasIds && Array.isArray(cuotasIds) && cuotasIds.length > 0) {
             for (const cId of cuotasIds) {
                 const cuota = await prisma.cuotaPlan.findUnique({
@@ -265,26 +246,60 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
                 });
 
                 if (cuota && cuota.estado === 'PENDIENTE') {
-                    const mov = await prisma.movimiento.create({
-                        data: {
-                            tipo: cuota.plan.tipoMovimiento,
-                            concepto: `${cuota.plan.concepto} (Cuota ${cuota.numeroCuota})`,
-                            monto: cuota.monto,
-                            liquidacionId: liquidacion.id,
-                            esParaInmobiliaria: cuota.plan.esParaInmobiliaria
-                        }
-                    });
-
-                    await prisma.cuotaPlan.update({
-                        where: { id: cuota.id },
-                        data: {
-                            liquidacionId: liquidacion.id,
-                            movimientoId: mov.id
-                        }
-                    });
+                    if (cuota.plan.contratoId !== contrato.id || cuota.plan.inmobiliariaId !== inmobiliariaId) {
+                        return res.status(400).json({ message: 'Una o más cuotas no pertenecen al contrato seleccionado' });
+                    }
+                    assertSameCurrency(cuota.moneda, contrato.moneda, 'No se pueden liquidar cuotas con una moneda distinta a la del contrato');
+                    assertSameCurrency(cuota.plan.moneda, contrato.moneda, 'No se pueden liquidar planes con una moneda distinta a la del contrato');
+                    cuotasSeleccionadas.push(cuota);
                 }
             }
         }
+
+        const liquidacion = await prisma.liquidacion.create({
+            data: {
+                periodo: new Date(periodo),
+                estado: 'BORRADOR',
+                contratoId: Number(contratoId),
+                inmobiliariaId,
+                creadoPorId: (req as AuthRequest).user!.id,
+                montoHonorarios: montoHonorarios ? Number(montoHonorarios) : 0,
+                porcentajeHonorarios: porcentajeHonorarios ? Number(porcentajeHonorarios) : null,
+                moneda: contrato.moneda
+            }
+        });
+
+        await prisma.movimiento.create({
+            data: {
+                tipo: 'INGRESO',
+                concepto: 'Alquiler Mensual',
+                monto: contrato.montoAlquiler,
+                moneda: contrato.moneda,
+                liquidacionId: liquidacion.id
+            }
+        });
+
+        // Crear movimientos para cuotas seleccionadas
+        for (const cuota of cuotasSeleccionadas) {
+            const mov = await prisma.movimiento.create({
+                data: {
+                    tipo: cuota.plan.tipoMovimiento,
+                    concepto: `${cuota.plan.concepto} (Cuota ${cuota.numeroCuota})`,
+                    monto: cuota.monto,
+                    moneda: contrato.moneda,
+                    liquidacionId: liquidacion.id,
+                    esParaInmobiliaria: cuota.plan.esParaInmobiliaria
+                }
+            });
+
+            await prisma.cuotaPlan.update({
+                where: { id: cuota.id },
+                data: {
+                    liquidacionId: liquidacion.id,
+                    movimientoId: mov.id
+                }
+            });
+            }
 
         const actualizada = await recalcularTotales(liquidacion.id);
         
@@ -298,9 +313,9 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
         });
 
         res.status(201).json(actualizada);
-    } catch (error) {
+    } catch (error: any) {
         console.error(error);
-        res.status(500).json({ message: 'Error al crear liquidación' });
+        res.status(error.statusCode || 500).json({ message: error.message || 'Error al crear liquidación' });
     }
 });
 
@@ -329,6 +344,7 @@ router.post('/:id/movimientos', requirePermission('liquidaciones.editar'), valid
                 tipo,
                 concepto,
                 monto: monto ? monto.toString() : 0,
+                moneda: liquidacion.moneda,
                 observaciones,
                 liquidacionId: Number(id)
             }
@@ -596,6 +612,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.editar')
                         tipo: 'EGRESO',
                         concepto: generarConcepto('Pago Propietario', liquidacion),
                         monto: montoPropietario,
+                        moneda: liquidacion.moneda,
                         fecha: new Date(fechaPago || new Date()),
                         metodoPago: metodoPago || 'EFECTIVO',
                         cuenta: (metodoPago === 'EFECTIVO') ? 'CAJA' : 'BANCO',
@@ -610,6 +627,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.editar')
             return {
                 ...actualizada,
                 montoPropietario: montoPropietario.toString(),
+                moneda: liquidacion.moneda,
                 propiedadDireccion: liquidacion.contrato?.propiedad?.direccion || 'Sin dirección',
                 propietarioNombre: liquidacion.contrato?.propietarios?.[0]?.persona?.nombreCompleto || 'Sin propietario',
                 periodoTexto: new Date(liquidacion.periodo).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' })
@@ -622,7 +640,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.editar')
             accion: 'PAGO_PROPIETARIO',
             entidad: 'Liquidacion',
             entidadId: Number(id),
-            detalle: `Pago a ${result.propietarioNombre} por $${Number(result.montoPropietario).toLocaleString('es-AR')} - ${result.propiedadDireccion} - ${result.periodoTexto}`
+            detalle: `Pago a ${result.propietarioNombre} por ${formatCurrency(result.montoPropietario, result.moneda)} - ${result.propiedadDireccion} - ${result.periodoTexto}`
         });
 
         res.json(result);
@@ -634,8 +652,8 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.editar')
 
 // ─── Helpers PDF ─────────────────────────────────────────────────────────────
 
-const formatCurrencyPdf = (amount: number) =>
-    `$${amount.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const formatCurrencyPdf = (amount: number, moneda: string = 'ARS') =>
+    formatCurrency(amount, moneda);
 
 const formatDatePdf = (date: Date | string | null | undefined) => {
     if (!date) return '-';
@@ -656,6 +674,7 @@ const drawDebtSummaryPdf = (
     y: number,
     pageWidth: number,
     debtSummary: Awaited<ReturnType<typeof getContractDebtSummary>>,
+    moneyPdf: (amount: number) => string,
     title = 'DEUDA ANTERIOR DEL CONTRATO'
 ) => {
     if (debtSummary.totalDeuda <= 0) return y;
@@ -677,10 +696,10 @@ const drawDebtSummaryPdf = (
         y = ensurePdfSpace(doc, y, 45);
         doc.fillColor('#111827').fontSize(9).font('Helvetica')
             .text(formatPeriodPdf(item.periodo), 58, y + 5)
-            .text(formatCurrencyPdf(item.neto), 190, y + 5, { width: 70, align: 'right' })
-            .text(formatCurrencyPdf(item.pagado), 300, y + 5, { width: 70, align: 'right' });
+            .text(moneyPdf(item.neto), 190, y + 5, { width: 70, align: 'right' })
+            .text(moneyPdf(item.pagado), 300, y + 5, { width: 70, align: 'right' });
         doc.fillColor('#B91C1C').font('Helvetica-Bold')
-            .text(formatCurrencyPdf(item.deuda), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
+            .text(moneyPdf(item.deuda), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
         doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#FDE68A').lineWidth(0.5).stroke();
         y += 20;
     });
@@ -688,7 +707,7 @@ const drawDebtSummaryPdf = (
     doc.rect(50, y, pageWidth, 22).fill('#FEF3C7');
     doc.fillColor('#92400E').fontSize(9).font('Helvetica-Bold')
         .text('TOTAL DEUDA ANTERIOR', 58, y + 7)
-        .text(formatCurrencyPdf(debtSummary.totalDeuda), 50 + pageWidth - 120, y + 7, { width: 110, align: 'right' });
+        .text(moneyPdf(debtSummary.totalDeuda), 50 + pageWidth - 120, y + 7, { width: 110, align: 'right' });
 
     return y + 34;
 };
@@ -715,6 +734,7 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
         });
 
         if (!liquidacion) return res.status(404).json({ message: 'Liquidación no encontrada' });
+        const moneyPdf = (amount: number) => formatCurrencyPdf(amount, liquidacion.moneda);
         const deudaAnterior = await getContractDebtSummary(liquidacion.contratoId, inmobiliariaId, Number(id));
 
         const doc = new PDFDocument({ margin: 50, size: 'A4' });
@@ -773,7 +793,7 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
 
         liqAny.movimientos.filter((m: any) => m.tipo === 'INGRESO').forEach((m: any) => {
             doc.fillColor('#111827').fontSize(9).font('Helvetica').text(m.concepto, 58, y + 5);
-            doc.text(formatCurrencyPdf(Number(m.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
+            doc.text(moneyPdf(Number(m.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
             doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
             y += 20;
         });
@@ -781,7 +801,7 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
         doc.rect(50, y, pageWidth, 20).fill('#ECFDF5');
         doc.fillColor('#065F46').fontSize(9).font('Helvetica-Bold')
             .text('SUBTOTAL INGRESOS', 58, y + 6)
-            .text(formatCurrencyPdf(Number(liquidacion.totalIngresos)), 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
+            .text(moneyPdf(Number(liquidacion.totalIngresos)), 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
         y += 30;
 
         // Descuentos
@@ -799,7 +819,7 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
 
             descuentos.forEach(m => {
                 doc.fillColor('#111827').fontSize(9).font('Helvetica').text(m.concepto, 58, y + 5);
-                doc.fillColor('#DC2626').text(`(${formatCurrencyPdf(Number(m.monto))})`, 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
+                doc.fillColor('#DC2626').text(`(${moneyPdf(Number(m.monto))})`, 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
                 doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
                 y += 20;
             });
@@ -807,7 +827,7 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
             doc.rect(50, y, pageWidth, 20).fill('#FEF2F2');
             doc.fillColor('#991B1B').fontSize(9).font('Helvetica-Bold')
                 .text('SUBTOTAL DESCUENTOS', 58, y + 6)
-                .text(`(${formatCurrencyPdf(Number(liquidacion.totalDescuentos))})`, 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
+                .text(`(${moneyPdf(Number(liquidacion.totalDescuentos))})`, 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
             y += 30;
         }
 
@@ -815,7 +835,7 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
         doc.rect(50, y, pageWidth, 36).fill(INDIGO);
         doc.fillColor('white').fontSize(11).font('Helvetica-Bold')
             .text('NETO A PAGAR', 58, y + 12)
-            .text(formatCurrencyPdf(Number(liquidacion.netoACobrar)), 50 + pageWidth - 120, y + 12, { width: 110, align: 'right' });
+            .text(moneyPdf(Number(liquidacion.netoACobrar)), 50 + pageWidth - 120, y + 12, { width: 110, align: 'right' });
         y += 50;
 
         // Pagos
@@ -830,7 +850,7 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
                     .text(p.metodoPago, 200, y + 5)
                     .text(p.observaciones || '-', 300, y + 5);
                 doc.fillColor('#059669').font('Helvetica-Bold')
-                    .text(formatCurrencyPdf(Number(p.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
+                    .text(moneyPdf(Number(p.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
                 doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
                 y += 20;
             });
@@ -843,20 +863,20 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
             y += 10;
             doc.fillColor('#991B1B').fontSize(9).font('Helvetica-Bold')
                 .text('SALDO PENDIENTE', 58, y)
-                .text(formatCurrencyPdf(saldoPendiente), 50 + pageWidth - 80, y, { width: 70, align: 'right' });
+                .text(moneyPdf(saldoPendiente), 50 + pageWidth - 80, y, { width: 70, align: 'right' });
             y += 18;
         }
 
         if (deudaAnterior.totalDeuda > 0) {
             y += 12;
-            y = drawDebtSummaryPdf(doc, y, pageWidth, deudaAnterior);
+            y = drawDebtSummaryPdf(doc, y, pageWidth, deudaAnterior, moneyPdf);
 
             const totalARegularizar = Math.max(saldoPendiente, 0) + deudaAnterior.totalDeuda;
             y = ensurePdfSpace(doc, y, 50);
             doc.rect(50, y, pageWidth, 34).fill('#7F1D1D');
             doc.fillColor('white').fontSize(11).font('Helvetica-Bold')
                 .text('TOTAL A REGULARIZAR', 58, y + 11)
-                .text(formatCurrencyPdf(totalARegularizar), 50 + pageWidth - 120, y + 11, { width: 110, align: 'right' });
+                .text(moneyPdf(totalARegularizar), 50 + pageWidth - 120, y + 11, { width: 110, align: 'right' });
         }
 
         // Footer
@@ -894,6 +914,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
         });
 
         if (!liquidacion) return res.status(404).json({ message: 'Liquidación no encontrada' });
+        const moneyPdf = (amount: number) => formatCurrencyPdf(amount, liquidacion.moneda);
         const deudaAnterior = await getContractDebtSummary(liquidacion.contratoId, inmobiliariaId, Number(id));
 
         const doc = new PDFDocument({ margin: 50, size: 'A4' });
@@ -966,7 +987,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
 
         ingresosPropietario.forEach((m: any) => {
             doc.fillColor('#111827').fontSize(9).font('Helvetica').text(m.concepto, 58, y + 5);
-            doc.text(formatCurrencyPdf(Number(m.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
+            doc.text(moneyPdf(Number(m.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
             doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
             y += 20;
         });
@@ -974,7 +995,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
         doc.rect(50, y, pageWidth, 20).fill('#ECFDF5');
         doc.fillColor('#065F46').fontSize(9).font('Helvetica-Bold')
             .text('SUBTOTAL INGRESOS', 58, y + 6)
-            .text(formatCurrencyPdf(totalIngresosProp), 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
+            .text(moneyPdf(totalIngresosProp), 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
         y += 30;
 
         // Descuentos
@@ -994,7 +1015,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
 
             descuentosPropietario.forEach(m => {
                 doc.fillColor('#111827').fontSize(9).font('Helvetica').text(m.concepto, 58, y + 5);
-                doc.fillColor('#DC2626').text(`(${formatCurrencyPdf(Number(m.monto))})`, 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
+                doc.fillColor('#DC2626').text(`(${moneyPdf(Number(m.monto))})`, 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
                 doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
                 y += 20;
             });
@@ -1002,7 +1023,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
             doc.rect(50, y, pageWidth, 20).fill('#FEF2F2');
             doc.fillColor('#991B1B').fontSize(9).font('Helvetica-Bold')
                 .text('SUBTOTAL DESCUENTOS', 58, y + 6)
-                .text(`(${formatCurrencyPdf(totalDescuentosProp)})`, 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
+                .text(`(${moneyPdf(totalDescuentosProp)})`, 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
             y += 30;
         }
 
@@ -1022,7 +1043,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
         doc.fillColor('#134E4A').fontSize(9).font('Helvetica')
             .text(`${honorariosDescText} — Abona: ${pagaHonorarios}`, 58, y + 7);
         doc.font('Helvetica-Bold')
-            .text(formatCurrencyPdf(montoHonorarios), 50 + pageWidth - 80, y + 7, { width: 70, align: 'right' });
+            .text(moneyPdf(montoHonorarios), 50 + pageWidth - 80, y + 7, { width: 70, align: 'right' });
         y += 32;
 
         // Neto al propietario (Se descuentan los honorarios incondicionalmente del dueño)
@@ -1032,7 +1053,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
         doc.rect(50, y, pageWidth, 36).fill(TEAL);
         doc.fillColor('white').fontSize(11).font('Helvetica-Bold')
             .text('NETO A TRANSFERIR AL PROPIETARIO', 58, y + 12)
-            .text(formatCurrencyPdf(netoParaPropietario), 50 + pageWidth - 120, y + 12, { width: 110, align: 'right' });
+            .text(moneyPdf(netoParaPropietario), 50 + pageWidth - 120, y + 12, { width: 110, align: 'right' });
         y += 50;
 
         // Pagos recibidos
@@ -1047,7 +1068,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
                     .text(p.metodoPago, 200, y + 5)
                     .text(p.observaciones || '-', 300, y + 5);
                 doc.fillColor('#059669').font('Helvetica-Bold')
-                    .text(formatCurrencyPdf(Number(p.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
+                    .text(moneyPdf(Number(p.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
                 doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
                 y += 20;
             });
@@ -1060,6 +1081,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
                 y,
                 pageWidth,
                 deudaAnterior,
+                moneyPdf,
                 'DEUDA ANTERIOR PENDIENTE DEL INQUILINO'
             );
         }

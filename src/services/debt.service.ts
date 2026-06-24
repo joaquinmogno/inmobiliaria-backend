@@ -29,6 +29,7 @@ export async function getContractDebtSummary(
             neto: Number(liq.netoACobrar),
             pagado: Number(totalPagado),
             deuda: deuda.greaterThan(0) ? Number(deuda) : 0,
+            moneda: liq.moneda,
             estado: liq.estado
         };
     }).filter(item => item.deuda > 0);
@@ -37,6 +38,7 @@ export async function getContractDebtSummary(
 
     return {
         totalDeuda,
+        moneda: detalle[0]?.moneda || 'ARS',
         detalle
     };
 }

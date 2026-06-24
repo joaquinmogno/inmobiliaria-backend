@@ -6,6 +6,7 @@ import { auditService } from '../services/audit.service';
 import { validateBody, requiredText, positiveDecimal, booleanFromForm } from '../middlewares/validation.middleware';
 import { z } from 'zod';
 import { requirePermission } from '../middlewares/permissions.middleware';
+import { formatCurrency } from '../utils/currency';
 
 const router = Router();
 
@@ -45,6 +46,7 @@ router.post('/', requirePermission('liquidaciones.editar'), validateBody(planCuo
                     contratoId: Number(contratoId),
                     concepto,
                     montoTotal: Number(montoTotal),
+                    moneda: contrato.moneda,
                     tipoMovimiento: tipoMovimiento as TipoMovimiento,
                     estado: 'ACTIVO',
                     esParaInmobiliaria: !!esParaInmobiliaria,
@@ -57,6 +59,7 @@ router.post('/', requirePermission('liquidaciones.editar'), validateBody(planCuo
                     planId: newPlan.id,
                     numeroCuota: i,
                     monto: montoCuota,
+                    moneda: contrato.moneda,
                     estado: 'PENDIENTE' as EstadoCuota
                 });
             }
@@ -74,7 +77,7 @@ router.post('/', requirePermission('liquidaciones.editar'), validateBody(planCuo
             accion: 'CREAR_PLAN_CUOTAS',
             entidad: 'PlanCuotas',
             entidadId: plan.id,
-            detalle: `Plan creado: ${concepto}, ${cantidadCuotas} cuotas de $${montoCuota.toFixed(2)}`
+            detalle: `Plan creado: ${concepto}, ${cantidadCuotas} cuotas de ${formatCurrency(montoCuota, contrato.moneda)}`
         });
 
         res.status(201).json(plan);

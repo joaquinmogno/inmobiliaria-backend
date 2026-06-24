@@ -67,21 +67,20 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
                     fecha: { gte: startOfCurrentMonth, lte: endOfCurrentMonth }
                 }
             }),
-            canViewSalaries ? prisma.pagoSueldo.aggregate({
+            canViewSalaries ? prisma.pagoSueldo.findMany({
                 where: {
                     inmobiliariaId,
                     fecha: { gte: startOfCurrentMonth, lte: endOfCurrentMonth }
-                },
-                _sum: { monto: true }
-            }) : Promise.resolve({ _sum: { monto: 0 } })
+                }
+            }) : Promise.resolve([])
         ]);
 
-        const calcFinanzasAgencia = (liquidaciones: any[], movimientos: any[]) => {
+        const calcFinanzasAgencia = (liquidaciones: any[], movimientos: any[], sueldos: any[], moneda: 'ARS' | 'USD') => {
             let totalCobradoBruto = 0; // Todo lo que entró a caja (del inquilino)
             let honorariosAgencia = 0; // Parte de las liquidaciones que es para la agencia
             let facturadoTotal = 0;
 
-            liquidaciones.forEach(liq => {
+            liquidaciones.filter(liq => liq.moneda === moneda).forEach(liq => {
                 const neto = Number(liq.netoACobrar);
                 facturadoTotal += neto;
                 
@@ -105,15 +104,18 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
 
             // Movimientos Directos de Caja (Manuales)
             const ingresosInmo = movimientos
-                .filter(m => m.tipo === 'INGRESO' && m.liquidacionId === null) // Ingresos manuales
+                .filter(m => m.moneda === moneda && m.tipo === 'INGRESO' && m.liquidacionId === null) // Ingresos manuales
                 .reduce((acc, m) => acc + Number(m.monto), 0);
             
             const egresosInmo = movimientos
-                .filter(m => m.tipo === 'EGRESO' && m.liquidacionId === null) // Gastos manuales (admin, servicios, etc)
+                .filter(m => m.moneda === moneda && m.tipo === 'EGRESO' && m.liquidacionId === null) // Gastos manuales (admin, servicios, etc)
                 .reduce((acc, m) => acc + Number(m.monto), 0);
 
             const gananciaBruta = honorariosAgencia + ingresosInmo;
-            const gastosAgencia = egresosInmo + Number(sueldosActual._sum?.monto || 0);
+            const totalSueldos = sueldos
+                .filter(sueldo => sueldo.moneda === moneda)
+                .reduce((acc, sueldo) => acc + Number(sueldo.monto), 0);
+            const gastosAgencia = egresosInmo + totalSueldos;
             const utilidadNeta = gananciaBruta - gastosAgencia;
 
             // Fondo en Custodia: Lo que se cobró de liquidaciones pero no es de la agencia
@@ -129,9 +131,7 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
             };
         };
 
-        const metricasActual = canViewFinancialReports
-            ? calcFinanzasAgencia(liquidacionesActual, movimientosActual)
-            : {
+        const emptyMetrics = {
                 recaudadoTotal: 0,
                 gananciaBruta: 0,
                 gastosAgencia: 0,
@@ -139,6 +139,16 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
                 fondoCustodia: 0,
                 morosidad: 0
             };
+        const finanzasPorMoneda = canViewFinancialReports
+            ? {
+                ARS: calcFinanzasAgencia(liquidacionesActual, movimientosActual, sueldosActual, 'ARS'),
+                USD: calcFinanzasAgencia(liquidacionesActual, movimientosActual, sueldosActual, 'USD')
+            }
+            : {
+                ARS: emptyMetrics,
+                USD: emptyMetrics
+            };
+        const metricasActual = finanzasPorMoneda.ARS;
         
         // Respuesta
         res.json({
@@ -158,6 +168,7 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
                 },
             finanzas: {
                 ...metricasActual,
+                porMoneda: finanzasPorMoneda,
                 morosidad: canViewDelinquencyReports ? metricasActual.morosidad : 0,
                 honorarios: {
                     cobrados: metricasActual.gananciaBruta, // Para compatibilidad con frontend anterior si hiciera falta
