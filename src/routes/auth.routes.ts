@@ -6,6 +6,7 @@ import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
 import { loginLimiter } from '../middlewares/rateLimiter.middleware';
 import { z } from 'zod';
 import { env } from '../config/env';
+import { getUserPermissionDetails, userHasPermission } from '../services/permissions.service';
 
 const router = Router();
 
@@ -34,6 +35,28 @@ const setupSuperAdminSchema = z.object({
     password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres').max(128, 'Contraseña demasiado larga'),
     nombreCompleto: z.string().trim().min(2, 'El nombre es obligatorio').max(120, 'Nombre demasiado largo')
 });
+
+async function buildSessionUser(userId: number) {
+    const user = await prisma.usuario.findUnique({
+        where: { id: userId },
+        include: { inmobiliaria: true }
+    });
+
+    if (!user) return null;
+
+    const permissionDetails = await getUserPermissionDetails(user.id, user.rol);
+
+    return {
+        id: user.id,
+        email: user.email,
+        fullName: user.nombreCompleto,
+        nombreCompleto: user.nombreCompleto,
+        role: user.rol,
+        rol: user.rol,
+        ...permissionDetails,
+        inmobiliaria: user.inmobiliaria
+    };
+}
 
 router.post('/login', loginLimiter, async (req, res) => {
     const validation = loginSchema.safeParse(req.body);
@@ -77,19 +100,32 @@ router.post('/login', loginLimiter, async (req, res) => {
             { expiresIn: '8h' }
         );
 
+        const sessionUser = await buildSessionUser(user.id);
+
         res.json({
             token,
-            user: {
-                id: user.id,
-                email: user.email,
-                fullName: user.nombreCompleto,
-                role: user.rol,
-                inmobiliaria: user.inmobiliaria
-            }
+            user: sessionUser
         });
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: 'Error en el servidor' });
+    }
+});
+
+router.get('/me', authenticateToken, async (req, res) => {
+    const { id } = (req as AuthRequest).user!;
+
+    try {
+        const sessionUser = await buildSessionUser(id);
+
+        if (!sessionUser) {
+            return res.status(404).json({ message: 'Usuario no encontrado' });
+        }
+
+        res.json(sessionUser);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Error al obtener el usuario actual' });
     }
 });
 
@@ -135,11 +171,11 @@ router.post('/reset-password/:userId', authenticateToken, async (req, res) => {
         });
     }
 
-    const { role, inmobiliariaId } = (req as AuthRequest).user!;
+    const { id: actorId, role, inmobiliariaId } = (req as AuthRequest).user!;
     const { userId } = req.params;
     const { newPassword } = validation.data;
 
-    if (role !== 'ADMIN') {
+    if (!(await userHasPermission(actorId, role, 'usuarios.editar'))) {
         return res.status(403).json({ message: 'Acceso denegado' });
     }
 

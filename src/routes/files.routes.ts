@@ -2,6 +2,7 @@ import { Router } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
+import { requirePermission } from '../middlewares/permissions.middleware';
 import { prisma } from '../prisma';
 
 const router = Router();
@@ -10,9 +11,9 @@ const safeFilenamePattern = /^[a-zA-Z0-9._-]+$/;
 
 router.use(authenticateToken);
 
-router.get('/:agencyDir/:filename', async (req, res) => {
+router.get('/:agencyDir/:filename', requirePermission('contratos.archivos.ver'), async (req, res) => {
     const { inmobiliariaId, role } = (req as AuthRequest).user!;
-    const { agencyDir, filename } = req.params;
+    const { agencyDir, filename } = req.params as { agencyDir: string; filename: string };
     const expectedAgencyDir = `inmobiliaria-${inmobiliariaId}`;
 
     if (!safeFilenamePattern.test(filename)) {

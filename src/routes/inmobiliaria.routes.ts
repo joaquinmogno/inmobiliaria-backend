@@ -1,11 +1,12 @@
 import { Router, Response } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
+import { requirePermission } from '../middlewares/permissions.middleware';
 
 const router = Router();
 
 // GET /api/inmobiliaria/me
-router.get('/me', authenticateToken, async (req: AuthRequest, res: Response) => {
+router.get('/me', authenticateToken, requirePermission('configuracion.perfil.ver'), async (req: AuthRequest, res: Response) => {
     const { inmobiliariaId } = req.user!;
 
     try {
@@ -25,13 +26,9 @@ router.get('/me', authenticateToken, async (req: AuthRequest, res: Response) => 
 });
 
 // PUT /api/inmobiliaria/me
-router.put('/me', authenticateToken, async (req: AuthRequest, res: Response) => {
-    const { inmobiliariaId, role } = req.user!;
+router.put('/me', authenticateToken, requirePermission('configuracion.perfil.editar'), async (req: AuthRequest, res: Response) => {
+    const { inmobiliariaId } = req.user!;
     const { nombre } = req.body;
-
-    if (role !== 'ADMIN') {
-        return res.status(403).json({ message: 'Acceso denegado. Solo administradores pueden cambiar la configuración.' });
-    }
 
     try {
         const updatedInmobiliaria = await prisma.inmobiliaria.update({
@@ -49,14 +46,10 @@ router.put('/me', authenticateToken, async (req: AuthRequest, res: Response) => 
 });
 
 // GET /api/inmobiliaria/logs
-router.get('/logs', authenticateToken, async (req: AuthRequest, res: Response) => {
-    const { inmobiliariaId, role } = req.user!;
+router.get('/logs', authenticateToken, requirePermission('configuracion.auditoria.ver'), async (req: AuthRequest, res: Response) => {
+    const { inmobiliariaId } = req.user!;
 
     const { page = '1', limit = '15', accion, fechaDesde, fechaHasta } = req.query;
-
-    if (role !== 'ADMIN') {
-        return res.status(403).json({ message: 'Acceso denegado' });
-    }
 
     try {
         const pageNum = parseInt(page as string);

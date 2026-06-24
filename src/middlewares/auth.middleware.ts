@@ -4,6 +4,7 @@ import { prisma } from '../prisma';
 import { env } from '../config/env';
 
 export interface AuthRequest extends Request {
+    requestId?: string;
     user?: {
         id: number;
         email: string;

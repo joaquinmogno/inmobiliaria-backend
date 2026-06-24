@@ -19,6 +19,8 @@ import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { logger } from '../services/logger.service';
 import { AppError } from '../errors/app-error';
+import { requirePermission } from '../middlewares/permissions.middleware';
+import { userHasPermission } from '../services/permissions.service';
 
 const router = Router();
 
@@ -147,8 +149,8 @@ const contractRentUpdateSchema = z.object({
 });
 
 // Get all contracts
-router.get('/', async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
+router.get('/', requirePermission('contratos.ver'), async (req, res) => {
+    const { id: userId, role, inmobiliariaId } = (req as AuthRequest).user!;
     const { search } = req.query;
 
     try {
@@ -177,7 +179,12 @@ router.get('/', async (req, res) => {
             },
             orderBy: { fechaCreacion: 'desc' }
         });
-        res.json(contracts);
+        const canViewFiles = await userHasPermission(userId, role, 'contratos.archivos.ver');
+        res.json(canViewFiles ? contracts : contracts.map(contract => ({
+            ...contract,
+            rutaPdf: null,
+            adjuntos: []
+        })));
     } catch (error) {
         console.error('Error fetching contracts:', error);
         res.status(500).json({ message: 'Error al obtener contratos' });
@@ -185,7 +192,7 @@ router.get('/', async (req, res) => {
 });
 
 // Get upcoming alerts (updates and expirations)
-router.get('/alertas', async (req, res) => {
+router.get('/alertas', requirePermission('contratos.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
 
     try {
@@ -424,7 +431,7 @@ const buildContractCreateError = (error: unknown, req: AuthRequest) => {
 };
 
 // Create contract
-router.post('/', upload.single('pdf'), validateBody(contractCreateSchema), async (req, res) => {
+router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), validateBody(contractCreateSchema), async (req, res) => {
     const authReq = req as AuthRequest;
     const { inmobiliariaId, id: userId } = authReq.user!;
     const payload = req.body as ContractCreateInput;
@@ -534,8 +541,8 @@ router.post('/', upload.single('pdf'), validateBody(contractCreateSchema), async
 });
 
 // Get contract details
-router.get('/:id', async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
+router.get('/:id', requirePermission('contratos.ver'), async (req, res) => {
+    const { id: userId, role, inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
     try {
@@ -575,14 +582,21 @@ router.get('/:id', async (req, res) => {
             entidadId: Number(id)
         });
 
-        res.json({ ...contract, auditLogs });
+        const canViewFiles = await userHasPermission(userId, role, 'contratos.archivos.ver');
+
+        res.json({
+            ...contract,
+            rutaPdf: canViewFiles ? contract.rutaPdf : null,
+            adjuntos: canViewFiles ? contract.adjuntos : [],
+            auditLogs
+        });
     } catch (error) {
         res.status(500).json({ message: 'Error al obtener contrato' });
     }
 });
 
 // Add attachment
-router.post('/:id/adjuntos', upload.single('archivo'), async (req, res) => {
+router.post('/:id/adjuntos', requirePermission('contratos.editar'), upload.single('archivo'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { nombreArchivo } = req.body;
@@ -626,7 +640,7 @@ router.post('/:id/adjuntos', upload.single('archivo'), async (req, res) => {
 });
 
 // Soft delete (Move to trash)
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('contratos.eliminar'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
@@ -664,7 +678,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // Restore contract
-router.post('/:id/restaurar', async (req, res) => {
+router.post('/:id/restaurar', requirePermission('contratos.restaurar'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
@@ -701,7 +715,7 @@ router.post('/:id/restaurar', async (req, res) => {
 });
 
 // Permanent delete
-router.delete('/:id/permanente', async (req, res) => {
+router.delete('/:id/permanente', requirePermission('contratos.eliminar'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
@@ -734,7 +748,7 @@ router.delete('/:id/permanente', async (req, res) => {
 });
 
 // Update status
-router.patch('/:id/estado', validateBody(contractStatusSchema), async (req, res) => {
+router.patch('/:id/estado', requirePermission('contratos.editar'), validateBody(contractStatusSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { estado } = req.body;
@@ -772,7 +786,7 @@ router.patch('/:id/estado', validateBody(contractStatusSchema), async (req, res)
 });
 
 // Update contract
-router.put('/:id', upload.single('pdf'), validateBody(contractUpdateSchema), async (req, res) => {
+router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), validateBody(contractUpdateSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const {
@@ -885,7 +899,7 @@ router.put('/:id', upload.single('pdf'), validateBody(contractUpdateSchema), asy
 });
 
 // Actualizar monto de alquiler con registro de historia
-router.post('/:id/actualizar', validateBody(contractRentUpdateSchema), async (req, res) => {
+router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBody(contractRentUpdateSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { montoNuevo, fechaProximaNueva, observaciones } = req.body;

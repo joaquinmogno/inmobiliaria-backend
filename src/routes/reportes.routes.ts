@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
+import { userHasPermission } from '../services/permissions.service';
+import { requirePermission } from '../middlewares/permissions.middleware';
 import { startOfMonth, subMonths, endOfMonth } from 'date-fns';
 
 const router = Router();
@@ -8,10 +10,14 @@ const router = Router();
 router.use(authenticateToken);
 
 // Obtener estadísticas globales para el módulo de reportes
-router.get('/dashboard', async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
+router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req, res) => {
+    const { id: userId, role, inmobiliariaId } = (req as AuthRequest).user!;
 
     try {
+        const canViewSalaries = await userHasPermission(userId, role, 'sueldos.ver');
+        const canViewFinancialReports = await userHasPermission(userId, role, 'reportes.financieros.ver');
+        const canViewContractReports = await userHasPermission(userId, role, 'reportes.contratos.ver');
+        const canViewDelinquencyReports = await userHasPermission(userId, role, 'reportes.morosidad.ver');
         const today = new Date();
         const startOfCurrentMonth = startOfMonth(today);
         const endOfCurrentMonth = endOfMonth(today);
@@ -61,13 +67,13 @@ router.get('/dashboard', async (req, res) => {
                     fecha: { gte: startOfCurrentMonth, lte: endOfCurrentMonth }
                 }
             }),
-            prisma.pagoSueldo.aggregate({
+            canViewSalaries ? prisma.pagoSueldo.aggregate({
                 where: {
                     inmobiliariaId,
                     fecha: { gte: startOfCurrentMonth, lte: endOfCurrentMonth }
                 },
                 _sum: { monto: true }
-            })
+            }) : Promise.resolve({ _sum: { monto: 0 } })
         ]);
 
         const calcFinanzasAgencia = (liquidaciones: any[], movimientos: any[]) => {
@@ -123,7 +129,16 @@ router.get('/dashboard', async (req, res) => {
             };
         };
 
-        const metricasActual = calcFinanzasAgencia(liquidacionesActual, movimientosActual);
+        const metricasActual = canViewFinancialReports
+            ? calcFinanzasAgencia(liquidacionesActual, movimientosActual)
+            : {
+                recaudadoTotal: 0,
+                gananciaBruta: 0,
+                gastosAgencia: 0,
+                utilidadNeta: 0,
+                fondoCustodia: 0,
+                morosidad: 0
+            };
         
         // Respuesta
         res.json({
@@ -132,12 +147,18 @@ router.get('/dashboard', async (req, res) => {
                 disponibles: propiedadesDisponibles,
                 alquiladas: propiedadesAlquiladas
             },
-            contratos: {
-                activos: contratosActivos,
-                porVencer: contratosPorVencer
-            },
+            contratos: canViewContractReports
+                ? {
+                    activos: contratosActivos,
+                    porVencer: contratosPorVencer
+                }
+                : {
+                    activos: 0,
+                    porVencer: 0
+                },
             finanzas: {
                 ...metricasActual,
+                morosidad: canViewDelinquencyReports ? metricasActual.morosidad : 0,
                 honorarios: {
                     cobrados: metricasActual.gananciaBruta, // Para compatibilidad con frontend anterior si hiciera falta
                     totalInmo: metricasActual.gananciaBruta

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
 import { validateBody, requiredText, optionalText } from '../middlewares/validation.middleware';
+import { requirePermission } from '../middlewares/permissions.middleware';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
 
@@ -19,7 +20,7 @@ const propiedadSchema = z.object({
 });
 
 // Get all properties
-router.get('/', async (req, res) => {
+router.get('/', requirePermission('propiedades.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { search } = req.query;
 
@@ -41,7 +42,7 @@ router.get('/', async (req, res) => {
 });
 
 // Create property
-router.post('/', validateBody(propiedadSchema), async (req, res) => {
+router.post('/', requirePermission('propiedades.crear'), validateBody(propiedadSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { direccion, piso, departamento, tipo, estado, observaciones } = req.body;
 
@@ -75,7 +76,7 @@ router.post('/', validateBody(propiedadSchema), async (req, res) => {
 });
 
 // Update property
-router.put('/:id', validateBody(propiedadSchema), async (req, res) => {
+router.put('/:id', requirePermission('propiedades.editar'), validateBody(propiedadSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { direccion, piso, departamento, tipo, estado, observaciones } = req.body;
@@ -125,7 +126,7 @@ router.put('/:id', validateBody(propiedadSchema), async (req, res) => {
 });
 
 // Delete property
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('propiedades.eliminar'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 

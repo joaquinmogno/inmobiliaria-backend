@@ -47,6 +47,8 @@ model Usuario {
   liquidacionesCreadas    Liquidacion[]    @relation("LiquidacionCreadaPor")
   movimientosCajaCreados  MovimientoCaja[] @relation("MovimientoCajaCreadoPor")
   pagosCreados            Pago[]           @relation("PagoCreadoPor")
+  permisos                 UsuarioPermiso[]
+  permisosDenegados        UsuarioPermisoDenegado[]
   personasActualizadas    Persona[]        @relation("PersonaActualizadaPor")
   personasCreadas         Persona[]        @relation("PersonaCreadaPor")
   propiedadesActualizadas Propiedad[]      @relation("PropiedadActualizadaPor")
@@ -55,6 +57,48 @@ model Usuario {
   sueldosRecibidos        PagoSueldo[]     @relation("SueldoParaUsuario")
   sueldosPagados          PagoSueldo[]     @relation("SueldoCreadoPor")
   inmobiliaria            Inmobiliaria     @relation(fields: [inmobiliariaId], references: [id])
+}
+
+model Permiso {
+  id            Int              @id @default(autoincrement())
+  clave         String           @unique
+  descripcion   String
+  fechaCreacion DateTime         @default(now())
+  roles         RolPermiso[]
+  usuarios      UsuarioPermiso[]
+  usuariosDenegados UsuarioPermisoDenegado[]
+}
+
+model RolPermiso {
+  id        Int        @id @default(autoincrement())
+  rol       RolUsuario
+  permisoId Int
+  permiso   Permiso    @relation(fields: [permisoId], references: [id], onDelete: Cascade)
+
+  @@unique([rol, permisoId])
+  @@index([rol])
+}
+
+model UsuarioPermiso {
+  id        Int      @id @default(autoincrement())
+  usuarioId Int
+  permisoId Int
+  usuario   Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  permiso   Permiso  @relation(fields: [permisoId], references: [id], onDelete: Cascade)
+
+  @@unique([usuarioId, permisoId])
+  @@index([usuarioId])
+}
+
+model UsuarioPermisoDenegado {
+  id        Int      @id @default(autoincrement())
+  usuarioId Int
+  permisoId Int
+  usuario   Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  permiso   Permiso  @relation(fields: [permisoId], references: [id], onDelete: Cascade)
+
+  @@unique([usuarioId, permisoId])
+  @@index([usuarioId])
 }
 
 model Persona {
@@ -293,6 +337,8 @@ model MovimientoCaja {
 
 enum RolUsuario {
   SUPERADMIN
+  OWNER
+  JEFE
   ADMIN
   AGENTE
 }

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
 import { validateBody, requiredText, optionalText, optionalEmail } from '../middlewares/validation.middleware';
+import { requirePermission } from '../middlewares/permissions.middleware';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
 
@@ -19,7 +20,7 @@ const personaSchema = z.object({
 });
 
 // Get all persons with their computed roles
-router.get('/', async (req, res) => {
+router.get('/', requirePermission('personas.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { search } = req.query;
 
@@ -64,7 +65,7 @@ router.get('/', async (req, res) => {
 });
 
 // Create person
-router.post('/', validateBody(personaSchema), async (req, res) => {
+router.post('/', requirePermission('personas.crear'), validateBody(personaSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { nombreCompleto, dni, email, telefono, direccion, estado } = req.body;
 
@@ -109,7 +110,7 @@ router.post('/', validateBody(personaSchema), async (req, res) => {
 });
 
 // Update person
-router.put('/:id', validateBody(personaSchema), async (req, res) => {
+router.put('/:id', requirePermission('personas.editar'), validateBody(personaSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { nombreCompleto, dni, email, telefono, direccion, estado } = req.body;
@@ -163,7 +164,7 @@ router.put('/:id', validateBody(personaSchema), async (req, res) => {
 // Requirement says "Estado (activo / inactivo)", so maybe we just toggle status?
 // But usually there is a delete button too.
 // If contracts exist, hard delete will fail due to foreign keys.
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', requirePermission('personas.eliminar'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
