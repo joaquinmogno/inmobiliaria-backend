@@ -165,6 +165,7 @@ model Contrato {
   garanteId                 Int?
   montoAlquiler             Decimal               @db.Decimal(10, 2)
   montoHonorarios           Decimal               @db.Decimal(10, 2)
+  moneda                    Moneda                @default(ARS)
   porcentajeActualizacion   Decimal?              @db.Decimal(5, 2)
   pagaHonorarios            PagadorHonorarios     @default(INQUILINO)
   porcentajeHonorarios      Decimal?              @db.Decimal(5, 2)
@@ -237,6 +238,7 @@ model Liquidacion {
   totalDescuentos       Decimal           @default(0) @db.Decimal(10, 2)
   totalIngresos         Decimal           @default(0) @db.Decimal(10, 2)
   montoHonorarios       Decimal           @default(0) @db.Decimal(10, 2)
+  moneda                Moneda            @default(ARS)
   porcentajeHonorarios  Decimal?          @db.Decimal(5, 2)
   fechaPagoPropietario  DateTime?         @db.Date
   metodoPagoPropietario MetodoPago?
@@ -261,6 +263,7 @@ model Movimiento {
   tipo          TipoMovimiento
   concepto      String
   monto         Decimal        @db.Decimal(10, 2)
+  moneda        Moneda         @default(ARS)
   observaciones String?
   fechaCreacion DateTime       @default(now())
   liquidacionId Int
@@ -274,6 +277,7 @@ model Movimiento {
 model Pago {
   id             Int          @id @default(autoincrement())
   monto          Decimal      @db.Decimal(10, 2)
+  moneda         Moneda       @default(ARS)
   fechaPago      DateTime     @db.Date
   metodoPago     MetodoPago   @default(EFECTIVO)
   comprobante    String?
@@ -315,6 +319,7 @@ model MovimientoCaja {
   tipo           TipoMovimiento
   concepto       String         @db.VarChar(255)
   monto          Decimal        @db.Decimal(10, 2)
+  moneda         Moneda         @default(ARS)
   fecha          DateTime       @db.Date
   metodoPago     MetodoPago     @default(EFECTIVO)
   cuenta         CuentaCaja     @default(CAJA)
@@ -398,11 +403,17 @@ enum CuentaCaja {
   BANCO
 }
 
+enum Moneda {
+  ARS
+  USD
+}
+
 model ActualizacionContrato {
   id                Int      @id @default(autoincrement())
   fechaActualizacion DateTime @default(now())
   montoAnterior     Decimal  @db.Decimal(10, 2)
   montoNuevo        Decimal  @db.Decimal(10, 2)
+  moneda            Moneda   @default(ARS)
   fechaProximaAnterior DateTime? @db.Date
   fechaProximaNueva    DateTime  @db.Date
   observaciones     String?  @db.Text
@@ -423,6 +434,7 @@ model PlanCuotas {
   id               Int               @id @default(autoincrement())
   concepto         String
   montoTotal       Decimal           @db.Decimal(10, 2)
+  moneda           Moneda            @default(ARS)
   tipoMovimiento   TipoMovimiento    
   estado           EstadoPlanCuotas  @default(ACTIVO)
   fechaCreacion    DateTime          @default(now())
@@ -443,6 +455,7 @@ model CuotaPlan {
   planId           Int
   numeroCuota      Int
   monto            Decimal           @db.Decimal(10, 2)
+  moneda           Moneda            @default(ARS)
   estado           EstadoCuota       @default(PENDIENTE)
   movimientoId     Int?              @unique
   liquidacionId    Int?              // Para saber en qué liquidación se "programó" o cobró
@@ -469,6 +482,7 @@ enum EstadoCuota {
 model PagoSueldo {
   id              Int          @id @default(autoincrement())
   monto           Decimal      @db.Decimal(10, 2)
+  moneda          Moneda       @default(ARS)
   fecha           DateTime     @db.Date
   periodo         String       // Formato "MM-YYYY"
   metodoPago      MetodoPago   @default(EFECTIVO)

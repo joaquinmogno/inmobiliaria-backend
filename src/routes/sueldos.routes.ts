@@ -13,6 +13,7 @@ router.use(authenticateToken);
 const sueldoSchema = z.object({
     usuarioId: z.coerce.number().int().positive(),
     monto: z.coerce.number().positive(),
+    moneda: z.enum(['ARS', 'USD']).optional().default('ARS'),
     fecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha debe tener formato YYYY-MM-DD'),
     periodo: z.string().trim().min(4, 'El periodo es obligatorio').max(20),
     metodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional().default('EFECTIVO'),
@@ -69,7 +70,7 @@ router.post('/', requirePermission('sueldos.crear'), async (req, res) => {
         });
     }
 
-    const { usuarioId, monto, fecha, periodo, metodoPago, observaciones } = validation.data;
+    const { usuarioId, monto, moneda, fecha, periodo, metodoPago, observaciones } = validation.data;
 
     try {
         // Verify recipient belongs to the same agency
@@ -84,6 +85,7 @@ router.post('/', requirePermission('sueldos.crear'), async (req, res) => {
         const sueldo = await prisma.pagoSueldo.create({
             data: {
                 monto: new Decimal(monto),
+                moneda,
                 fecha: new Date(fecha),
                 periodo,
                 metodoPago: metodoPago || 'EFECTIVO',
@@ -151,6 +153,7 @@ router.put('/:id', requirePermission('sueldos.editar'), async (req, res) => {
             data: {
                 ...('usuarioId' in validation.data ? { usuarioId: validation.data.usuarioId } : {}),
                 ...('monto' in validation.data ? { monto: new Decimal(validation.data.monto!) } : {}),
+                ...('moneda' in validation.data ? { moneda: validation.data.moneda } : {}),
                 ...('fecha' in validation.data ? { fecha: new Date(validation.data.fecha!) } : {}),
                 ...('periodo' in validation.data ? { periodo: validation.data.periodo } : {}),
                 ...('metodoPago' in validation.data ? { metodoPago: validation.data.metodoPago } : {}),

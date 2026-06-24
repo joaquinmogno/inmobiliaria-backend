@@ -21,6 +21,8 @@ import { logger } from '../services/logger.service';
 import { AppError } from '../errors/app-error';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { userHasPermission } from '../services/permissions.service';
+import { formatCurrency } from '../utils/currency';
+import { resolveMoneda } from '../services/currency-rules.service';
 
 const router = Router();
 
@@ -82,6 +84,7 @@ const contractCreateSchemaBase = z.object({
     inquilinos: parseJsonField(z.array(personCandidateSchema).min(1, 'Debe seleccionar al menos un inquilino')).optional(),
     montoAlquiler: positiveDecimal('El monto de alquiler'),
     montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional().default(0),
+    moneda: z.enum(['ARS', 'USD']).optional().default('ARS'),
     porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional()),
     pagaHonorarios: z.enum(['INQUILINO', 'PROPIETARIO']).optional().default('INQUILINO'),
     diaVencimiento: z.coerce.number().int().min(1).max(31).optional().default(10),
@@ -471,6 +474,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                     inmobiliariaId,
                     montoAlquiler: new Decimal(payload.montoAlquiler || 0),
                     montoHonorarios: new Decimal(payload.montoHonorarios || 0),
+                    moneda: resolveMoneda(payload.moneda),
                     porcentajeHonorarios: payload.porcentajeHonorarios ? new Decimal(payload.porcentajeHonorarios) : null,
                     pagaHonorarios: payload.pagaHonorarios || 'INQUILINO',
                     diaVencimiento: payload.diaVencimiento ? Number(payload.diaVencimiento) : 10,
@@ -500,6 +504,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                         tipo: 'INGRESO',
                         concepto: `Honorarios por Alta de Contrato - ${propiedad.direccion}`,
                         monto: new Decimal(payload.honorarioInicial),
+                            moneda: resolveMoneda(payload.moneda),
                         fecha: new Date(), // Utilizamos la fecha actual de cobro
                         creadoPorId: userId,
                         contratoId: newContract.id,
@@ -801,7 +806,8 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         diaVencimiento,
         porcentajeActualizacion,
         tipoAjuste,
-        administrado
+        administrado,
+        moneda
     } = req.body;
 
     try {
@@ -841,6 +847,23 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         if (montoHonorarios !== undefined) {
             updateData.montoHonorarios = new Decimal(montoHonorarios || 0);
             changes.montoHonorarios = { anterior: contract.montoHonorarios, nuevo: updateData.montoHonorarios };
+        }
+        if (moneda && moneda !== contract.moneda) {
+            const [liquidaciones, pagos, movimientosCaja, planesCuotas] = await Promise.all([
+                prisma.liquidacion.count({ where: { contratoId: contract.id } }),
+                prisma.pago.count({ where: { contratoId: contract.id } }),
+                prisma.movimientoCaja.count({ where: { contratoId: contract.id } }),
+                prisma.planCuotas.count({ where: { contratoId: contract.id } })
+            ]);
+
+            if (liquidaciones > 0 || pagos > 0 || movimientosCaja > 0 || planesCuotas > 0) {
+                return res.status(400).json({
+                    message: 'No se puede cambiar la moneda del contrato porque ya tiene liquidaciones, pagos, movimientos de caja o planes de cuotas asociados.'
+                });
+            }
+
+            updateData.moneda = moneda;
+            changes.moneda = { anterior: contract.moneda, nuevo: moneda };
         }
         if (porcentajeHonorarios !== undefined) {
             updateData.porcentajeHonorarios = porcentajeHonorarios ? new Decimal(porcentajeHonorarios) : null;
@@ -920,6 +943,7 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
                     contratoId: Number(id),
                     montoAnterior: contrato.montoAlquiler,
                     montoNuevo: new Decimal(montoNuevo),
+                    moneda: contrato.moneda,
                     fechaProximaAnterior: contrato.fechaProximaActualizacion,
                     fechaProximaNueva: parseDateOnly(fechaProximaNueva),
                     observaciones,
@@ -956,7 +980,7 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
             accion: 'ACTUALIZAR_ALQUILER_CON_HISTO',
             entidad: 'Contrato',
             entidadId: Number(id),
-            detalle: `Actualización de monto de alquiler: ${contrato.montoAlquiler} -> ${montoNuevo}`
+            detalle: `Actualización de monto de alquiler: ${formatCurrency(contrato.montoAlquiler.toString(), contrato.moneda)} -> ${formatCurrency(montoNuevo, contrato.moneda)}`
         });
 
         res.json(result);

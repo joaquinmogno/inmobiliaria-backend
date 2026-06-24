@@ -14,6 +14,7 @@ const movimientoCajaSchema = z.object({
     tipo: z.enum(['INGRESO', 'DESCUENTO', 'EGRESO']),
     concepto: requiredText('El concepto', 255),
     monto: positiveDecimal('El monto'),
+    moneda: z.enum(['ARS', 'USD']).optional().default('ARS'),
     fecha: dateOnlyString('La fecha'),
     metodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional().default('EFECTIVO'),
     cuenta: z.enum(['CAJA', 'BANCO']).optional(),
@@ -68,42 +69,7 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), async (r
             })
         ]);
 
-        // Totales globales y por cuenta (Acumulados)
-        const [
-            ingresosGlobal, 
-            egresosGlobal, 
-            ingresosCaja, 
-            egresosCaja, 
-            ingresosBanco, 
-            egresosBanco,
-            fondosEnCustodiaAggr // Plata ajena acumulada
-        ] = await Promise.all([
-            prisma.movimientoCaja.aggregate({ where: { inmobiliariaId, tipo: 'INGRESO' }, _sum: { monto: true } }),
-            prisma.movimientoCaja.aggregate({ where: { inmobiliariaId, tipo: 'EGRESO' }, _sum: { monto: true } }),
-            prisma.movimientoCaja.aggregate({ where: { inmobiliariaId, tipo: 'INGRESO', cuenta: 'CAJA' }, _sum: { monto: true } }),
-            prisma.movimientoCaja.aggregate({ where: { inmobiliariaId, tipo: 'EGRESO', cuenta: 'CAJA' }, _sum: { monto: true } }),
-            prisma.movimientoCaja.aggregate({ where: { inmobiliariaId, tipo: 'INGRESO', cuenta: 'BANCO' }, _sum: { monto: true } }),
-            prisma.movimientoCaja.aggregate({ where: { inmobiliariaId, tipo: 'EGRESO', cuenta: 'BANCO' }, _sum: { monto: true } }),
-            prisma.liquidacion.aggregate({ where: { inmobiliariaId, estado: 'PAGADA_POR_INQUILINO' }, _sum: { netoACobrar: true } })
-        ]);
-
-        // KPIs por período (Filtrables)
-        const [
-            cobradoInquilinosAggr, 
-            pagadoPropietariosAggr, 
-            gastosGeneralesAggr,    
-            ingresosManualesAggr
-        ] = await Promise.all([
-            prisma.movimientoCaja.aggregate({ where: { inmobiliariaId, tipo: 'INGRESO', liquidacionId: { not: null }, ...kpiDateFilter }, _sum: { monto: true } }),
-            prisma.movimientoCaja.aggregate({ where: { inmobiliariaId, tipo: 'EGRESO', liquidacionId: { not: null }, ...kpiDateFilter }, _sum: { monto: true } }),
-            prisma.movimientoCaja.aggregate({ where: { inmobiliariaId, tipo: 'EGRESO', liquidacionId: null, ...kpiDateFilter }, _sum: { monto: true } }),
-            prisma.movimientoCaja.aggregate({ where: { inmobiliariaId, tipo: 'INGRESO', liquidacionId: null, ...kpiDateFilter }, _sum: { monto: true } })
-        ]);
-
-        // Obtener honorarios de liquidaciones pagadas en el período
-        let honorariosLiquidaciones = 0;
-        let totalNetoACobrar = 0;
-        
+        // Obtener honorarios de liquidaciones pagadas en el período para calcular KPIs por moneda.
         const liquidacionesCobradas = await prisma.liquidacion.findMany({
             where: {
                 inmobiliariaId,
@@ -117,32 +83,74 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), async (r
             include: { movimientos: true }
         });
 
-        liquidacionesCobradas.forEach(l => {
-            const honsFijos = Number(l.montoHonorarios || 0);
-            const honsMovimientos = l.movimientos
-                .filter(m => m.esParaInmobiliaria)
-                .reduce((acc, m) => acc + Number(m.monto), 0);
-            
-            honorariosLiquidaciones += (honsFijos + honsMovimientos);
-            totalNetoACobrar += Number(l.netoACobrar);
-        });
+        const monedas = ['ARS', 'USD'] as const;
+        const sumCaja = async (moneda: typeof monedas[number], extraWhere: any) => Number((await prisma.movimientoCaja.aggregate({
+            where: { inmobiliariaId, moneda, ...extraWhere },
+            _sum: { monto: true }
+        }))._sum?.monto || 0);
 
-        const totalIngresosNum = Number(ingresosGlobal._sum?.monto || 0);
-        const totalEgresosNum = Number(egresosGlobal._sum?.monto || 0);
-        const totalCobrado = Number(cobradoInquilinosAggr._sum?.monto || 0);
-        const totalPagadoProp = Number(pagadoPropietariosAggr._sum?.monto || 0);
-        const totalGastosGral = Number(gastosGeneralesAggr._sum?.monto || 0);
-        const ingresosManuales = Number(ingresosManualesAggr._sum?.monto || 0);
-        
-        // Fondos en Custodia real: Lo que se cobró de liquidaciones menos lo que es honorarios de esas liquidaciones
-        const fondosEnCustodia = totalNetoACobrar - honorariosLiquidaciones;
-        
-        const gananciaBruta = honorariosLiquidaciones + ingresosManuales;
-        const resultadoNeto = gananciaBruta - totalGastosGral;
+        const totalesPorMoneda = Object.fromEntries(await Promise.all(monedas.map(async moneda => {
+            const [
+                totalIngresos,
+                totalEgresos,
+                balanceCajaIngresos,
+                balanceCajaEgresos,
+                balanceBancoIngresos,
+                balanceBancoEgresos,
+                totalCobrado,
+                totalPagadoPropietarios,
+                gastosGenerales,
+                ingresosManuales
+            ] = await Promise.all([
+                sumCaja(moneda, { tipo: 'INGRESO' }),
+                sumCaja(moneda, { tipo: 'EGRESO' }),
+                sumCaja(moneda, { tipo: 'INGRESO', cuenta: 'CAJA' }),
+                sumCaja(moneda, { tipo: 'EGRESO', cuenta: 'CAJA' }),
+                sumCaja(moneda, { tipo: 'INGRESO', cuenta: 'BANCO' }),
+                sumCaja(moneda, { tipo: 'EGRESO', cuenta: 'BANCO' }),
+                sumCaja(moneda, { tipo: 'INGRESO', liquidacionId: { not: null }, ...kpiDateFilter }),
+                sumCaja(moneda, { tipo: 'EGRESO', liquidacionId: { not: null }, ...kpiDateFilter }),
+                sumCaja(moneda, { tipo: 'EGRESO', liquidacionId: null, ...kpiDateFilter }),
+                sumCaja(moneda, { tipo: 'INGRESO', liquidacionId: null, ...kpiDateFilter })
+            ]);
 
-        const balanceGeneral = totalIngresosNum - totalEgresosNum;
-        const balanceCaja = Number(ingresosCaja._sum?.monto || 0) - Number(egresosCaja._sum?.monto || 0);
-        const balanceBanco = Number(ingresosBanco._sum?.monto || 0) - Number(egresosBanco._sum?.monto || 0);
+            let honorariosLiquidacionesMoneda = 0;
+            let totalNetoACobrarMoneda = 0;
+            liquidacionesCobradas
+                .filter(l => l.moneda === moneda)
+                .forEach(l => {
+                    const honsFijos = Number(l.montoHonorarios || 0);
+                    const honsMovimientos = l.movimientos
+                        .filter(m => m.esParaInmobiliaria)
+                        .reduce((acc, m) => acc + Number(m.monto), 0);
+                    honorariosLiquidacionesMoneda += honsFijos + honsMovimientos;
+                    totalNetoACobrarMoneda += Number(l.netoACobrar);
+                });
+
+            const fondosEnCustodia = totalNetoACobrarMoneda - honorariosLiquidacionesMoneda;
+            const gananciaBruta = honorariosLiquidacionesMoneda + ingresosManuales;
+            const resultadoNeto = gananciaBruta - gastosGenerales;
+
+            return [moneda, {
+                totalIngresos,
+                totalEgresos,
+                balance: totalIngresos - totalEgresos,
+                balanceCaja: balanceCajaIngresos - balanceCajaEgresos,
+                balanceBanco: balanceBancoIngresos - balanceBancoEgresos,
+                totalCobrado,
+                totalPagadoPropietarios,
+                gastosGenerales,
+                gananciaBruta,
+                resultadoNeto,
+                fondosEnCustodia
+            }];
+        }))) as Record<'ARS' | 'USD', any>;
+
+        const ars = totalesPorMoneda.ARS;
+
+        const balanceGeneral = ars.balance;
+        const balanceCaja = ars.balanceCaja;
+        const balanceBanco = ars.balanceBanco;
 
         res.json({
             data: movimientos,
@@ -152,17 +160,24 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), async (r
                 limit: limitNum,
                 totalPages: Math.ceil(total / limitNum),
                 balanceGeneral,
-                totalIngresos: totalIngresosNum,
-                totalEgresos: totalEgresosNum,
+                totalIngresos: ars.totalIngresos,
+                totalEgresos: ars.totalEgresos,
+                totalIngresosARS: totalesPorMoneda.ARS.totalIngresos,
+                totalEgresosARS: totalesPorMoneda.ARS.totalEgresos,
+                balanceARS: totalesPorMoneda.ARS.balance,
+                totalIngresosUSD: totalesPorMoneda.USD.totalIngresos,
+                totalEgresosUSD: totalesPorMoneda.USD.totalEgresos,
+                balanceUSD: totalesPorMoneda.USD.balance,
+                totalesPorMoneda,
                 balanceCaja,
                 balanceBanco,
                 // KPIs
-                totalCobrado,
-                totalPagadoPropietarios: totalPagadoProp,
-                gastosGenerales: totalGastosGral,
-                gananciaBruta,
-                resultadoNeto,
-                fondosEnCustodia
+                totalCobrado: ars.totalCobrado,
+                totalPagadoPropietarios: ars.totalPagadoPropietarios,
+                gastosGenerales: ars.gastosGenerales,
+                gananciaBruta: ars.gananciaBruta,
+                resultadoNeto: ars.resultadoNeto,
+                fondosEnCustodia: ars.fondosEnCustodia
             }
         });
     } catch (error) {
@@ -174,7 +189,7 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), async (r
 // Crear nuevo movimiento manual
 router.post('/', authenticateToken, requirePermission('caja_chica.crear'), validateBody(movimientoCajaSchema), async (req, res) => {
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
-    const { tipo, concepto, monto, fecha, metodoPago, cuenta, observaciones } = req.body;
+    const { tipo, concepto, monto, moneda, fecha, metodoPago, cuenta, observaciones } = req.body;
 
     if (!tipo || !concepto || !monto || !fecha) {
         return res.status(400).json({ message: 'Faltan campos obligatorios' });
@@ -192,6 +207,7 @@ router.post('/', authenticateToken, requirePermission('caja_chica.crear'), valid
                 tipo: tipo as TipoMovimiento,
                 concepto,
                 monto: new Decimal(monto),
+                moneda: moneda || 'ARS',
                 fecha: new Date(fecha),
                 metodoPago: (metodoPago as MetodoPago) || 'EFECTIVO',
                 cuenta: cuentaFinal,
@@ -206,7 +222,7 @@ router.post('/', authenticateToken, requirePermission('caja_chica.crear'), valid
             accion: 'CREAR_MOVIMIENTO_CAJA',
             entidad: 'MovimientoCaja',
             entidadId: movimiento.id,
-            detalle: `${movimiento.tipo}: ${movimiento.concepto} por $${movimiento.monto}`
+            detalle: `${movimiento.tipo}: ${movimiento.concepto} por ${movimiento.moneda === 'USD' ? 'US$' : '$'}${movimiento.monto}`
         });
 
         res.status(201).json(movimiento);

@@ -7,6 +7,8 @@ import { auditService } from '../services/audit.service';
 import { validateBody, positiveDecimal, optionalDateOnlyString, optionalText } from '../middlewares/validation.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { getContractDebtSummary } from '../services/debt.service';
+import { formatCurrency } from '../utils/currency';
+import { assertSameCurrency } from '../services/currency-rules.service';
 import { z } from 'zod';
 
 const router = Router();
@@ -16,6 +18,7 @@ const pagoSchema = z.object({
     monto: positiveDecimal('El monto'),
     fechaPago: optionalDateOnlyString('La fecha de pago'),
     metodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional().default('EFECTIVO'),
+    moneda: z.enum(['ARS', 'USD']).optional(),
     observaciones: optionalText(1000)
 });
 
@@ -109,7 +112,7 @@ router.get('/', authenticateToken, requirePermission('pagos.ver'), async (req, r
  * El monto se distribuye automáticamente entre las liquidaciones adeudadas más antiguas.
  */
 router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBody(pagoSchema), async (req, res) => {
-    const { contratoId, monto, fechaPago, metodoPago, observaciones } = req.body;
+    const { contratoId, monto, fechaPago, metodoPago, moneda, observaciones } = req.body;
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
 
     try {
@@ -144,6 +147,11 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
 
             // 2. Calcular deuda real por liquidación y filtrar las que deben algo
             const liquidacionesConDeuda = liquidaciones.map(liq => {
+                assertSameCurrency(liq.moneda, contrato.moneda, 'La liquidación tiene una moneda distinta a la del contrato');
+                if (moneda && moneda !== liq.moneda) {
+                    assertSameCurrency(moneda, liq.moneda, `El pago debe registrarse en ${liq.moneda}; no se permite mezclar monedas en una misma operación`);
+                }
+
                 const totalPagado = liq.pagos.reduce((acc, p) => acc.plus(p.monto), new Decimal(0));
                 const deuda = new Decimal(liq.netoACobrar.toString()).minus(totalPagado);
                 return { ...liq, deuda };
@@ -167,6 +175,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                 const nuevoPago = await tx.pago.create({
                     data: {
                         monto: montoAAplicar,
+                        moneda: liq.moneda,
                         fechaPago: new Date(fechaPago || new Date()),
                         metodoPago: metodoPago || MetodoPago.EFECTIVO,
                         observaciones,
@@ -198,6 +207,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                             tipo: 'INGRESO',
                             concepto: `Cobro Alquiler - ${dir} - Liq. ${periodoStr}`,
                             monto: montoAAplicar, // El monto total cobrado en este paso
+                            moneda: liq.moneda,
                             fecha: new Date(fechaPago || new Date()),
                             creadoPorId: usuarioId,
                             contratoId: Number(contratoId),
@@ -215,7 +225,8 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
 
             return {
                 pagos: pagosCreados,
-                montoSobrante: montoRestante
+                montoSobrante: montoRestante,
+                moneda: contrato.moneda
             };
         });
 
@@ -225,7 +236,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
             accion: 'REGISTRAR_PAGO',
             entidad: 'Contrato',
             entidadId: Number(contratoId),
-            detalle: `Pago registrado por $${monto} aplicado a ${result.pagos.length} liquidaciones.`
+            detalle: `Pago registrado por ${formatCurrency(monto, result.moneda)} aplicado a ${result.pagos.length} liquidaciones.`
         });
 
         const pagosConDetalle = await prisma.pago.findMany({
@@ -248,7 +259,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
             const periodo = new Date(pago.liquidacion.periodo).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' });
             const propiedad = pago.liquidacion.contrato?.propiedad?.direccion || 'Sin dirección';
             const inquilino = pago.liquidacion.contrato?.inquilinos?.[0]?.persona?.nombreCompleto || 'Sin inquilino';
-            const detalle = `Cobro a ${inquilino} por $${Number(pago.monto).toLocaleString('es-AR')} - ${propiedad} - ${periodo}`;
+            const detalle = `Cobro a ${inquilino} por ${formatCurrency(pago.monto.toString(), pago.moneda)} - ${propiedad} - ${periodo}`;
 
             return auditService.log({
             usuarioId,
@@ -270,7 +281,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
             accion: 'REGISTRAR_PAGO_LIQUIDACION',
             entidad: 'Liquidacion',
             entidadId: pago.liquidacionId,
-            detalle: `Cobro de inquilino por $${Number(pago.monto).toLocaleString('es-AR')} - ${propiedad} - ${periodo}`
+            detalle: `Cobro de inquilino por ${formatCurrency(pago.monto.toString(), pago.moneda)} - ${propiedad} - ${periodo}`
         });
         }));
 
@@ -299,7 +310,7 @@ router.get('/contrato/:id', authenticateToken, requirePermission('pagos.ver'), a
                     select: { id: true, nombreCompleto: true, email: true }
                 },
                 liquidacion: {
-                    select: { periodo: true, netoACobrar: true }
+                    select: { periodo: true, netoACobrar: true, moneda: true }
                 }
             },
             orderBy: {
