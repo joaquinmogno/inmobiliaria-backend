@@ -29,6 +29,7 @@ import helmet from 'helmet';
 
 const app = express();
 app.set('trust proxy', 1);
+app.set('etag', false);
 app.use(requestContext);
 
 // Security middlewares
@@ -56,6 +57,13 @@ app.use(cors({
 
 app.use(express.json({ limit: '10kb' }));
 app.use(cookieParser());
+
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
 
 // Routes
 app.use('/api/auth', authRoutes);
