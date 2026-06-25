@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authenticateToken } from '../middlewares/auth.middleware';
 import { AuthRequest } from '../middlewares/auth.middleware';
-import { requireSuperAdmin } from '../middlewares/permissions.middleware';
+import { requirePermission } from '../middlewares/permissions.middleware';
 import { auditService } from '../services/audit.service';
 import { decryptFileToBuffer, encryptFile, getClientIp, getUserAgent } from '../services/security.service';
 import path from 'path';
@@ -19,7 +19,6 @@ const UPLOADS_BACKUPS_DIR = path.join(BACKUPS_ROOT, 'uploads');
 const BACKUP_FILENAME_PATTERN = /^[a-zA-Z0-9._-]+\.enc$/;
 
 router.use(authenticateToken);
-router.use(requireSuperAdmin);
 
 const getBackupDir = (type: string) => {
     if (type === 'db') return DB_BACKUPS_DIR;
@@ -45,7 +44,7 @@ const getPgDumpUrl = (databaseUrl: string) => {
 };
 
 // Listar todos los backups
-router.get('/', async (_req, res) => {
+router.get('/', requirePermission('configuracion.backups.ver'), async (_req, res) => {
     try {
         const getFiles = (dir: string, type: 'db' | 'uploads') => {
             if (!fs.existsSync(dir)) return [];
@@ -75,7 +74,7 @@ router.get('/', async (_req, res) => {
 });
 
 // Generar backup manual de DB
-router.post('/db', async (req, res) => {
+router.post('/db', requirePermission('configuracion.backups.crear'), async (req, res) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `manual-db-backup-${timestamp}.sql`;
     const filepath = path.join(DB_BACKUPS_DIR, filename);
@@ -124,7 +123,7 @@ router.post('/db', async (req, res) => {
 });
 
 // Generar backup manual de Uploads
-router.post('/uploads', async (req, res) => {
+router.post('/uploads', requirePermission('configuracion.backups.crear'), async (req, res) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const sourceDir = process.env.UPLOAD_DIR || path.join(__dirname, '../../../uploads');
     const sourceName = path.basename(sourceDir);
@@ -163,7 +162,7 @@ router.post('/uploads', async (req, res) => {
 });
 
 // Descargar un backup
-router.get('/download/:type/:filename', async (req, res) => {
+router.get('/download/:type/:filename', requirePermission('configuracion.backups.descargar'), async (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
     const filepath = resolveBackupPath(type, filename);
 
@@ -193,7 +192,7 @@ router.get('/download/:type/:filename', async (req, res) => {
 });
 
 // Eliminar un backup
-router.delete('/:type/:filename', (req, res) => {
+router.delete('/:type/:filename', requirePermission('configuracion.backups.eliminar'), (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
     const filepath = resolveBackupPath(type, filename);
 

@@ -60,13 +60,13 @@ const adminPermissions = [
     "reportes.morosidad.ver",
     "contratos.archivos.ver",
     "contratos.restaurar",
+    "configuracion.backups.ver",
+    "configuracion.backups.crear",
+    "configuracion.backups.descargar",
 ];
 
 const globalOnlyPermissions = new Set([
-    "configuracion.backups.ver",
-    "configuracion.backups.crear",
     "configuracion.backups.eliminar",
-    "configuracion.backups.descargar",
 ]);
 
 async function syncPermissions() {
