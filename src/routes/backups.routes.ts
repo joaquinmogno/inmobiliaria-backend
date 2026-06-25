@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { authenticateToken } from '../middlewares/auth.middleware';
 import { AuthRequest } from '../middlewares/auth.middleware';
-import { requirePermission } from '../middlewares/permissions.middleware';
+import { requireSuperAdmin } from '../middlewares/permissions.middleware';
 import { auditService } from '../services/audit.service';
+import { decryptFileToBuffer, encryptFile, getClientIp, getUserAgent } from '../services/security.service';
 import path from 'path';
 import fs from 'fs';
 import { execFile } from 'child_process';
@@ -13,13 +14,12 @@ const router = Router();
 
 // Directorios de backups e scripts
 const BACKUPS_ROOT = process.env.BACKUPS_DIR || path.join(__dirname, '../../../backups');
-const SCRIPTS_DIR = process.env.SCRIPTS_DIR || path.join(__dirname, '../../scripts');
 const DB_BACKUPS_DIR = path.join(BACKUPS_ROOT, 'db');
 const UPLOADS_BACKUPS_DIR = path.join(BACKUPS_ROOT, 'uploads');
-const BACKUP_SCRIPT_PATH = path.join(SCRIPTS_DIR, 'backup-uploads.sh');
-const BACKUP_FILENAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
+const BACKUP_FILENAME_PATTERN = /^[a-zA-Z0-9._-]+\.enc$/;
 
 router.use(authenticateToken);
+router.use(requireSuperAdmin);
 
 const getBackupDir = (type: string) => {
     if (type === 'db') return DB_BACKUPS_DIR;
@@ -45,7 +45,7 @@ const getPgDumpUrl = (databaseUrl: string) => {
 };
 
 // Listar todos los backups
-router.get('/', requirePermission('configuracion.backups.ver'), async (req, res) => {
+router.get('/', async (_req, res) => {
     try {
         const getFiles = (dir: string, type: 'db' | 'uploads') => {
             if (!fs.existsSync(dir)) return [];
@@ -75,10 +75,12 @@ router.get('/', requirePermission('configuracion.backups.ver'), async (req, res)
 });
 
 // Generar backup manual de DB
-router.post('/db', requirePermission('configuracion.backups.crear'), async (req, res) => {
+router.post('/db', async (req, res) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `manual-db-backup-${timestamp}.sql`;
     const filepath = path.join(DB_BACKUPS_DIR, filename);
+    const encryptedFilename = `${filename}.enc`;
+    const encryptedPath = path.join(DB_BACKUPS_DIR, encryptedFilename);
 
     try {
         if (!fs.existsSync(DB_BACKUPS_DIR)) fs.mkdirSync(DB_BACKUPS_DIR, { recursive: true });
@@ -100,15 +102,21 @@ router.post('/db', requirePermission('configuracion.backups.crear'), async (req,
             console.error('pg_dump stderr:', stderr);
         }
 
+        await encryptFile(filepath, encryptedPath);
+        fs.unlinkSync(filepath);
+
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
             inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId,
             accion: 'CREAR_BACKUP_DB',
             entidad: 'Backup',
-            detalle: filename
+            detalle: encryptedFilename,
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req),
+            severidad: 'CRITICAL'
         });
 
-        res.status(201).json({ message: 'Backup de base de datos generado', filename });
+        res.status(201).json({ message: 'Backup de base de datos generado y cifrado', filename: encryptedFilename });
     } catch (error: any) {
         console.error('Error generating manual DB backup:', error);
         res.status(500).json({ message: 'Error al generar backup', details: error.message || String(error) });
@@ -116,26 +124,38 @@ router.post('/db', requirePermission('configuracion.backups.crear'), async (req,
 });
 
 // Generar backup manual de Uploads
-router.post('/uploads', requirePermission('configuracion.backups.crear'), async (req, res) => {
+router.post('/uploads', async (req, res) => {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const sourceDir = process.env.UPLOAD_DIR || path.join(__dirname, '../../../uploads');
+    const sourceName = path.basename(sourceDir);
+    const sourceParent = path.dirname(sourceDir);
+    const filename = `uploads-backup-${timestamp}.tar.gz`;
+    const filepath = path.join(UPLOADS_BACKUPS_DIR, filename);
+    const encryptedFilename = `${filename}.enc`;
+    const encryptedPath = path.join(UPLOADS_BACKUPS_DIR, encryptedFilename);
+
     try {
-        console.log('Ejecutando backup manual de archivos...');
-        const { stdout } = await execFilePromise('sh', [BACKUP_SCRIPT_PATH], {
-            env: {
-                ...process.env,
-                BACKUPS_DIR: BACKUPS_ROOT,
-                UPLOAD_DIR: process.env.UPLOAD_DIR || path.join(__dirname, '../../../uploads')
-            }
+        if (!fs.existsSync(sourceDir)) return res.status(404).json({ message: 'Carpeta de uploads no encontrada' });
+        if (!fs.existsSync(UPLOADS_BACKUPS_DIR)) fs.mkdirSync(UPLOADS_BACKUPS_DIR, { recursive: true });
+
+        await execFilePromise('tar', ['-czf', filepath, '-C', sourceParent, sourceName], {
+            maxBuffer: 1024 * 1024 * 10
         });
+        await encryptFile(filepath, encryptedPath);
+        fs.unlinkSync(filepath);
 
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
             inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId,
             accion: 'CREAR_BACKUP_UPLOADS',
             entidad: 'Backup',
-            detalle: stdout || 'Backup de archivos generado'
+            detalle: encryptedFilename,
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req),
+            severidad: 'CRITICAL'
         });
         
-        res.status(201).json({ message: 'Backup de archivos iniciado', output: stdout });
+        res.status(201).json({ message: 'Backup de archivos generado y cifrado', filename: encryptedFilename });
     } catch (error) {
         console.error('Error generating manual uploads backup:', error);
         res.status(500).json({ message: 'Error al generar backup de archivos' });
@@ -143,7 +163,7 @@ router.post('/uploads', requirePermission('configuracion.backups.crear'), async 
 });
 
 // Descargar un backup
-router.get('/download/:type/:filename', requirePermission('configuracion.backups.descargar'), (req, res) => {
+router.get('/download/:type/:filename', async (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
     const filepath = resolveBackupPath(type, filename);
 
@@ -151,11 +171,29 @@ router.get('/download/:type/:filename', requirePermission('configuracion.backups
         return res.status(404).json({ message: 'Archivo no encontrado' });
     }
 
-    res.download(filepath);
+    try {
+        const data = await decryptFileToBuffer(filepath);
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId,
+            accion: 'DESCARGAR_BACKUP',
+            entidad: 'Backup',
+            detalle: `${type}/${filename}`,
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req),
+            severidad: 'CRITICAL'
+        });
+        const downloadName = filename.replace(/\.enc$/, '');
+        res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.send(data);
+    } catch (error) {
+        res.status(500).json({ message: 'Error al descifrar backup' });
+    }
 });
 
 // Eliminar un backup
-router.delete('/:type/:filename', requirePermission('configuracion.backups.eliminar'), (req, res) => {
+router.delete('/:type/:filename', (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
     const filepath = resolveBackupPath(type, filename);
 
@@ -168,7 +206,10 @@ router.delete('/:type/:filename', requirePermission('configuracion.backups.elimi
                 inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId,
                 accion: 'ELIMINAR_BACKUP',
                 entidad: 'Backup',
-                detalle: `${type}/${filename}`
+                detalle: `${type}/${filename}`,
+                ipAddress: getClientIp(req),
+                userAgent: getUserAgent(req),
+                severidad: 'CRITICAL'
             });
 
             res.json({ message: 'Backup eliminado exitosamente' });

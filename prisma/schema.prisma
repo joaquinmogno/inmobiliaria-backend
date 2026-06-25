@@ -29,6 +29,7 @@ model Inmobiliaria {
   usuarios           Usuario[]
   planesCuotas       PlanCuotas[]
   sueldos            PagoSueldo[]
+  sesiones           UserSession[]
 }
 
 model Usuario {
@@ -37,6 +38,10 @@ model Usuario {
   password                String
   nombreCompleto          String
   rol                     RolUsuario       @default(AGENTE)
+  activo                  Boolean          @default(true)
+  sessionVersion          Int              @default(0)
+  passwordChangedAt       DateTime?
+  mustChangePassword      Boolean          @default(false)
   fechaCreacion           DateTime         @default(now())
   fechaActualizacion      DateTime         @updatedAt
   inmobiliariaId          Int
@@ -49,6 +54,7 @@ model Usuario {
   pagosCreados            Pago[]           @relation("PagoCreadoPor")
   permisos                 UsuarioPermiso[]
   permisosDenegados        UsuarioPermisoDenegado[]
+  sesiones                UserSession[]
   personasActualizadas    Persona[]        @relation("PersonaActualizadaPor")
   personasCreadas         Persona[]        @relation("PersonaCreadaPor")
   propiedadesActualizadas Propiedad[]      @relation("PropiedadActualizadaPor")
@@ -57,6 +63,28 @@ model Usuario {
   sueldosRecibidos        PagoSueldo[]     @relation("SueldoParaUsuario")
   sueldosPagados          PagoSueldo[]     @relation("SueldoCreadoPor")
   inmobiliaria            Inmobiliaria     @relation(fields: [inmobiliariaId], references: [id])
+}
+
+model UserSession {
+  id             Int          @id @default(autoincrement())
+  tokenHash      String       @unique
+  csrfTokenHash  String
+  userAgent      String?
+  ipAddress      String?
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  createdAt      DateTime     @default(now())
+  lastSeenAt     DateTime     @default(now())
+  usuarioId      Int
+  inmobiliariaId Int
+  sessionVersion Int
+  usuario        Usuario      @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+
+  @@index([usuarioId])
+  @@index([inmobiliariaId])
+  @@index([expiresAt])
+  @@index([revokedAt])
 }
 
 model Permiso {
@@ -304,6 +332,9 @@ model AuditLog {
   entidad        String
   entidadId      Int?
   detalle        String?
+  ipAddress      String?
+  userAgent      String?
+  severidad      AuditSeverity @default(INFO)
   fechaCreacion  DateTime     @default(now())
   usuarioId      Int?
   inmobiliariaId Int
@@ -312,6 +343,12 @@ model AuditLog {
 
   @@index([inmobiliariaId])
   @@index([fechaCreacion])
+}
+
+enum AuditSeverity {
+  INFO
+  WARNING
+  CRITICAL
 }
 
 model MovimientoCaja {
