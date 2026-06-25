@@ -5,6 +5,7 @@ import { requirePermission } from '../middlewares/permissions.middleware';
 import { validateBody, requiredText } from '../middlewares/validation.middleware';
 import { getUserPermissionDetails, getUserPermissions, MODULE_PERMISSIONS, resolveEffectivePermissions } from '../services/permissions.service';
 import { auditService } from '../services/audit.service';
+import { getClientIp, getUserAgent, privilegedRoles, revokeAllUserSessions, validatePasswordStrength } from '../services/security.service';
 import bcrypt from 'bcrypt';
 import { z } from 'zod';
 
@@ -14,12 +15,14 @@ router.use(authenticateToken);
 
 const createUserSchema = z.object({
     email: z.string().trim().toLowerCase().email('Email inválido').max(254),
-    password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres').max(128),
+    password: z.string().min(12, 'La contraseña debe tener al menos 12 caracteres').max(128),
     nombreCompleto: requiredText('El nombre completo', 120),
     rol: z.enum(['OWNER', 'JEFE', 'ADMIN', 'AGENTE']).optional().default('AGENTE')
 });
 
-const updateUserSchema = createUserSchema.omit({ password: true }).partial().refine(
+const updateUserSchema = createUserSchema.omit({ password: true }).extend({
+    activo: z.boolean().optional()
+}).partial().refine(
     data => Object.keys(data).length > 0,
     { message: 'Debe indicar al menos un campo para actualizar' }
 );
@@ -69,6 +72,8 @@ router.get('/', requirePermission('usuarios.ver'), async (req, res) => {
                 email: true,
                 nombreCompleto: true,
                 rol: true,
+                activo: true,
+                mustChangePassword: true,
                 fechaCreacion: true,
                 fechaActualizacion: true,
                 permisos: {
@@ -103,6 +108,8 @@ router.get('/', requirePermission('usuarios.ver'), async (req, res) => {
                 rol: user.rol,
                 fechaCreacion: user.fechaCreacion,
                 fechaActualizacion: user.fechaActualizacion,
+                activo: user.activo,
+                mustChangePassword: user.mustChangePassword,
                 ...details
             };
         }));
@@ -132,6 +139,11 @@ router.post('/', requirePermission('usuarios.crear'), validateBody(createUserSch
     const { email, password, nombreCompleto, rol } = req.body;
 
     try {
+        const passwordErrors = validatePasswordStrength(password, [email, nombreCompleto]);
+        if (passwordErrors.length > 0) {
+            return res.status(400).json({ message: 'La contraseña no cumple la política de seguridad', errors: passwordErrors });
+        }
+
         const existingUser = await prisma.usuario.findUnique({ where: { email } });
         if (existingUser) {
             return res.status(400).json({ message: 'El email ya está en uso' });
@@ -145,8 +157,21 @@ router.post('/', requirePermission('usuarios.crear'), validateBody(createUserSch
                 password: hashedPassword,
                 nombreCompleto,
                 rol: rol || 'AGENTE',
-                inmobiliariaId
+                inmobiliariaId,
+                mustChangePassword: true
             }
+        });
+
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId,
+            accion: 'CREAR_USUARIO',
+            entidad: 'Usuario',
+            entidadId: user.id,
+            detalle: `Usuario creado: ${user.email}`,
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req),
+            severidad: privilegedRoles.has(user.rol) ? 'CRITICAL' : 'INFO'
         });
 
         const { password: _, nombreCompleto: fullName, rol: role, ...userWithoutPassword } = user;
@@ -252,8 +277,12 @@ router.put('/:id/permisos', requirePermission('usuarios.permisos'), validateBody
                 permisosDirectosDespues: permissions,
                 permisosDenegadosDespues: deniedPermissions,
                 permisosEfectivosDespues: projectedPermissions
-            })
+            }),
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req),
+            severidad: 'CRITICAL'
         });
+        await revokeAllUserSessions(user.id);
 
         res.json({
             id: user.id,
@@ -268,7 +297,7 @@ router.put('/:id/permisos', requirePermission('usuarios.permisos'), validateBody
 router.put('/:id', requirePermission('usuarios.editar'), validateBody(updateUserSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { email, nombreCompleto, rol } = req.body;
+    const { email, nombreCompleto, rol, activo } = req.body;
 
     try {
         const user = await prisma.usuario.findFirst({
@@ -308,8 +337,26 @@ router.put('/:id', requirePermission('usuarios.editar'), validateBody(updateUser
             data: {
                 email,
                 nombreCompleto,
-                rol
+                rol,
+                activo,
+                ...(rol && rol !== user.rol ? { sessionVersion: { increment: 1 } } : {}),
+                ...(activo === false ? { sessionVersion: { increment: 1 } } : {})
             }
+        });
+        if ((rol && rol !== user.rol) || activo === false) {
+            await revokeAllUserSessions(user.id);
+        }
+
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId,
+            accion: 'ACTUALIZAR_USUARIO',
+            entidad: 'Usuario',
+            entidadId: updatedUser.id,
+            detalle: `Usuario actualizado: ${updatedUser.email}`,
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req),
+            severidad: rol && rol !== user.rol ? 'CRITICAL' : 'WARNING'
         });
 
         const directPermissions = await prisma.usuarioPermiso.findMany({
@@ -328,6 +375,8 @@ router.put('/:id', requirePermission('usuarios.editar'), validateBody(updateUser
             fullName,
             rol: role,
             role,
+            activo: updatedUser.activo,
+            mustChangePassword: updatedUser.mustChangePassword,
             ...(await getUserPermissionDetails(updatedUser.id, role)),
             directPermissions: directPermissions.map(item => item.permiso.clave),
             deniedPermissions: deniedPermissions.map(item => item.permiso.clave)
@@ -364,6 +413,19 @@ router.delete('/:id', requirePermission('usuarios.eliminar'), async (req, res) =
 
         await prisma.usuario.delete({
             where: { id: Number(id) }
+        });
+        await revokeAllUserSessions(user.id);
+
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId,
+            accion: 'ELIMINAR_USUARIO',
+            entidad: 'Usuario',
+            entidadId: user.id,
+            detalle: `Usuario eliminado: ${user.email}`,
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req),
+            severidad: 'CRITICAL'
         });
 
         res.json({ message: 'Usuario eliminado con éxito' });

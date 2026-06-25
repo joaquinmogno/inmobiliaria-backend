@@ -55,14 +55,19 @@ const permissions = [
 
 const adminPermissions = [
     "configuracion.perfil.ver",
-    "configuracion.backups.ver",
-    "configuracion.backups.descargar",
     "reportes.dashboard.ver",
     "reportes.contratos.ver",
     "reportes.morosidad.ver",
     "contratos.archivos.ver",
     "contratos.restaurar",
 ];
+
+const globalOnlyPermissions = new Set([
+    "configuracion.backups.ver",
+    "configuracion.backups.crear",
+    "configuracion.backups.eliminar",
+    "configuracion.backups.descargar",
+]);
 
 async function syncPermissions() {
     await prisma.permiso.createMany({
@@ -76,11 +81,23 @@ async function syncPermissions() {
     });
 
     await prisma.rolPermiso.createMany({
-        data: ["OWNER", "JEFE"].flatMap(rol =>
+        data: ["SUPERADMIN"].flatMap(rol =>
             allPermissions.map(permission => ({
                 rol: rol as any,
                 permisoId: permission.id
             }))
+        ),
+        skipDuplicates: true
+    });
+
+    await prisma.rolPermiso.createMany({
+        data: ["OWNER", "JEFE"].flatMap(rol =>
+            allPermissions
+                .filter(permission => !globalOnlyPermissions.has(permission.clave))
+                .map(permission => ({
+                    rol: rol as any,
+                    permisoId: permission.id
+                }))
         ),
         skipDuplicates: true
     });

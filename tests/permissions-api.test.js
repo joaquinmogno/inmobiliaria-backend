@@ -1,27 +1,63 @@
 process.env.NODE_ENV = 'test';
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-permissions-api-suite';
+process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'test-session-secret-for-permissions-api-suite';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
-const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
 
 const permissionsService = require('../dist/services/permissions.service');
+const { prisma } = require('../dist/prisma');
 const { authenticateToken } = require('../dist/middlewares/auth.middleware');
 const { requirePermission } = require('../dist/middlewares/permissions.middleware');
+const { SESSION_COOKIE, CSRF_COOKIE, sha256 } = require('../dist/services/security.service');
 
-function createToken() {
-  return jwt.sign(
-    {
+const SESSION_TOKEN = 'permissions-session-token';
+const CSRF_TOKEN = 'permissions-csrf-token';
+
+function installSessionMock() {
+  prisma.userSession = {
+    findUnique: async ({ where }) => {
+      if (where.tokenHash !== sha256(SESSION_TOKEN)) return null;
+      return {
+        id: 1,
+        tokenHash: where.tokenHash,
+        csrfTokenHash: sha256(CSRF_TOKEN),
+        expiresAt: new Date(Date.now() + 60_000),
+        revokedAt: null,
+        sessionVersion: 0,
+        usuario: {
+          id: 9001,
+          email: 'permisos.test@inmobiliaria.local',
+          rol: 'SUPERADMIN',
+          inmobiliariaId: 1,
+          activo: true,
+          mfaEnabled: true,
+          mustChangePassword: false,
+          sessionVersion: 0,
+          inmobiliaria: { id: 1, activa: true },
+        },
+      };
+    },
+    update: async () => undefined,
+  };
+}
+
+function authHeaders() {
+  return {
+    Cookie: `${SESSION_COOKIE}=${SESSION_TOKEN}; ${CSRF_COOKIE}=${CSRF_TOKEN}`,
+    'X-CSRF-Token': CSRF_TOKEN,
+  };
+}
+
+function createUser() {
+  return {
       id: 9001,
       email: 'permisos.test@inmobiliaria.local',
       role: 'SUPERADMIN',
       inmobiliariaId: 1,
-    },
-    process.env.JWT_SECRET,
-    { expiresIn: '1h' }
-  );
+  };
 }
 
 async function withServer(app, run) {
@@ -40,6 +76,7 @@ async function withServer(app, run) {
 
 function createPermissionsApp() {
   const app = express();
+  app.use(cookieParser());
   app.use(express.json());
 
   app.get('/api/sueldos', authenticateToken, requirePermission('sueldos.ver'), (_req, res) => {
@@ -59,12 +96,13 @@ function createPermissionsApp() {
 }
 
 test('HTTP permissions: user without sueldos.ver receives 403', async () => {
+  installSessionMock();
   const original = permissionsService.userHasPermission;
   permissionsService.userHasPermission = async () => false;
 
   await withServer(createPermissionsApp(), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/sueldos`, {
-      headers: { Authorization: `Bearer ${createToken()}` },
+      headers: authHeaders(),
     });
 
     assert.equal(response.status, 403);
@@ -75,12 +113,13 @@ test('HTTP permissions: user without sueldos.ver receives 403', async () => {
 });
 
 test('HTTP permissions: user with sueldos.ver can access endpoint', async () => {
+  installSessionMock();
   const original = permissionsService.userHasPermission;
   permissionsService.userHasPermission = async (_userId, _role, permission) => permission === 'sueldos.ver';
 
   await withServer(createPermissionsApp(), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/sueldos`, {
-      headers: { Authorization: `Bearer ${createToken()}` },
+      headers: authHeaders(),
     });
 
     assert.equal(response.status, 200);
@@ -91,6 +130,7 @@ test('HTTP permissions: user with sueldos.ver can access endpoint', async () => 
 });
 
 test('HTTP permissions: explicit denial overrides inherited role permission', async () => {
+  installSessionMock();
   const original = permissionsService.userHasPermission;
   permissionsService.userHasPermission = async (_userId, _role, permission) => {
     const effective = permissionsService.resolveEffectivePermissions(
@@ -103,7 +143,7 @@ test('HTTP permissions: explicit denial overrides inherited role permission', as
 
   await withServer(createPermissionsApp(), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/sueldos`, {
-      headers: { Authorization: `Bearer ${createToken()}` },
+      headers: authHeaders(),
     });
 
     assert.equal(response.status, 403);
@@ -113,12 +153,13 @@ test('HTTP permissions: explicit denial overrides inherited role permission', as
 });
 
 test('HTTP auth/me returns refreshed permissions on each request', async () => {
+  installSessionMock();
   const original = permissionsService.getUserPermissions;
   let permissions = ['contratos.ver'];
   permissionsService.getUserPermissions = async () => permissions;
 
   await withServer(createPermissionsApp(), async (baseUrl) => {
-    const headers = { Authorization: `Bearer ${createToken()}` };
+    const headers = authHeaders();
 
     const first = await fetch(`${baseUrl}/api/auth/me`, { headers });
     assert.equal(first.status, 200);

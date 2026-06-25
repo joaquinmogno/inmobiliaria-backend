@@ -1,15 +1,16 @@
 process.env.NODE_ENV = 'test';
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-currency-api-suite';
+process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'test-session-secret-for-currency-api-suite';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
-const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
 
 const { prisma } = require('../dist/prisma');
 const { auditService } = require('../dist/services/audit.service');
 const permissionsService = require('../dist/services/permissions.service');
+const { SESSION_COOKIE, CSRF_COOKIE, sha256 } = require('../dist/services/security.service');
 const contratosRoutes = require('../dist/routes/contratos.routes').default;
 const liquidacionesRoutes = require('../dist/routes/liquidaciones.routes').default;
 const pagosRoutes = require('../dist/routes/pagos.routes').default;
@@ -21,24 +22,15 @@ const createdMovimientos = [];
 const createdPagos = [];
 const createdCaja = [];
 
-function createToken() {
-  return jwt.sign(
-    {
-      id: 7001,
-      email: 'moneda.test@inmobiliaria.local',
-      role: 'SUPERADMIN',
-      inmobiliariaId: 1,
-    },
-    process.env.JWT_SECRET,
-    { expiresIn: '1h' }
-  );
-}
+const SESSION_TOKEN = 'currency-session-token';
+const CSRF_TOKEN = 'currency-csrf-token';
 
 async function request(app, path, options = {}) {
   const response = await fetch(`http://127.0.0.1:${app.address.port}${path}`, {
     ...options,
     headers: {
-      Authorization: `Bearer ${createToken()}`,
+      Cookie: `${SESSION_COOKIE}=${SESSION_TOKEN}; ${CSRF_COOKIE}=${CSRF_TOKEN}`,
+      'X-CSRF-Token': CSRF_TOKEN,
       'Content-Type': 'application/json',
       ...(options.headers || {}),
     },
@@ -53,6 +45,7 @@ async function request(app, path, options = {}) {
 
 async function withServer(run) {
   const app = express();
+  app.use(cookieParser());
   app.use(express.json());
   app.use('/api/contratos', contratosRoutes);
   app.use('/api/liquidaciones', liquidacionesRoutes);
@@ -83,6 +76,31 @@ function installPrismaMocks() {
   prisma.rolPermiso = { findMany: async () => allPermissions };
   prisma.usuarioPermiso = { findMany: async () => [] };
   prisma.usuarioPermisoDenegado = { findMany: async () => [] };
+  prisma.userSession = {
+    findUnique: async ({ where }) => {
+      if (where.tokenHash !== sha256(SESSION_TOKEN)) return null;
+      return {
+        id: 1,
+        tokenHash: where.tokenHash,
+        csrfTokenHash: sha256(CSRF_TOKEN),
+        expiresAt: new Date(Date.now() + 60_000),
+        revokedAt: null,
+        sessionVersion: 0,
+        usuario: {
+          id: 7001,
+          email: 'moneda.test@inmobiliaria.local',
+          rol: 'SUPERADMIN',
+          inmobiliariaId: 1,
+          activo: true,
+          mfaEnabled: true,
+          mustChangePassword: false,
+          sessionVersion: 0,
+          inmobiliaria: { id: 1, activa: true },
+        },
+      };
+    },
+    update: async () => undefined,
+  };
 
   prisma.$transaction = async (callback) => callback(prisma);
 

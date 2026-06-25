@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import cookieParser from 'cookie-parser';
 import authRoutes from './routes/auth.routes';
 // import propietariosRoutes from './routes/propietarios.routes';
 // import inquilinosRoutes from './routes/inquilinos.routes';
@@ -45,11 +46,16 @@ const allowedOrigins = [
 ].filter(Boolean) as string[];
 
 app.use(cors({
-  origin: allowedOrigins.length > 0 ? allowedOrigins : '*',
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Origen no permitido por CORS'));
+  },
   credentials: true
 }));
 
 app.use(express.json({ limit: '10kb' }));
+app.use(cookieParser());
 
 // Routes
 app.use('/api/auth', authRoutes);

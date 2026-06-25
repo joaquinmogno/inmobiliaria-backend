@@ -2,22 +2,28 @@ import { prisma } from '../prisma';
 
 export const auditService = {
   log: async (params: {
-    usuarioId: number;
+    usuarioId?: number | null;
     inmobiliariaId: number;
     accion: string;
     entidad: string;
     entidadId?: number;
     detalle?: string;
+    ipAddress?: string | null;
+    userAgent?: string | null;
+    severidad?: 'INFO' | 'WARNING' | 'CRITICAL';
   }) => {
     try {
       await prisma.auditLog.create({
         data: {
-          usuarioId: params.usuarioId,
+          usuarioId: params.usuarioId || null,
           inmobiliariaId: params.inmobiliariaId,
           accion: params.accion,
           entidad: params.entidad,
           entidadId: params.entidadId,
-          detalle: params.detalle
+          detalle: params.detalle,
+          ipAddress: params.ipAddress || undefined,
+          userAgent: params.userAgent || undefined,
+          severidad: params.severidad || 'INFO'
         }
       });
     } catch (error) {

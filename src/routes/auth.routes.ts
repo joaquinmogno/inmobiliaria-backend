@@ -1,12 +1,22 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import bcrypt from 'bcrypt';
-import jwt from 'jsonwebtoken';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
 import { loginLimiter } from '../middlewares/rateLimiter.middleware';
 import { z } from 'zod';
-import { env } from '../config/env';
 import { getUserPermissionDetails, userHasPermission } from '../services/permissions.service';
+import { auditService } from '../services/audit.service';
+import {
+    clearAuthCookies,
+    createSession,
+    getClientIp,
+    getUserAgent,
+    privilegedRoles,
+    revokeAllUserSessions,
+    revokeSession,
+    validatePasswordStrength
+} from '../services/security.service';
+import { env } from '../config/env';
 
 const router = Router();
 
@@ -17,17 +27,17 @@ const loginSchema = z.object({
         .email('Email inválido')
         .max(254, 'Email demasiado largo'),
     password: z.string()
-        .min(6, 'La contraseña debe tener al menos 6 caracteres')
+        .min(1, 'La contraseña es obligatoria')
         .max(128, 'Contraseña demasiado larga')
 });
 
 const changePasswordSchema = z.object({
     currentPassword: z.string().min(1, 'La contraseña actual es requerida'),
-    newPassword: z.string().min(6, 'La nueva contraseña debe tener al menos 6 caracteres')
+    newPassword: z.string().min(12, 'La nueva contraseña debe tener al menos 12 caracteres').max(128)
 });
 
 const resetPasswordSchema = z.object({
-    newPassword: z.string().min(6, 'La nueva contraseña debe tener al menos 6 caracteres')
+    newPassword: z.string().min(12, 'La nueva contraseña debe tener al menos 12 caracteres').max(128)
 });
 
 const setupSuperAdminSchema = z.object({
@@ -53,6 +63,7 @@ async function buildSessionUser(userId: number) {
         nombreCompleto: user.nombreCompleto,
         role: user.rol,
         rol: user.rol,
+        mustChangePassword: user.mustChangePassword,
         ...permissionDetails,
         inmobiliaria: user.inmobiliaria
     };
@@ -75,35 +86,63 @@ router.post('/login', loginLimiter, async (req, res) => {
             include: { inmobiliaria: true }
         });
 
-        if (!user) {
+        if (!user || !user.activo) {
             return res.status(401).json({ message: 'Credenciales inválidas' });
-        }
-
-        if (user.rol !== 'SUPERADMIN' && (!user.inmobiliaria || !user.inmobiliaria.activa)) {
-            return res.status(403).json({ message: 'Cuenta suspendida, contacte al administrador' });
         }
 
         const validPassword = await bcrypt.compare(password, user.password);
 
         if (!validPassword) {
+            await auditService.log({
+                usuarioId: user.id,
+                inmobiliariaId: user.inmobiliariaId,
+                accion: 'LOGIN_FALLIDO',
+                entidad: 'Auth',
+                detalle: `Intento fallido para ${email}`,
+                ipAddress: getClientIp(req),
+                userAgent: getUserAgent(req),
+                severidad: 'WARNING'
+            });
             return res.status(401).json({ message: 'Credenciales inválidas' });
         }
 
-        const token = jwt.sign(
-            {
-                id: user.id,
-                email: user.email,
-                role: user.rol,
-                inmobiliariaId: user.inmobiliariaId
-            },
-            env.jwtSecret,
-            { expiresIn: '8h' }
-        );
+        if (user.rol !== 'SUPERADMIN' && (!user.inmobiliaria || !user.inmobiliaria.activa)) {
+            await auditService.log({
+                usuarioId: user.id,
+                inmobiliariaId: user.inmobiliariaId,
+                accion: 'LOGIN_CUENTA_SUSPENDIDA',
+                entidad: 'Auth',
+                detalle: `Intento de login en cuenta suspendida para ${email}`,
+                ipAddress: getClientIp(req),
+                userAgent: getUserAgent(req),
+                severidad: 'WARNING'
+            });
+            return res.status(403).json({ message: 'Cuenta suspendida, contacte al administrador' });
+        }
+
+        const session = await createSession({
+            userId: user.id,
+            inmobiliariaId: user.inmobiliariaId,
+            sessionVersion: user.sessionVersion,
+            req,
+            res
+        });
 
         const sessionUser = await buildSessionUser(user.id);
 
+        await auditService.log({
+            usuarioId: user.id,
+            inmobiliariaId: user.inmobiliariaId,
+            accion: 'LOGIN_EXITOSO',
+            entidad: 'Auth',
+            detalle: `Inicio de sesión para ${email}`,
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req)
+        });
+
         res.json({
-            token,
+            csrfToken: session.csrfToken,
+            expiresAt: session.expiresAt,
             user: sessionUser
         });
     } catch (error) {
@@ -122,11 +161,23 @@ router.get('/me', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: 'Usuario no encontrado' });
         }
 
-        res.json(sessionUser);
+        res.json({
+            ...sessionUser,
+            csrfToken: (req as AuthRequest).csrfToken
+        });
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: 'Error al obtener el usuario actual' });
     }
+});
+
+router.post('/logout', authenticateToken, async (req, res) => {
+    const authReq = req as AuthRequest;
+    if (authReq.sessionId) {
+        await revokeSession(authReq.sessionId);
+    }
+    clearAuthCookies(res);
+    res.json({ message: 'Sesión cerrada' });
 });
 
 // Change password (logged in user)
@@ -149,13 +200,36 @@ router.post('/change-password', authenticateToken, async (req, res) => {
         const validPassword = await bcrypt.compare(currentPassword, user.password);
         if (!validPassword) return res.status(400).json({ message: 'Contraseña actual incorrecta' });
 
+        const passwordErrors = validatePasswordStrength(newPassword, [user.email, user.nombreCompleto]);
+        if (passwordErrors.length > 0) {
+            return res.status(400).json({ message: 'La contraseña no cumple la política de seguridad', errors: passwordErrors });
+        }
+
         const hashedPassword = await bcrypt.hash(newPassword, 10);
         await prisma.usuario.update({
             where: { id },
-            data: { password: hashedPassword }
+            data: {
+                password: hashedPassword,
+                sessionVersion: { increment: 1 },
+                passwordChangedAt: new Date(),
+                mustChangePassword: false
+            }
+        });
+        await revokeAllUserSessions(id);
+        clearAuthCookies(res);
+
+        await auditService.log({
+            usuarioId: id,
+            inmobiliariaId: user.inmobiliariaId,
+            accion: 'PASSWORD_CHANGE',
+            entidad: 'Usuario',
+            entidadId: id,
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req),
+            severidad: 'WARNING'
         });
 
-        res.json({ message: 'Contraseña actualizada con éxito' });
+        res.json({ message: 'Contraseña actualizada con éxito. Vuelva a iniciar sesión.' });
     } catch (error) {
         res.status(500).json({ message: 'Error al cambiar contraseña' });
     }
@@ -186,10 +260,33 @@ router.post('/reset-password/:userId', authenticateToken, async (req, res) => {
 
         if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
 
+        const passwordErrors = validatePasswordStrength(newPassword, [user.email, user.nombreCompleto]);
+        if (passwordErrors.length > 0) {
+            return res.status(400).json({ message: 'La contraseña no cumple la política de seguridad', errors: passwordErrors });
+        }
+
         const hashedPassword = await bcrypt.hash(newPassword, 10);
         await prisma.usuario.update({
             where: { id: Number(userId) },
-            data: { password: hashedPassword }
+            data: {
+                password: hashedPassword,
+                sessionVersion: { increment: 1 },
+                passwordChangedAt: new Date(),
+                mustChangePassword: true
+            }
+        });
+        await revokeAllUserSessions(Number(userId));
+
+        await auditService.log({
+            usuarioId: actorId,
+            inmobiliariaId,
+            accion: 'PASSWORD_RESET_ADMIN',
+            entidad: 'Usuario',
+            entidadId: Number(userId),
+            detalle: `Reset administrativo para ${user.email}`,
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req),
+            severidad: 'CRITICAL'
         });
 
         res.json({ message: 'Contraseña reseteada con éxito' });
@@ -201,6 +298,13 @@ router.post('/reset-password/:userId', authenticateToken, async (req, res) => {
 // Setup Initial SuperAdmin (Solo se puede usar si no existe ninguno)
 router.post('/setup-superadmin', async (req, res) => {
     try {
+        if (env.nodeEnv === 'production' || env.initialSetupToken) {
+            const setupToken = req.get('x-setup-token');
+            if (!env.initialSetupToken || setupToken !== env.initialSetupToken) {
+                return res.status(403).json({ message: 'Token de inicialización inválido' });
+            }
+        }
+
         const validation = setupSuperAdminSchema.safeParse(req.body);
         if (!validation.success) {
             return res.status(400).json({
@@ -218,6 +322,10 @@ router.post('/setup-superadmin', async (req, res) => {
         }
 
         const { email, password, nombreCompleto } = validation.data;
+        const passwordErrors = validatePasswordStrength(password, [email, nombreCompleto]);
+        if (passwordErrors.length > 0) {
+            return res.status(400).json({ message: 'La contraseña no cumple la política de seguridad', errors: passwordErrors });
+        }
 
         // Enlazar al super admin a la primera inmobiliaria existente (Foreign Key)
         // El rol de SUPERADMIN ignora la restricción de inmobiliariaId posteriormente.
@@ -240,7 +348,8 @@ router.post('/setup-superadmin', async (req, res) => {
                 password: hashedPassword,
                 nombreCompleto,
                 rol: 'SUPERADMIN',
-                inmobiliariaId: rootInmo.id
+                inmobiliariaId: rootInmo.id,
+                mustChangePassword: false
             }
         });
         
