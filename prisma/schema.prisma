@@ -36,6 +36,8 @@ model Usuario {
   id                      Int              @id @default(autoincrement())
   email                   String           @unique
   password                String
+  googleId                String?          @unique
+  authProvider            String           @default("LOCAL")
   nombreCompleto          String
   rol                     RolUsuario       @default(AGENTE)
   activo                  Boolean          @default(true)
@@ -179,7 +181,7 @@ model Contrato {
   fechaInicio               DateTime              @db.Date
   fechaFin                  DateTime              @db.Date
   estado                    EstadoContrato        @default(ACTIVO)
-  rutaPdf                   String?
+  rutaArchivoContrato       String?
   observaciones             String?
   eliminadoEn               DateTime?
   fechaCreacion             DateTime              @default(now())
@@ -199,6 +201,7 @@ model Contrato {
   porcentajeHonorarios      Decimal?              @db.Decimal(5, 2)
   tipoAjuste                String?
   administrado              Boolean               @default(true)
+  requiereActualizacion     Boolean               @default(true)
   adjuntos                  AdjuntoContrato[]
   actualizadoPor            Usuario?              @relation("ContratoActualizadoPor", fields: [actualizadoPorId], references: [id])
   creadoPor                 Usuario?              @relation("ContratoCreadoPor", fields: [creadoPorId], references: [id])

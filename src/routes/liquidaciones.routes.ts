@@ -712,6 +712,46 @@ const drawDebtSummaryPdf = (
     return y + 34;
 };
 
+const drawPaymentRowsPdf = (
+    doc: PDFKit.PDFDocument,
+    y: number,
+    pageWidth: number,
+    pagos: any[],
+    moneyPdf: (amount: number) => string
+) => {
+    const dateX = 58;
+    const methodX = 145;
+    const detailX = 238;
+    const amountWidth = 105;
+    const amountX = 50 + pageWidth - amountWidth - 10;
+    const detailWidth = amountX - detailX - 12;
+
+    pagos.forEach((p: any) => {
+        const detailText = p.observaciones || '-';
+        const methodText = p.metodoPago || '-';
+
+        doc.fontSize(9).font('Helvetica');
+        const contentHeight = Math.max(
+            doc.heightOfString(formatDatePdf(p.fechaPago), { width: 70 }),
+            doc.heightOfString(methodText, { width: 80 }),
+            doc.heightOfString(detailText, { width: detailWidth })
+        );
+        const rowHeight = Math.max(20, contentHeight + 10);
+        y = ensurePdfSpace(doc, y, rowHeight + 10);
+
+        doc.fillColor('#111827').fontSize(9).font('Helvetica')
+            .text(formatDatePdf(p.fechaPago), dateX, y + 5, { width: 70 })
+            .text(methodText, methodX, y + 5, { width: 80 })
+            .text(detailText, detailX, y + 5, { width: detailWidth });
+        doc.fillColor('#059669').font('Helvetica-Bold')
+            .text(moneyPdf(Number(p.monto)), amountX, y + 5, { width: amountWidth, align: 'right' });
+        doc.moveTo(50, y + rowHeight - 2).lineTo(50 + pageWidth, y + rowHeight - 2).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
+        y += rowHeight;
+    });
+
+    return y;
+};
+
 // ─── PDF Inquilino (Comprobante de pago) ─────────────────────────────────────
 router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
@@ -777,7 +817,12 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
         field('Inquilino', iPrincipal, col1, y);
         field('Fecha de Emisión', formatDatePdf(liquidacion.fechaCreacion), col2, y);
         y += 40;
-        field('Próxima Actualización', formatDatePdf(liqAny.contrato?.fechaProximaActualizacion), col1, y);
+        field(
+            'Próxima Actualización',
+            liqAny.contrato?.requiereActualizacion ? formatDatePdf(liqAny.contrato?.fechaProximaActualizacion) : 'No programada',
+            col1,
+            y
+        );
         y += 50;
 
         // Ingresos
@@ -844,16 +889,7 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
             doc.moveTo(50, y + 14).lineTo(50 + pageWidth, y + 14).strokeColor(INDIGO).lineWidth(1).stroke();
             y += 22;
 
-            liqAny.pagos.forEach((p: any) => {
-                doc.fillColor('#111827').fontSize(9).font('Helvetica')
-                    .text(formatDatePdf(p.fechaPago), 58, y + 5)
-                    .text(p.metodoPago, 200, y + 5)
-                    .text(p.observaciones || '-', 300, y + 5);
-                doc.fillColor('#059669').font('Helvetica-Bold')
-                    .text(moneyPdf(Number(p.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
-                doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
-                y += 20;
-            });
+            y = drawPaymentRowsPdf(doc, y, pageWidth, liqAny.pagos, moneyPdf);
         }
 
         // Saldo pendiente
@@ -960,7 +996,12 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
         field('Fecha de Emisión', formatDatePdf(liquidacion.fechaCreacion), col2, y);
         y += 40;
         field('Vencimiento del Contrato', formatDatePdf(contrato?.fechaFin), col1, y);
-        field('Próxima Actualización', formatDatePdf(contrato?.fechaProximaActualizacion), col2, y);
+        field(
+            'Próxima Actualización',
+            contrato?.requiereActualizacion ? formatDatePdf(contrato?.fechaProximaActualizacion) : 'No programada',
+            col2,
+            y
+        );
         y += 40;
 
         // Tipo de ajuste y porcentaje
@@ -1062,16 +1103,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
             doc.moveTo(50, y + 14).lineTo(50 + pageWidth, y + 14).strokeColor(INDIGO).lineWidth(1).stroke();
             y += 22;
 
-            liquidacion.pagos.forEach(p => {
-                doc.fillColor('#111827').fontSize(9).font('Helvetica')
-                    .text(formatDatePdf(p.fechaPago), 58, y + 5)
-                    .text(p.metodoPago, 200, y + 5)
-                    .text(p.observaciones || '-', 300, y + 5);
-                doc.fillColor('#059669').font('Helvetica-Bold')
-                    .text(moneyPdf(Number(p.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
-                doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
-                y += 20;
-            });
+            y = drawPaymentRowsPdf(doc, y, pageWidth, liquidacion.pagos, moneyPdf);
         }
 
         if (deudaAnterior.totalDeuda > 0) {

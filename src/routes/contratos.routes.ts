@@ -91,6 +91,7 @@ const contractCreateSchemaBase = z.object({
     porcentajeActualizacion: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de actualización').max(999).optional()),
     tipoAjuste: optionalText(80),
     administrado: optionalBooleanFromForm.default(true),
+    requiereActualizacion: optionalBooleanFromForm.default(true),
     honorarioInicial: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El honorario inicial').optional()),
     honorarioInicialMetodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional()
 });
@@ -135,11 +136,23 @@ const contractCreateSchema = contractCreateSchemaBase.superRefine((value, ctx) =
             message: 'La próxima actualización no puede ser anterior al inicio del contrato'
         });
     }
+
+    if (value.requiereActualizacion && !value.fechaActualizacion) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['fechaActualizacion'],
+            message: 'La próxima actualización es obligatoria si el contrato tiene actualización programada'
+        });
+    }
 });
 
 const contractUpdateSchema = contractCreateSchemaBase
     .omit({ propiedadId: true, propietarioIds: true, inquilinoIds: true, honorarioInicial: true, honorarioInicialMetodoPago: true })
-    .partial();
+    .partial()
+    .extend({
+        administrado: optionalBooleanFromForm,
+        requiereActualizacion: optionalBooleanFromForm
+    });
 
 const contractStatusSchema = z.object({
     estado: z.enum(['ACTIVO', 'FINALIZADO', 'RESCINDIDO'])
@@ -150,6 +163,24 @@ const contractRentUpdateSchema = z.object({
     fechaProximaNueva: dateOnlyString('La próxima fecha'),
     observaciones: optionalText(1000)
 });
+
+const normalizeUpdateSettings = (payload: Pick<ContractCreateInput, 'requiereActualizacion' | 'fechaActualizacion' | 'porcentajeActualizacion' | 'tipoAjuste'>) => {
+    if (!payload.requiereActualizacion) {
+        return {
+            requiereActualizacion: false,
+            fechaProximaActualizacion: null,
+            porcentajeActualizacion: null,
+            tipoAjuste: null
+        };
+    }
+
+    return {
+        requiereActualizacion: true,
+        fechaProximaActualizacion: payload.fechaActualizacion ? parseDateOnly(payload.fechaActualizacion) : null,
+        porcentajeActualizacion: payload.porcentajeActualizacion ? new Decimal(payload.porcentajeActualizacion) : null,
+        tipoAjuste: payload.tipoAjuste || null
+    };
+};
 
 // Get all contracts
 router.get('/', requirePermission('contratos.ver'), async (req, res) => {
@@ -185,7 +216,7 @@ router.get('/', requirePermission('contratos.ver'), async (req, res) => {
         const canViewFiles = await userHasPermission(userId, role, 'contratos.archivos.ver');
         res.json(canViewFiles ? contracts : contracts.map(contract => ({
             ...contract,
-            rutaPdf: null,
+            rutaArchivoContrato: null,
             adjuntos: []
         })));
     } catch (error) {
@@ -212,6 +243,7 @@ router.get('/alertas', requirePermission('contratos.ver'), async (req, res) => {
                 estado: 'ACTIVO',
                 OR: [
                     {
+                        requiereActualizacion: true,
                         fechaProximaActualizacion: {
                             gte: today,
                             lte: thirtyDaysOut
@@ -438,8 +470,9 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
     const authReq = req as AuthRequest;
     const { inmobiliariaId, id: userId } = authReq.user!;
     const payload = req.body as ContractCreateInput;
+    const updateSettings = normalizeUpdateSettings(payload);
 
-    const pdfPath = req.file ? `inmobiliaria-${inmobiliariaId}/${req.file.filename}` : null;
+    const contractFilePath = req.file ? `inmobiliaria-${inmobiliariaId}/${req.file.filename}` : null;
 
     try {
         const contract = await prisma.$transaction(async (tx) => {
@@ -465,11 +498,9 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                 data: {
                     fechaInicio: parseDateOnly(payload.fechaInicio),
                     fechaFin: parseDateOnly(payload.fechaFin),
-                    fechaProximaActualizacion: payload.fechaActualizacion
-                        ? parseDateOnly(payload.fechaActualizacion)
-                        : null,
+                    fechaProximaActualizacion: updateSettings.fechaProximaActualizacion,
                     observaciones: payload.observaciones,
-                    rutaPdf: pdfPath,
+                    rutaArchivoContrato: contractFilePath,
                     propiedadId: propiedad.id,
                     inmobiliariaId,
                     montoAlquiler: new Decimal(payload.montoAlquiler || 0),
@@ -478,9 +509,10 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                     porcentajeHonorarios: payload.porcentajeHonorarios ? new Decimal(payload.porcentajeHonorarios) : null,
                     pagaHonorarios: payload.pagaHonorarios || 'INQUILINO',
                     diaVencimiento: payload.diaVencimiento ? Number(payload.diaVencimiento) : 10,
-                    porcentajeActualizacion: payload.porcentajeActualizacion ? new Decimal(payload.porcentajeActualizacion) : null,
-                    tipoAjuste: payload.tipoAjuste || null,
+                    porcentajeActualizacion: updateSettings.porcentajeActualizacion,
+                    tipoAjuste: updateSettings.tipoAjuste,
                     administrado: Boolean(payload.administrado),
+                    requiereActualizacion: updateSettings.requiereActualizacion,
                     creadoPorId: userId,
                     propietarios: {
                         create: propietariosIds.map((id, index) => ({
@@ -591,7 +623,7 @@ router.get('/:id', requirePermission('contratos.ver'), async (req, res) => {
 
         res.json({
             ...contract,
-            rutaPdf: canViewFiles ? contract.rutaPdf : null,
+            rutaArchivoContrato: canViewFiles ? contract.rutaArchivoContrato : null,
             adjuntos: canViewFiles ? contract.adjuntos : [],
             auditLogs
         });
@@ -807,6 +839,7 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         porcentajeActualizacion,
         tipoAjuste,
         administrado,
+        requiereActualizacion,
         moneda
     } = req.body;
 
@@ -832,8 +865,34 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
             updateData.fechaFin = parseDateOnly(fechaFin);
             changes.fechaFin = { anterior: contract.fechaFin, nuevo: updateData.fechaFin };
         }
-        if (fechaActualizacion) {
-            updateData.fechaProximaActualizacion = parseDateOnly(fechaActualizacion);
+        const updatesScheduling = requiereActualizacion !== undefined;
+        if (updatesScheduling && !requiereActualizacion) {
+            updateData.requiereActualizacion = false;
+            updateData.fechaProximaActualizacion = null;
+            updateData.porcentajeActualizacion = null;
+            updateData.tipoAjuste = null;
+            changes.requiereActualizacion = { anterior: contract.requiereActualizacion, nuevo: updateData.requiereActualizacion };
+            changes.fechaProximaActualizacion = { anterior: contract.fechaProximaActualizacion, nuevo: updateData.fechaProximaActualizacion };
+            changes.porcentajeActualizacion = { anterior: contract.porcentajeActualizacion, nuevo: updateData.porcentajeActualizacion };
+            changes.tipoAjuste = { anterior: contract.tipoAjuste, nuevo: updateData.tipoAjuste };
+        } else if (updatesScheduling && requiereActualizacion) {
+            const nextUpdateDate = fechaActualizacion ? parseDateOnly(fechaActualizacion) : contract.fechaProximaActualizacion;
+            if (!nextUpdateDate) {
+                return res.status(400).json({ message: 'La próxima actualización es obligatoria si el contrato tiene actualización programada.' });
+            }
+
+            updateData.requiereActualizacion = true;
+            updateData.fechaProximaActualizacion = nextUpdateDate;
+            updateData.porcentajeActualizacion = porcentajeActualizacion !== undefined
+                ? (porcentajeActualizacion ? new Decimal(porcentajeActualizacion) : null)
+                : contract.porcentajeActualizacion;
+            updateData.tipoAjuste = tipoAjuste !== undefined ? (tipoAjuste || null) : contract.tipoAjuste;
+            changes.requiereActualizacion = { anterior: contract.requiereActualizacion, nuevo: updateData.requiereActualizacion };
+            changes.fechaProximaActualizacion = { anterior: contract.fechaProximaActualizacion, nuevo: updateData.fechaProximaActualizacion };
+            changes.porcentajeActualizacion = { anterior: contract.porcentajeActualizacion, nuevo: updateData.porcentajeActualizacion };
+            changes.tipoAjuste = { anterior: contract.tipoAjuste, nuevo: updateData.tipoAjuste };
+        } else if (fechaActualizacion !== undefined) {
+            updateData.fechaProximaActualizacion = fechaActualizacion ? parseDateOnly(fechaActualizacion) : null;
             changes.fechaProximaActualizacion = { anterior: contract.fechaProximaActualizacion, nuevo: updateData.fechaProximaActualizacion };
         }
         if (observaciones !== undefined) {
@@ -877,11 +936,11 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
             updateData.diaVencimiento = Number(diaVencimiento);
             changes.diaVencimiento = { anterior: contract.diaVencimiento, nuevo: updateData.diaVencimiento };
         }
-        if (porcentajeActualizacion !== undefined) {
+        if (!updatesScheduling && porcentajeActualizacion !== undefined) {
             updateData.porcentajeActualizacion = porcentajeActualizacion ? new Decimal(porcentajeActualizacion) : null;
             changes.porcentajeActualizacion = { anterior: contract.porcentajeActualizacion, nuevo: updateData.porcentajeActualizacion };
         }
-        if (tipoAjuste !== undefined) {
+        if (!updatesScheduling && tipoAjuste !== undefined) {
             updateData.tipoAjuste = tipoAjuste || null;
             changes.tipoAjuste = { anterior: contract.tipoAjuste, nuevo: updateData.tipoAjuste };
         }
@@ -890,8 +949,8 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
             changes.administrado = { anterior: contract.administrado, nuevo: updateData.administrado };
         }
         if (req.file) {
-            updateData.rutaPdf = `inmobiliaria-${inmobiliariaId}/${req.file.filename}`;
-            changes.rutaPdf = { anterior: contract.rutaPdf, nuevo: updateData.rutaPdf };
+            updateData.rutaArchivoContrato = `inmobiliaria-${inmobiliariaId}/${req.file.filename}`;
+            changes.rutaArchivoContrato = { anterior: contract.rutaArchivoContrato, nuevo: updateData.rutaArchivoContrato };
         }
 
         const updated = await prisma.contrato.update({
@@ -934,6 +993,10 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
 
         if (!contrato) {
             return res.status(404).json({ message: 'Contrato no encontrado' });
+        }
+
+        if (!contrato.requiereActualizacion) {
+            return res.status(400).json({ message: 'Este contrato no tiene actualización de alquiler programada.' });
         }
 
         const result = await prisma.$transaction(async (tx) => {

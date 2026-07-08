@@ -6,6 +6,7 @@ import { loginLimiter } from '../middlewares/rateLimiter.middleware';
 import { z } from 'zod';
 import { getUserPermissionDetails, userHasPermission } from '../services/permissions.service';
 import { auditService } from '../services/audit.service';
+import { verifyGoogleIdToken } from '../services/google-auth.service';
 import {
     clearAuthCookies,
     createSession,
@@ -29,6 +30,10 @@ const loginSchema = z.object({
     password: z.string()
         .min(1, 'La contraseña es obligatoria')
         .max(128, 'Contraseña demasiado larga')
+});
+
+const googleLoginSchema = z.object({
+    idToken: z.string().min(1, 'El token de Google es obligatorio')
 });
 
 const changePasswordSchema = z.object({
@@ -148,6 +153,115 @@ router.post('/login', loginLimiter, async (req, res) => {
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: 'Error en el servidor' });
+    }
+});
+
+router.post('/google', loginLimiter, async (req, res) => {
+    const validation = googleLoginSchema.safeParse(req.body);
+    if (!validation.success) {
+        return res.status(400).json({
+            message: 'Datos de entrada inválidos',
+            errors: validation.error.issues.map((e: z.ZodIssue) => e.message)
+        });
+    }
+
+    try {
+        const googleUser = await verifyGoogleIdToken(validation.data.idToken);
+        const user = await prisma.usuario.findUnique({
+            where: { email: googleUser.email },
+            include: { inmobiliaria: true }
+        });
+
+        if (!user) {
+            return res.status(403).json({
+                message: 'No existe una cuenta autorizada para este correo. Comuníquese con el administrador.'
+            });
+        }
+
+        if (!user.activo) {
+            await auditService.log({
+                usuarioId: user.id,
+                inmobiliariaId: user.inmobiliariaId,
+                accion: 'LOGIN_GOOGLE_USUARIO_INACTIVO',
+                entidad: 'Auth',
+                detalle: `Intento de login con Google en usuario inactivo para ${googleUser.email}`,
+                ipAddress: getClientIp(req),
+                userAgent: getUserAgent(req),
+                severidad: 'WARNING'
+            });
+            return res.status(401).json({ message: 'Credenciales inválidas' });
+        }
+
+        if (user.googleId && user.googleId !== googleUser.googleId) {
+            await auditService.log({
+                usuarioId: user.id,
+                inmobiliariaId: user.inmobiliariaId,
+                accion: 'LOGIN_GOOGLE_ID_MISMATCH',
+                entidad: 'Auth',
+                detalle: `Intento de login con una cuenta Google distinta para ${googleUser.email}`,
+                ipAddress: getClientIp(req),
+                userAgent: getUserAgent(req),
+                severidad: 'CRITICAL'
+            });
+            return res.status(403).json({ message: 'La cuenta de Google no coincide con el usuario autorizado.' });
+        }
+
+        if (user.rol !== 'SUPERADMIN' && (!user.inmobiliaria || !user.inmobiliaria.activa)) {
+            await auditService.log({
+                usuarioId: user.id,
+                inmobiliariaId: user.inmobiliariaId,
+                accion: 'LOGIN_CUENTA_SUSPENDIDA',
+                entidad: 'Auth',
+                detalle: `Intento de login con Google en cuenta suspendida para ${googleUser.email}`,
+                ipAddress: getClientIp(req),
+                userAgent: getUserAgent(req),
+                severidad: 'WARNING'
+            });
+            return res.status(403).json({ message: 'Cuenta suspendida, contacte al administrador' });
+        }
+
+        if (!user.googleId) {
+            await prisma.usuario.update({
+                where: { id: user.id },
+                data: {
+                    googleId: googleUser.googleId,
+                    authProvider: user.authProvider === 'LOCAL' ? 'LOCAL_GOOGLE' : user.authProvider
+                }
+            });
+        }
+
+        const session = await createSession({
+            userId: user.id,
+            inmobiliariaId: user.inmobiliariaId,
+            sessionVersion: user.sessionVersion,
+            req,
+            res
+        });
+
+        const sessionUser = await buildSessionUser(user.id);
+
+        await auditService.log({
+            usuarioId: user.id,
+            inmobiliariaId: user.inmobiliariaId,
+            accion: 'LOGIN_GOOGLE_EXITOSO',
+            entidad: 'Auth',
+            detalle: `Inicio de sesión con Google para ${googleUser.email}`,
+            ipAddress: getClientIp(req),
+            userAgent: getUserAgent(req)
+        });
+
+        res.json({
+            csrfToken: session.csrfToken,
+            expiresAt: session.expiresAt,
+            user: sessionUser
+        });
+    } catch (error) {
+        console.error(error);
+        const message = error instanceof Error ? error.message : 'Token de Google inválido';
+        if (message === 'GOOGLE_CLIENT_ID no configurado') {
+            return res.status(503).json({ message: 'Inicio de sesión con Google no configurado' });
+        }
+        res.status(401).json({ message: 'No se pudo validar la cuenta de Google' });
     }
 });
 
