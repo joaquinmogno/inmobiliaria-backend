@@ -220,13 +220,19 @@ router.post('/google', loginLimiter, async (req, res) => {
             return res.status(403).json({ message: 'Cuenta suspendida, contacte al administrador' });
         }
 
+        const googleUserUpdates: { googleId?: string; authProvider?: string; mustChangePassword?: boolean } = {};
         if (!user.googleId) {
+            googleUserUpdates.googleId = googleUser.googleId;
+            googleUserUpdates.authProvider = user.authProvider === 'LOCAL' ? 'LOCAL_GOOGLE' : user.authProvider;
+        }
+        if (user.mustChangePassword) {
+            googleUserUpdates.mustChangePassword = false;
+        }
+
+        if (Object.keys(googleUserUpdates).length > 0) {
             await prisma.usuario.update({
                 where: { id: user.id },
-                data: {
-                    googleId: googleUser.googleId,
-                    authProvider: user.authProvider === 'LOCAL' ? 'LOCAL_GOOGLE' : user.authProvider
-                }
+                data: googleUserUpdates
             });
         }
 

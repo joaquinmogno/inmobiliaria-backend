@@ -130,6 +130,40 @@ test('Google login links an existing local user and creates the normal session',
   });
 });
 
+test('Google login clears mandatory local password change for verified Google users', async () => {
+  installMocks({ ...baseUser, mustChangePassword: true });
+
+  await withServer(async (baseUrl) => {
+    const { response, body } = await googleLogin(baseUrl);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.user.mustChangePassword, false);
+    assert.equal(updates.length, 1);
+    assert.deepEqual(updates[0].data, {
+      googleId: 'google-sub-123',
+      authProvider: 'LOCAL_GOOGLE',
+      mustChangePassword: false,
+    });
+    assert.equal(sessions.length, 1);
+  });
+});
+
+test('Google login clears mandatory password change for already linked Google users', async () => {
+  installMocks({ ...baseUser, googleId: 'google-sub-123', authProvider: 'LOCAL_GOOGLE', mustChangePassword: true });
+
+  await withServer(async (baseUrl) => {
+    const { response, body } = await googleLogin(baseUrl);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.user.mustChangePassword, false);
+    assert.equal(updates.length, 1);
+    assert.deepEqual(updates[0].data, {
+      mustChangePassword: false,
+    });
+    assert.equal(sessions.length, 1);
+  });
+});
+
 test('Google login rejects an existing user linked to another Google account', async () => {
   installMocks({ ...baseUser, googleId: 'another-google-sub', authProvider: 'LOCAL_GOOGLE' });
 
