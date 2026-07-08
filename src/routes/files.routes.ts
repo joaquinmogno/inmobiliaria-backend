@@ -8,6 +8,18 @@ import { prisma } from '../prisma';
 const router = Router();
 const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, '../../uploads');
 const safeFilenamePattern = /^[a-zA-Z0-9._-]+$/;
+const contentTypesByExtension: Record<string, string> = {
+    '.pdf': 'application/pdf',
+    '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp'
+};
+const downloadExtensions = new Set(['.doc', '.docx']);
+
+const sanitizeHeaderFilename = (filename: string) => filename.replace(/["\\]/g, '');
 
 router.use(authenticateToken);
 
@@ -36,7 +48,7 @@ router.get('/:agencyDir/:filename', requirePermission('contratos.archivos.ver'),
         where: {
             ...(role === 'SUPERADMIN' ? {} : { inmobiliariaId }),
             OR: [
-                { rutaPdf: relativePath },
+                { rutaArchivoContrato: relativePath },
                 { adjuntos: { some: { rutaArchivo: relativePath } } }
             ]
         },
@@ -47,7 +59,12 @@ router.get('/:agencyDir/:filename', requirePermission('contratos.archivos.ver'),
         return res.status(404).json({ message: 'Archivo no encontrado' });
     }
 
-    res.set('Content-Disposition', 'inline');
+    const extension = path.extname(filename).toLowerCase();
+    const contentType = contentTypesByExtension[extension] || 'application/octet-stream';
+    const disposition = downloadExtensions.has(extension) ? 'attachment' : 'inline';
+
+    res.set('Content-Type', contentType);
+    res.set('Content-Disposition', `${disposition}; filename="${sanitizeHeaderFilename(filename)}"`);
     res.sendFile(filepath);
 });
 

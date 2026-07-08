@@ -118,6 +118,7 @@ function installPrismaMocks() {
         id: createdContracts.length + 1,
         ...data,
         moneda: data.moneda || 'ARS',
+        requiereActualizacion: data.requiereActualizacion ?? true,
         montoAlquiler: data.montoAlquiler.toString(),
         montoHonorarios: data.montoHonorarios.toString(),
       };
@@ -271,6 +272,54 @@ test('API currency: creates USD contracts', async () => {
 
     assert.equal(response.status, 201);
     assert.equal(response.body.moneda, 'USD');
+  });
+});
+
+test('API contracts: can skip scheduled rent updates for USD contracts', async () => {
+  await withServer(async (app) => {
+    const payload = contractPayload('USD');
+    delete payload.fechaActualizacion;
+    payload.requiereActualizacion = false;
+    payload.tipoAjuste = 'Sin ajuste';
+    payload.porcentajeActualizacion = 10;
+
+    const response = await request(app, '/api/contratos', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+
+    assert.equal(response.status, 201);
+    assert.equal(response.body.moneda, 'USD');
+    assert.equal(response.body.requiereActualizacion, false);
+    assert.equal(response.body.fechaProximaActualizacion, null);
+    assert.equal(response.body.tipoAjuste, null);
+    assert.equal(response.body.porcentajeActualizacion, null);
+  });
+});
+
+test('API contracts: disabling scheduled updates clears update fields', async () => {
+  createdContracts.push({
+    id: 1,
+    inmobiliariaId: 1,
+    moneda: 'USD',
+    montoAlquiler: 1000,
+    requiereActualizacion: true,
+    fechaProximaActualizacion: new Date('2026-07-01T00:00:00.000Z'),
+    porcentajeActualizacion: 10,
+    tipoAjuste: 'IPC',
+  });
+
+  await withServer(async (app) => {
+    const response = await request(app, '/api/contratos/1', {
+      method: 'PUT',
+      body: JSON.stringify({ requiereActualizacion: false }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.requiereActualizacion, false);
+    assert.equal(response.body.fechaProximaActualizacion, null);
+    assert.equal(response.body.tipoAjuste, null);
+    assert.equal(response.body.porcentajeActualizacion, null);
   });
 });
 
