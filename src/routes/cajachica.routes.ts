@@ -7,6 +7,7 @@ import { validateBody, requiredText, positiveDecimal, dateOnlyString, optionalTe
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
+import { cached, invalidatePerformanceCache } from '../services/performance-cache.service';
 
 const router = Router();
 
@@ -45,14 +46,12 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), async (r
             ];
         }
 
-        // Filtro de período para KPIs
-        let kpiDateFilter: any = {};
         if (mes && anio) {
             const m = parseInt(String(mes));
             const a = parseInt(String(anio));
             const start = new Date(a, m - 1, 1);
             const end = new Date(a, m, 1);
-            kpiDateFilter = { fecha: { gte: start, lt: end } };
+            whereClause.fecha = { gte: start, lt: end };
         }
 
         const [total, movimientos] = await Promise.all([
@@ -69,66 +68,78 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), async (r
             })
         ]);
 
-        // Obtener honorarios de liquidaciones pagadas en el período para calcular KPIs por moneda.
-        const liquidacionesCobradas = await prisma.liquidacion.findMany({
+        res.json({ data: movimientos, meta: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) } });
+    } catch (error) {
+        console.error('Error fetching caja chica:', error);
+        res.status(500).json({ message: 'Error al obtener la caja chica' });
+    }
+});
+
+router.get('/resumen', authenticateToken, requirePermission('caja_chica.ver'), async (req, res) => {
+    const { inmobiliariaId } = (req as AuthRequest).user!;
+    const mes = Number(req.query.mes || new Date().getMonth() + 1);
+    const anio = Number(req.query.anio || new Date().getFullYear());
+    if (!Number.isInteger(mes) || mes < 1 || mes > 12 || !Number.isInteger(anio) || anio < 2000 || anio > 2200) {
+        return res.status(400).json({ message: 'Período inválido' });
+    }
+
+    try {
+      const summary = await cached(`inmobiliaria:${inmobiliariaId}:caja:${anio}-${mes}`, 20_000, async () => {
+        const start = new Date(anio, mes - 1, 1);
+        const end = new Date(anio, mes, 1);
+        const [allTimeGroups, periodGroups, liquidacionesCobradas] = await Promise.all([
+          prisma.movimientoCaja.groupBy({ by: ['moneda', 'tipo', 'cuenta'], where: { inmobiliariaId }, _sum: { monto: true } }),
+          prisma.movimientoCaja.groupBy({ by: ['moneda', 'tipo', 'cuenta', 'liquidacionId'], where: { inmobiliariaId, fecha: { gte: start, lt: end } }, _sum: { monto: true } }),
+          prisma.liquidacion.findMany({
             where: {
                 inmobiliariaId,
-                movimientosCaja: {
-                    some: {
-                        tipo: 'INGRESO',
-                        ...(mes && anio ? kpiDateFilter : {})
-                    }
-                }
+                movimientosCaja: { some: { tipo: 'INGRESO', fecha: { gte: start, lt: end } } }
             },
-            include: { movimientos: true }
-        });
+            select: {
+                moneda: true, montoHonorarios: true, netoACobrar: true,
+                movimientos: { where: { esParaInmobiliaria: true }, select: { monto: true } },
+                movimientosCaja: {
+                    where: { tipo: 'INGRESO', fecha: { gte: start, lt: end } }, select: { monto: true }
+                }
+            }
+          })
+        ]);
 
         const monedas = ['ARS', 'USD'] as const;
-        const sumCaja = async (moneda: typeof monedas[number], extraWhere: any) => Number((await prisma.movimientoCaja.aggregate({
-            where: { inmobiliariaId, moneda, ...extraWhere },
-            _sum: { monto: true }
-        }))._sum?.monto || 0);
+        const groupedAmount = (moneda: typeof monedas[number], tipo: TipoMovimiento, cuenta?: CuentaCaja) => allTimeGroups
+            .filter(group => group.moneda === moneda && group.tipo === tipo && (!cuenta || group.cuenta === cuenta))
+            .reduce((sum, group) => sum + Number(group._sum.monto || 0), 0);
+        const periodAmount = (moneda: typeof monedas[number], tipo: TipoMovimiento, linked: boolean) => periodGroups
+            .filter(group => group.moneda === moneda && group.tipo === tipo && (linked ? group.liquidacionId !== null : group.liquidacionId === null))
+            .reduce((sum, group) => sum + Number(group._sum.monto || 0), 0);
 
-        const totalesPorMoneda = Object.fromEntries(await Promise.all(monedas.map(async moneda => {
-            const [
-                totalIngresos,
-                totalEgresos,
-                balanceCajaIngresos,
-                balanceCajaEgresos,
-                balanceBancoIngresos,
-                balanceBancoEgresos,
-                totalCobrado,
-                totalPagadoPropietarios,
-                gastosGenerales,
-                ingresosManuales
-            ] = await Promise.all([
-                sumCaja(moneda, { tipo: 'INGRESO' }),
-                sumCaja(moneda, { tipo: 'EGRESO' }),
-                sumCaja(moneda, { tipo: 'INGRESO', cuenta: 'CAJA' }),
-                sumCaja(moneda, { tipo: 'EGRESO', cuenta: 'CAJA' }),
-                sumCaja(moneda, { tipo: 'INGRESO', cuenta: 'BANCO' }),
-                sumCaja(moneda, { tipo: 'EGRESO', cuenta: 'BANCO' }),
-                sumCaja(moneda, { tipo: 'INGRESO', liquidacionId: { not: null }, ...kpiDateFilter }),
-                sumCaja(moneda, { tipo: 'EGRESO', liquidacionId: { not: null }, ...kpiDateFilter }),
-                sumCaja(moneda, { tipo: 'EGRESO', liquidacionId: null, ...kpiDateFilter }),
-                sumCaja(moneda, { tipo: 'INGRESO', liquidacionId: null, ...kpiDateFilter })
-            ]);
+        const totalesPorMoneda = Object.fromEntries(monedas.map(moneda => {
+            const totalIngresos = groupedAmount(moneda, 'INGRESO');
+            const totalEgresos = groupedAmount(moneda, 'EGRESO');
+            const balanceCajaIngresos = groupedAmount(moneda, 'INGRESO', 'CAJA');
+            const balanceCajaEgresos = groupedAmount(moneda, 'EGRESO', 'CAJA');
+            const balanceBancoIngresos = groupedAmount(moneda, 'INGRESO', 'BANCO');
+            const balanceBancoEgresos = groupedAmount(moneda, 'EGRESO', 'BANCO');
+            const totalCobrado = periodAmount(moneda, 'INGRESO', true);
+            const totalPagadoPropietarios = periodAmount(moneda, 'EGRESO', true);
+            const gastosGenerales = periodAmount(moneda, 'EGRESO', false);
+            const ingresosManuales = periodAmount(moneda, 'INGRESO', false);
 
-            let honorariosLiquidacionesMoneda = 0;
-            let totalNetoACobrarMoneda = 0;
+            let honorariosCobradosMoneda = 0;
             liquidacionesCobradas
                 .filter(l => l.moneda === moneda)
                 .forEach(l => {
                     const honsFijos = Number(l.montoHonorarios || 0);
                     const honsMovimientos = l.movimientos
-                        .filter(m => m.esParaInmobiliaria)
                         .reduce((acc, m) => acc + Number(m.monto), 0);
-                    honorariosLiquidacionesMoneda += honsFijos + honsMovimientos;
-                    totalNetoACobrarMoneda += Number(l.netoACobrar);
+                    const cobrado = Number(l.movimientosCaja
+                        .reduce((sum, movimiento) => sum + Number(movimiento.monto), 0));
+                    const ratioCobrado = Number(l.netoACobrar) > 0 ? cobrado / Number(l.netoACobrar) : 0;
+                    honorariosCobradosMoneda += (honsFijos + honsMovimientos) * Math.min(ratioCobrado, 1);
                 });
 
-            const fondosEnCustodia = totalNetoACobrarMoneda - honorariosLiquidacionesMoneda;
-            const gananciaBruta = honorariosLiquidacionesMoneda + ingresosManuales;
+            const fondosEnCustodia = Math.max(0, totalCobrado - honorariosCobradosMoneda - totalPagadoPropietarios);
+            const gananciaBruta = honorariosCobradosMoneda + ingresosManuales;
             const resultadoNeto = gananciaBruta - gastosGenerales;
 
             return [moneda, {
@@ -144,7 +155,7 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), async (r
                 resultadoNeto,
                 fondosEnCustodia
             }];
-        }))) as Record<'ARS' | 'USD', any>;
+        })) as Record<'ARS' | 'USD', any>;
 
         const ars = totalesPorMoneda.ARS;
 
@@ -152,13 +163,7 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), async (r
         const balanceCaja = ars.balanceCaja;
         const balanceBanco = ars.balanceBanco;
 
-        res.json({
-            data: movimientos,
-            meta: {
-                total,
-                page: pageNum,
-                limit: limitNum,
-                totalPages: Math.ceil(total / limitNum),
+        return {
                 balanceGeneral,
                 totalIngresos: ars.totalIngresos,
                 totalEgresos: ars.totalEgresos,
@@ -178,8 +183,9 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), async (r
                 gananciaBruta: ars.gananciaBruta,
                 resultadoNeto: ars.resultadoNeto,
                 fondosEnCustodia: ars.fondosEnCustodia
-            }
-        });
+            };
+      });
+      res.json(summary);
     } catch (error) {
         console.error('Error fetching caja chica:', error);
         res.status(500).json({ message: 'Error al obtener la caja chica' });
@@ -224,6 +230,8 @@ router.post('/', authenticateToken, requirePermission('caja_chica.crear'), valid
             entidadId: movimiento.id,
             detalle: `${movimiento.tipo}: ${movimiento.concepto} por ${movimiento.moneda === 'USD' ? 'US$' : '$'}${movimiento.monto}`
         });
+
+        invalidatePerformanceCache(inmobiliariaId);
 
         res.status(201).json(movimiento);
     } catch (error) {

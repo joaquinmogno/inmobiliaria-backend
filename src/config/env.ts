@@ -51,9 +51,6 @@ if (process.env.NODE_ENV === 'production') {
         throw new Error('BACKUP_ENCRYPTION_KEY debe tener al menos 32 caracteres en produccion');
     }
 
-    if (!process.env.INITIAL_SETUP_TOKEN || process.env.INITIAL_SETUP_TOKEN.length < 24) {
-        throw new Error('INITIAL_SETUP_TOKEN debe tener al menos 24 caracteres en produccion');
-    }
 }
 
 export const env = {
@@ -67,5 +64,4 @@ export const env = {
     scriptsDir: process.env.SCRIPTS_DIR,
     googleClientId: process.env.GOOGLE_CLIENT_ID,
     backupEncryptionKey: process.env.BACKUP_ENCRYPTION_KEY || 'development-backup-key-change-me-32',
-    initialSetupToken: process.env.INITIAL_SETUP_TOKEN
 };

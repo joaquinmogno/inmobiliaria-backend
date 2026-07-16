@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs/promises';
+import { createReadStream, createWriteStream } from 'fs';
+import { pipeline } from 'stream/promises';
 import { Request, Response } from 'express';
 import { prisma } from '../prisma';
 import { env } from '../config/env';
@@ -31,7 +33,7 @@ export function getCookieOptions(httpOnly: boolean) {
   return {
     httpOnly,
     secure,
-    sameSite: secure ? 'none' as const : 'lax' as const,
+    sameSite: 'lax' as const,
     path: '/',
     maxAge: SESSION_TTL_MS
   };
@@ -39,8 +41,8 @@ export function getCookieOptions(httpOnly: boolean) {
 
 export function clearAuthCookies(res: Response) {
   const secure = env.nodeEnv === 'production';
-  res.clearCookie(SESSION_COOKIE, { path: '/', secure, sameSite: secure ? 'none' : 'lax' });
-  res.clearCookie(CSRF_COOKIE, { path: '/', secure, sameSite: secure ? 'none' : 'lax' });
+  res.clearCookie(SESSION_COOKIE, { path: '/', secure, sameSite: 'lax' });
+  res.clearCookie(CSRF_COOKIE, { path: '/', secure, sameSite: 'lax' });
 }
 
 export async function createSession(params: {
@@ -113,22 +115,49 @@ function getBackupKey() {
 }
 
 export async function encryptFile(sourcePath: string, destinationPath: string) {
-  const plaintext = await fs.readFile(sourcePath);
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', getBackupKey(), iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  await fs.writeFile(destinationPath, Buffer.concat([Buffer.from('PCBK1'), iv, authTag, encrypted]), { mode: 0o600 });
+  const handle = await fs.open(destinationPath, 'w', 0o600);
+
+  try {
+    await handle.write(Buffer.concat([Buffer.from('PCBK1'), iv, Buffer.alloc(16)]), 0, 33, 0);
+    await pipeline(
+      createReadStream(sourcePath),
+      cipher,
+      createWriteStream(destinationPath, { fd: handle.fd, start: 33, autoClose: false })
+    );
+    await handle.write(cipher.getAuthTag(), 0, 16, 17);
+  } finally {
+    await handle.close();
+  }
 }
 
-export async function decryptFileToBuffer(encryptedPath: string) {
-  const payload = await fs.readFile(encryptedPath);
-  const magic = payload.subarray(0, 5).toString();
+export async function decryptFileToFile(encryptedPath: string, destinationPath: string) {
+  const handle = await fs.open(encryptedPath, 'r');
+  const header = Buffer.alloc(33);
+
+  try {
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (bytesRead !== header.length) throw new Error('Formato de backup cifrado inválido');
+  } finally {
+    await handle.close();
+  }
+
+  const magic = header.subarray(0, 5).toString();
   if (magic !== 'PCBK1') throw new Error('Formato de backup cifrado inválido');
-  const iv = payload.subarray(5, 17);
-  const authTag = payload.subarray(17, 33);
-  const ciphertext = payload.subarray(33);
+  const iv = header.subarray(5, 17);
+  const authTag = header.subarray(17, 33);
   const decipher = crypto.createDecipheriv('aes-256-gcm', getBackupKey(), iv);
   decipher.setAuthTag(authTag);
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+
+  try {
+    await pipeline(
+      createReadStream(encryptedPath, { start: 33 }),
+      decipher,
+      createWriteStream(destinationPath, { mode: 0o600 })
+    );
+  } catch (error) {
+    await fs.unlink(destinationPath).catch(() => undefined);
+    throw error;
+  }
 }

@@ -1,6 +1,7 @@
 import { Router } from 'express';
+import { parsePagination } from '../utils/pagination';
 import { prisma } from '../prisma';
-import { authenticateToken } from '../middlewares/auth.middleware';
+import { authenticateToken, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { requireSuperAdmin } from '../middlewares/permissions.middleware';
 import { auditService } from '../services/audit.service';
 import { getClientIp, getUserAgent, validatePasswordStrength } from '../services/security.service';
@@ -48,23 +49,31 @@ router.get('/metrics', async (req, res) => {
 // Listar Inmobiliarias (clientes)
 router.get('/inmobiliarias', async (req, res) => {
     try {
-        const inmobiliarias = await prisma.inmobiliaria.findMany({
-            where: { nombre: { not: 'SaaS Platform Home' } },
+        const pagination = parsePagination(req.query.page, req.query.limit, 25);
+        const search = String(req.query.search || '').trim();
+        const where = { nombre: { not: 'SaaS Platform Home', ...(search ? { contains: search, mode: 'insensitive' as const } : {}) } };
+        const [total, inmobiliarias] = await prisma.$transaction([
+          prisma.inmobiliaria.count({ where }),
+          prisma.inmobiliaria.findMany({
+            where,
             include: {
                 _count: {
                     select: { usuarios: true, contratos: true, propiedades: true }
                 }
             },
-            orderBy: { fechaCreacion: 'desc' }
-        });
-        res.json(inmobiliarias);
+            orderBy: [{ fechaCreacion: 'desc' }, { id: 'desc' }],
+            skip: pagination.skip,
+            take: pagination.limit
+          })
+        ]);
+        res.json({ data: inmobiliarias, meta: { total, page: pagination.page, limit: pagination.limit, totalPages: Math.ceil(total / pagination.limit) } });
     } catch (error) {
         res.status(500).json({ message: 'Error obteniendo inmobiliarias' });
     }
 });
 
 // Crear nueva inmobiliaria (y su primer admin)
-router.post('/inmobiliarias', async (req, res) => {
+router.post('/inmobiliarias', requireRecentAuthentication, async (req, res) => {
     const validation = createAgencySchema.safeParse(req.body);
     if (!validation.success) {
         return res.status(400).json({
@@ -125,7 +134,7 @@ router.post('/inmobiliarias', async (req, res) => {
 });
 
 // Suspender/Activar inmobiliaria
-router.patch('/inmobiliarias/:id/status', async (req, res) => {
+router.patch('/inmobiliarias/:id/status', requireRecentAuthentication, async (req, res) => {
     try {
         const id = Number(req.params.id);
         const validation = statusSchema.safeParse(req.body);

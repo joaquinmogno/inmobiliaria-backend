@@ -57,6 +57,7 @@ model Usuario {
   permisos                 UsuarioPermiso[]
   permisosDenegados        UsuarioPermisoDenegado[]
   sesiones                UserSession[]
+  passwordResetTokens     PasswordResetToken[]
   personasActualizadas    Persona[]        @relation("PersonaActualizadaPor")
   personasCreadas         Persona[]        @relation("PersonaCreadaPor")
   propiedadesActualizadas Propiedad[]      @relation("PropiedadActualizadaPor")
@@ -77,6 +78,7 @@ model UserSession {
   revokedAt      DateTime?
   createdAt      DateTime     @default(now())
   lastSeenAt     DateTime     @default(now())
+  authenticatedAt DateTime    @default(now())
   usuarioId      Int
   inmobiliariaId Int
   sessionVersion Int
@@ -87,6 +89,20 @@ model UserSession {
   @@index([inmobiliariaId])
   @@index([expiresAt])
   @@index([revokedAt])
+}
+
+model PasswordResetToken {
+  id          Int       @id @default(autoincrement())
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+  usuarioId   Int
+  creadoPorId Int
+  usuario     Usuario   @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@index([usuarioId])
+  @@index([expiresAt])
 }
 
 model Permiso {
@@ -153,6 +169,7 @@ model Persona {
 
   @@index([inmobiliariaId])
   @@index([dni])
+  @@index([inmobiliariaId, nombreCompleto])
 }
 
 model Propiedad {
@@ -174,6 +191,7 @@ model Propiedad {
   inmobiliaria       Inmobiliaria    @relation(fields: [inmobiliariaId], references: [id])
 
   @@index([inmobiliariaId])
+  @@index([inmobiliariaId, direccion])
 }
 
 model Contrato {
@@ -184,6 +202,7 @@ model Contrato {
   rutaArchivoContrato       String?
   observaciones             String?
   eliminadoEn               DateTime?
+  estadoAnteriorPapelera    EstadoContrato?
   fechaCreacion             DateTime              @default(now())
   fechaActualizacion        DateTime              @updatedAt
   inmobiliariaId            Int
@@ -220,6 +239,8 @@ model Contrato {
   @@index([propiedadId])
   @@index([garanteId])
   @@index([estado])
+  @@index([estado, eliminadoEn])
+  @@index([inmobiliariaId, estado, fechaFin])
 }
 
 model ContratoInquilino {
@@ -287,6 +308,8 @@ model Liquidacion {
   @@index([contratoId])
   @@index([periodo])
   @@index([estado])
+  @@index([inmobiliariaId, periodo])
+  @@index([inmobiliariaId, estado, periodo])
 }
 
 model Movimiento {
@@ -327,6 +350,7 @@ model Pago {
   @@index([contratoId])
   @@index([liquidacionId])
   @@index([fechaPago])
+  @@index([inmobiliariaId, fechaPago])
 }
 
 model AuditLog {
@@ -346,6 +370,7 @@ model AuditLog {
 
   @@index([inmobiliariaId])
   @@index([fechaCreacion])
+  @@index([inmobiliariaId, fechaCreacion])
 }
 
 enum AuditSeverity {
@@ -378,6 +403,8 @@ model MovimientoCaja {
   @@index([fecha])
   @@index([tipo])
   @@index([cuenta])
+  @@index([inmobiliariaId, fecha])
+  @@index([inmobiliariaId, moneda, tipo, fecha])
 }
 
 enum RolUsuario {
@@ -524,7 +551,7 @@ model PagoSueldo {
   monto           Decimal      @db.Decimal(10, 2)
   moneda          Moneda       @default(ARS)
   fecha           DateTime     @db.Date
-  periodo         String       // Formato "MM-YYYY"
+  periodo         String       // Formato "YYYY-MM"
   metodoPago      MetodoPago   @default(EFECTIVO)
   observaciones   String?      @db.Text
   fechaCreacion   DateTime     @default(now())
@@ -541,4 +568,5 @@ model PagoSueldo {
   @@index([usuarioId])
   @@index([inmobiliariaId])
   @@index([periodo])
+  @@unique([inmobiliariaId, usuarioId, periodo, moneda])
 }

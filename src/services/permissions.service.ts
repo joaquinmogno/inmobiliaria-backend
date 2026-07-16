@@ -48,6 +48,7 @@ export const MODULE_PERMISSIONS = [
     'usuarios.editar',
     'usuarios.eliminar',
     'usuarios.permisos',
+    'usuarios.asignar_rol',
     'contratos.archivos.ver',
     'contratos.restaurar',
     ...SUELDOS_PERMISSIONS
@@ -56,6 +57,13 @@ export const MODULE_PERMISSIONS = [
 export type PermissionKey = typeof MODULE_PERMISSIONS[number] | string;
 
 export const ADMIN_ROLES = ['SUPERADMIN', 'OWNER', 'JEFE', 'ADMIN'] as const;
+const ROLE_RANK: Record<string, number> = { AGENTE: 1, ADMIN: 2, JEFE: 3, OWNER: 4, SUPERADMIN: 5 };
+
+export const isRoleBelow = (targetRole: string, actorRole: string) =>
+    (ROLE_RANK[targetRole] || 0) < (ROLE_RANK[actorRole] || 0);
+
+export const canCreateRole = (actorRole: string, newRole: string) =>
+    isRoleBelow(newRole, actorRole) || (actorRole === 'OWNER' && newRole === 'OWNER') || actorRole === 'SUPERADMIN';
 
 export const isAdminRole = (role?: string) => !!role && ADMIN_ROLES.includes(role as typeof ADMIN_ROLES[number]);
 

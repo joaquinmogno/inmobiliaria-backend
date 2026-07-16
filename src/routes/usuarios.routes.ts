@@ -1,13 +1,15 @@
 import { Router } from 'express';
+import { parsePagination } from '../utils/pagination';
 import { prisma } from '../prisma';
-import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
+import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { validateBody, requiredText } from '../middlewares/validation.middleware';
-import { getUserPermissionDetails, getUserPermissions, MODULE_PERMISSIONS, resolveEffectivePermissions } from '../services/permissions.service';
+import { canCreateRole, getUserPermissionDetails, getUserPermissions, isRoleBelow, MODULE_PERMISSIONS, resolveEffectivePermissions, userHasPermission } from '../services/permissions.service';
 import { auditService } from '../services/audit.service';
 import { getClientIp, getUserAgent, privilegedRoles, revokeAllUserSessions, validatePasswordStrength } from '../services/security.service';
 import bcrypt from 'bcrypt';
 import { z } from 'zod';
+import { createUserWithPermissions } from '../services/users.service';
 
 const router = Router();
 
@@ -17,10 +19,12 @@ const createUserSchema = z.object({
     email: z.string().trim().toLowerCase().email('Email inválido').max(254),
     password: z.string().min(12, 'La contraseña debe tener al menos 12 caracteres').max(128),
     nombreCompleto: requiredText('El nombre completo', 120),
-    rol: z.enum(['OWNER', 'JEFE', 'ADMIN', 'AGENTE']).optional().default('AGENTE')
+    rol: z.enum(['OWNER', 'JEFE', 'ADMIN', 'AGENTE']).optional().default('AGENTE'),
+    permissions: z.array(z.enum(MODULE_PERMISSIONS)).optional().default([]),
+    deniedPermissions: z.array(z.enum(MODULE_PERMISSIONS)).optional().default([])
 });
 
-const updateUserSchema = createUserSchema.omit({ password: true }).extend({
+const updateUserSchema = createUserSchema.omit({ password: true, permissions: true, deniedPermissions: true }).extend({
     activo: z.boolean().optional()
 }).partial().refine(
     data => Object.keys(data).length > 0,
@@ -64,9 +68,17 @@ async function assertDoesNotRemoveLastPermissionManager(
 
 router.get('/', requirePermission('usuarios.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
+    const pagination = parsePagination(req.query.page, req.query.limit, 25);
+    const search = String(req.query.search || '').trim();
     try {
-        const users = await prisma.usuario.findMany({
-            where: { inmobiliariaId },
+        const where = { inmobiliariaId, ...(search ? { OR: [
+            { nombreCompleto: { contains: search, mode: 'insensitive' as const } },
+            { email: { contains: search, mode: 'insensitive' as const } }
+        ] } : {}) };
+        const [total, users] = await prisma.$transaction([
+          prisma.usuario.count({ where }),
+          prisma.usuario.findMany({
+            where,
             select: {
                 id: true,
                 email: true,
@@ -94,11 +106,25 @@ router.get('/', requirePermission('usuarios.ver'), async (req, res) => {
                         }
                     }
                 }
-            }
-        });
+            },
+            orderBy: [{ nombreCompleto: 'asc' }, { id: 'asc' }],
+            skip: pagination.skip,
+            take: pagination.limit
+          })
+        ]);
 
-        const usersWithPermissions = await Promise.all(users.map(async user => {
-            const details = await getUserPermissionDetails(user.id, user.rol);
+        const roles = [...new Set(users.map(user => user.rol))];
+        const rolePermissionRows = await prisma.rolPermiso.findMany({
+            where: { rol: { in: roles } },
+            select: { rol: true, permiso: { select: { clave: true } } }
+        });
+        const permissionsByRole = new Map<string, string[]>();
+        rolePermissionRows.forEach(row => permissionsByRole.set(row.rol, [...(permissionsByRole.get(row.rol) || []), row.permiso.clave]));
+
+        const usersWithPermissions = users.map(user => {
+            const inheritedPermissions = permissionsByRole.get(user.rol) || [];
+            const directPermissions = user.permisos.map(item => item.permiso.clave);
+            const deniedPermissions = user.permisosDenegados.map(item => item.permiso.clave);
             return {
                 id: user.id,
                 email: user.email,
@@ -110,14 +136,27 @@ router.get('/', requirePermission('usuarios.ver'), async (req, res) => {
                 fechaActualizacion: user.fechaActualizacion,
                 activo: user.activo,
                 mustChangePassword: user.mustChangePassword,
-                ...details
+                inheritedPermissions,
+                directPermissions,
+                deniedPermissions,
+                permissions: resolveEffectivePermissions(inheritedPermissions, directPermissions, deniedPermissions)
             };
-        }));
+        });
 
-        res.json(usersWithPermissions);
+        res.json({ data: usersWithPermissions, meta: { total, page: pagination.page, limit: pagination.limit, totalPages: Math.ceil(total / pagination.limit) } });
     } catch (error) {
         res.status(500).json({ message: 'Error al obtener usuarios' });
     }
+});
+
+router.get('/opciones', requirePermission('usuarios.ver'), async (req, res) => {
+    const { inmobiliariaId } = (req as AuthRequest).user!;
+    const users = await prisma.usuario.findMany({
+        where: { inmobiliariaId, activo: true },
+        select: { id: true, email: true, nombreCompleto: true, rol: true },
+        orderBy: [{ nombreCompleto: 'asc' }, { id: 'asc' }]
+    });
+    res.json(users.map(user => ({ ...user, fullName: user.nombreCompleto, role: user.rol })));
 });
 
 router.get('/permisos/catalogo', requirePermission('usuarios.permisos'), async (_req, res) => {
@@ -134,11 +173,15 @@ router.get('/permisos/catalogo', requirePermission('usuarios.permisos'), async (
 });
 
 // Create user
-router.post('/', requirePermission('usuarios.crear'), validateBody(createUserSchema), async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
-    const { email, password, nombreCompleto, rol } = req.body;
+router.post('/', requirePermission('usuarios.crear'), requireRecentAuthentication, validateBody(createUserSchema), async (req, res) => {
+    const { inmobiliariaId, role: actorRole, id: actorId } = (req as AuthRequest).user!;
+    const { email, password, nombreCompleto, rol, permissions, deniedPermissions } = req.body;
 
     try {
+        if (!canCreateRole(actorRole, rol)) return res.status(403).json({ message: 'No podés crear un usuario con un rol igual o superior al tuyo' });
+        if (rol !== 'AGENTE' && !(await userHasPermission(actorId, actorRole, 'usuarios.asignar_rol'))) {
+            return res.status(403).json({ message: 'No tenés permiso para asignar roles' });
+        }
         const passwordErrors = validatePasswordStrength(password, [email, nombreCompleto]);
         if (passwordErrors.length > 0) {
             return res.status(400).json({ message: 'La contraseña no cumple la política de seguridad', errors: passwordErrors });
@@ -149,18 +192,12 @@ router.post('/', requirePermission('usuarios.crear'), validateBody(createUserSch
             return res.status(400).json({ message: 'El email ya está en uso' });
         }
 
+        const requestedKeys = [...new Set<string>([...permissions, ...deniedPermissions])];
+        const catalog = requestedKeys.length ? await prisma.permiso.findMany({ where: { clave: { in: requestedKeys } } }) : [];
+        if (catalog.length !== requestedKeys.length) return res.status(400).json({ message: 'Uno o más permisos no existen' });
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        const user = await prisma.usuario.create({
-            data: {
-                email,
-                password: hashedPassword,
-                nombreCompleto,
-                rol: rol || 'AGENTE',
-                inmobiliariaId,
-                mustChangePassword: true
-            }
-        });
+        const user = await createUserWithPermissions({ email, hashedPassword, nombreCompleto, rol: rol || 'AGENTE', inmobiliariaId, permissions, deniedPermissions, catalog });
 
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -182,15 +219,16 @@ router.post('/', requirePermission('usuarios.crear'), validateBody(createUserSch
             rol: role,
             role,
             ...(await getUserPermissionDetails(user.id, role)),
-            directPermissions: []
+            directPermissions: permissions,
+            deniedPermissions
         });
     } catch (error) {
         res.status(500).json({ message: 'Error al crear usuario' });
     }
 });
 
-router.put('/:id/permisos', requirePermission('usuarios.permisos'), validateBody(updatePermissionsSchema), async (req, res) => {
-    const { id: actorId, inmobiliariaId } = (req as AuthRequest).user!;
+router.put('/:id/permisos', requirePermission('usuarios.permisos'), requireRecentAuthentication, validateBody(updatePermissionsSchema), async (req, res) => {
+    const { id: actorId, inmobiliariaId, role: actorRole } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { permissions, deniedPermissions } = req.body as { permissions: string[]; deniedPermissions: string[] };
 
@@ -201,6 +239,9 @@ router.put('/:id/permisos', requirePermission('usuarios.permisos'), validateBody
 
         if (!user) {
             return res.status(404).json({ message: 'Usuario no encontrado' });
+        }
+        if (user.id === actorId || !isRoleBelow(user.rol, actorRole)) {
+            return res.status(403).json({ message: 'No podés modificar tus propios permisos ni los de un rol igual o superior' });
         }
 
         const before = await getUserPermissionDetails(user.id, user.rol);
@@ -294,8 +335,8 @@ router.put('/:id/permisos', requirePermission('usuarios.permisos'), validateBody
 });
 
 // Update user
-router.put('/:id', requirePermission('usuarios.editar'), validateBody(updateUserSchema), async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
+router.put('/:id', requirePermission('usuarios.editar'), requireRecentAuthentication, validateBody(updateUserSchema), async (req, res) => {
+    const { inmobiliariaId, id: actorId, role: actorRole } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { email, nombreCompleto, rol, activo } = req.body;
 
@@ -306,6 +347,14 @@ router.put('/:id', requirePermission('usuarios.editar'), validateBody(updateUser
 
         if (!user) {
             return res.status(404).json({ message: 'Usuario no encontrado' });
+        }
+
+        const changesPrivilege = Boolean(rol && rol !== user.rol) || activo === false;
+        if (user.id !== actorId && !isRoleBelow(user.rol, actorRole)) return res.status(403).json({ message: 'No podés modificar un usuario con rol igual o superior al tuyo' });
+        if (user.id === actorId && changesPrivilege) return res.status(403).json({ message: 'No podés cambiar tu propio rol ni desactivar tu cuenta' });
+        if (rol && rol !== user.rol) {
+            if (!(await userHasPermission(actorId, actorRole, 'usuarios.asignar_rol'))) return res.status(403).json({ message: 'No tenés permiso para asignar roles' });
+            if (!isRoleBelow(rol, actorRole)) return res.status(403).json({ message: 'No podés asignar un rol igual o superior al tuyo' });
         }
 
         if (rol && rol !== user.rol) {
@@ -387,8 +436,8 @@ router.put('/:id', requirePermission('usuarios.editar'), validateBody(updateUser
 });
 
 // Delete user
-router.delete('/:id', requirePermission('usuarios.eliminar'), async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
+router.delete('/:id', requirePermission('usuarios.eliminar'), requireRecentAuthentication, async (req, res) => {
+    const { inmobiliariaId, role: actorRole } = (req as AuthRequest).user!;
     const { id } = req.params;
 
     if (Number(id) === (req as AuthRequest).user!.id) {
@@ -404,6 +453,10 @@ router.delete('/:id', requirePermission('usuarios.eliminar'), async (req, res) =
             return res.status(404).json({ message: 'Usuario no encontrado' });
         }
 
+        if (!isRoleBelow(user.rol, actorRole)) {
+            return res.status(403).json({ message: 'No podés desactivar un usuario con rol igual o superior al tuyo' });
+        }
+
         const permissions = await getUserPermissions(user.id, user.rol);
         if (permissions.includes('usuarios.permisos')) {
             if (!(await assertDoesNotRemoveLastPermissionManager(inmobiliariaId, user.id, [], res))) {
@@ -411,15 +464,16 @@ router.delete('/:id', requirePermission('usuarios.eliminar'), async (req, res) =
             }
         }
 
-        await prisma.usuario.delete({
-            where: { id: Number(id) }
+        await prisma.usuario.update({
+            where: { id: user.id },
+            data: { activo: false, sessionVersion: { increment: 1 } }
         });
         await revokeAllUserSessions(user.id);
 
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
             inmobiliariaId,
-            accion: 'ELIMINAR_USUARIO',
+            accion: 'DESACTIVAR_USUARIO',
             entidad: 'Usuario',
             entidadId: user.id,
             detalle: `Usuario eliminado: ${user.email}`,
@@ -428,7 +482,7 @@ router.delete('/:id', requirePermission('usuarios.eliminar'), async (req, res) =
             severidad: 'CRITICAL'
         });
 
-        res.json({ message: 'Usuario eliminado con éxito' });
+        res.json({ message: 'Usuario desactivado. Su historial se conserva y sus sesiones fueron revocadas.' });
     } catch (error) {
         res.status(500).json({ message: 'Error al eliminar usuario' });
     }

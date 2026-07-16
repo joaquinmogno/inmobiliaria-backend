@@ -21,6 +21,7 @@ const createdLiquidaciones = [];
 const createdMovimientos = [];
 const createdPagos = [];
 const createdCaja = [];
+const createdCuotas = [];
 
 const SESSION_TOKEN = 'currency-session-token';
 const CSRF_TOKEN = 'currency-csrf-token';
@@ -69,6 +70,7 @@ function resetState() {
   createdMovimientos.length = 0;
   createdPagos.length = 0;
   createdCaja.length = 0;
+  createdCuotas.length = 0;
 }
 
 function installPrismaMocks() {
@@ -102,17 +104,31 @@ function installPrismaMocks() {
     update: async () => undefined,
   };
 
-  prisma.$transaction = async (callback) => callback(prisma);
+  prisma.$transaction = async (callback) => {
+    const snapshots = [createdLiquidaciones, createdMovimientos, createdCuotas]
+      .map(items => items.map(item => ({ ...item, ...(item.plan ? { plan: { ...item.plan } } : {}) })));
+    try {
+      return await callback(prisma);
+    } catch (error) {
+      [createdLiquidaciones, createdMovimientos, createdCuotas].forEach((items, index) => {
+        items.splice(0, items.length, ...snapshots[index]);
+      });
+      throw error;
+    }
+  };
 
   prisma.propiedad = {
     findFirst: async () => ({ id: 10, direccion: 'Av. Test 123' }),
     create: async ({ data }) => ({ id: 10, ...data }),
+    update: async ({ where, data }) => ({ id: where.id, direccion: 'Av. Test 123', ...data }),
+    updateMany: async () => ({ count: 1 }),
   };
   prisma.persona = {
     findMany: async ({ where }) => (where.id.in || []).map((id) => ({ id })),
     create: async ({ data }) => ({ id: createdContracts.length + 100, ...data }),
   };
   prisma.contrato = {
+    count: async ({ where }) => createdContracts.filter(item => item.propiedadId === where.propiedadId && item.estado === 'ACTIVO').length,
     create: async ({ data }) => {
       const contrato = {
         id: createdContracts.length + 1,
@@ -178,7 +194,22 @@ function installPrismaMocks() {
   };
   prisma.cuotaPlan = {
     findUnique: async () => null,
-    update: async ({ data }) => data,
+    findFirst: async ({ where }) => createdCuotas.find(item =>
+      item.id === where.id && item.estado === where.estado && item.liquidacionId === null && item.movimientoId === null
+    ) || null,
+    updateMany: async ({ where, data }) => {
+      const cuota = createdCuotas.find(item =>
+        item.id === where.id && item.estado === where.estado && item.liquidacionId === null && item.movimientoId === null
+      );
+      if (!cuota) return { count: 0 };
+      Object.assign(cuota, data);
+      return { count: 1 };
+    },
+    update: async ({ where, data }) => {
+      const cuota = createdCuotas.find(item => item.id === where.id);
+      if (cuota) Object.assign(cuota, data);
+      return cuota || data;
+    },
   };
   prisma.pago = {
     count: async ({ where }) => createdPagos.filter((item) => item.contratoId === where.contratoId).length,
@@ -338,6 +369,37 @@ test('API currency: liquidations inherit contract currency and initial movement 
   });
 });
 
+test('API liquidations: a claimed installment cannot be reused and the failed transaction rolls back', async () => {
+  createdContracts.push({ id: 1, inmobiliariaId: 1, moneda: 'ARS', montoAlquiler: 1500 });
+  createdCuotas.push({
+    id: 10,
+    estado: 'PENDIENTE',
+    liquidacionId: null,
+    movimientoId: null,
+    monto: 200,
+    moneda: 'ARS',
+    numeroCuota: 1,
+    plan: { contratoId: 1, inmobiliariaId: 1, moneda: 'ARS', tipoMovimiento: 'DESCUENTO', concepto: 'Arreglo', esParaInmobiliaria: false }
+  });
+
+  await withServer(async (app) => {
+    const first = await request(app, '/api/liquidaciones', {
+      method: 'POST',
+      body: JSON.stringify({ contratoId: 1, periodo: '2026-06-01', montoHonorarios: 0, cuotasIds: [10] }),
+    });
+    const second = await request(app, '/api/liquidaciones', {
+      method: 'POST',
+      body: JSON.stringify({ contratoId: 1, periodo: '2026-07-01', montoHonorarios: 0, cuotasIds: [10] }),
+    });
+
+    assert.equal(first.status, 201);
+    assert.equal(second.status, 409);
+    assert.equal(createdLiquidaciones.length, 1);
+    assert.equal(createdCuotas[0].liquidacionId, 1);
+    assert.ok(createdCuotas[0].movimientoId);
+  });
+});
+
 test('API currency: payment currency must match pending liquidation currency', async () => {
   createdContracts.push({ id: 1, inmobiliariaId: 1, moneda: 'USD', montoAlquiler: 1500 });
   createdLiquidaciones.push({
@@ -366,6 +428,46 @@ test('API currency: payment currency must match pending liquidation currency', a
     assert.equal(response.status, 400);
     assert.match(response.body.message, /USD/);
     assert.match(response.body.message, /mezclar monedas/);
+  });
+});
+
+test('API payments: a partial payment creates its cash income immediately', async () => {
+  createdContracts.push({ id: 1, inmobiliariaId: 1, moneda: 'ARS', montoAlquiler: 1500 });
+  createdLiquidaciones.push({
+    id: 1, contratoId: 1, inmobiliariaId: 1, moneda: 'ARS', estado: 'PENDIENTE_PAGO',
+    netoACobrar: 1500, periodo: new Date('2026-06-01T00:00:00.000Z'),
+  });
+
+  await withServer(async (app) => {
+    const response = await request(app, '/api/pagos', {
+      method: 'POST',
+      body: JSON.stringify({ contratoId: 1, monto: 500, moneda: 'ARS', metodoPago: 'EFECTIVO', fechaPago: '2026-06-10' }),
+    });
+    assert.equal(response.status, 201);
+    assert.equal(createdPagos.length, 1);
+    assert.equal(Number(createdPagos[0].monto), 500);
+    assert.equal(createdCaja.length, 1);
+    assert.equal(Number(createdCaja[0].monto), 500);
+    assert.equal(createdLiquidaciones[0].estado, 'PENDIENTE_PAGO');
+  });
+});
+
+test('API payments: rejects overpayments without creating payments or cash movements', async () => {
+  createdContracts.push({ id: 1, inmobiliariaId: 1, moneda: 'ARS', montoAlquiler: 1500 });
+  createdLiquidaciones.push({
+    id: 1, contratoId: 1, inmobiliariaId: 1, moneda: 'ARS', estado: 'PENDIENTE_PAGO',
+    netoACobrar: 1500, periodo: new Date('2026-06-01T00:00:00.000Z'),
+  });
+
+  await withServer(async (app) => {
+    const response = await request(app, '/api/pagos', {
+      method: 'POST',
+      body: JSON.stringify({ contratoId: 1, monto: 1501, moneda: 'ARS', metodoPago: 'EFECTIVO' }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal(response.body.code, 'PAYMENT_EXCEEDS_DEBT');
+    assert.equal(createdPagos.length, 0);
+    assert.equal(createdCaja.length, 0);
   });
 });
 

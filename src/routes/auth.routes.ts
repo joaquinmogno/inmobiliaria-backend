@@ -1,20 +1,22 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import bcrypt from 'bcrypt';
-import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
+import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { loginLimiter } from '../middlewares/rateLimiter.middleware';
 import { z } from 'zod';
-import { getUserPermissionDetails, userHasPermission } from '../services/permissions.service';
+import { getUserPermissionDetails, isRoleBelow, userHasPermission } from '../services/permissions.service';
 import { auditService } from '../services/audit.service';
 import { verifyGoogleIdToken } from '../services/google-auth.service';
 import {
     clearAuthCookies,
+    createSecureToken,
     createSession,
     getClientIp,
     getUserAgent,
     privilegedRoles,
     revokeAllUserSessions,
     revokeSession,
+    sha256,
     validatePasswordStrength
 } from '../services/security.service';
 import { env } from '../config/env';
@@ -33,8 +35,12 @@ const loginSchema = z.object({
 });
 
 const googleLoginSchema = z.object({
-    idToken: z.string().min(1, 'El token de Google es obligatorio')
+    idToken: z.string().min(1, 'El token de Google es obligatorio'),
+    currentPassword: z.string().max(128).optional()
 });
+
+const reauthenticateSchema = z.object({ password: z.string().min(1).max(128) });
+const completeResetSchema = z.object({ token: z.string().min(32).max(256), newPassword: z.string().min(12).max(128) });
 
 const changePasswordSchema = z.object({
     currentPassword: z.string().min(1, 'La contraseña actual es requerida'),
@@ -43,12 +49,6 @@ const changePasswordSchema = z.object({
 
 const resetPasswordSchema = z.object({
     newPassword: z.string().min(12, 'La nueva contraseña debe tener al menos 12 caracteres').max(128)
-});
-
-const setupSuperAdminSchema = z.object({
-    email: z.string().trim().toLowerCase().email('Email inválido').max(254, 'Email demasiado largo'),
-    password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres').max(128, 'Contraseña demasiado larga'),
-    nombreCompleto: z.string().trim().min(2, 'El nombre es obligatorio').max(120, 'Nombre demasiado largo')
 });
 
 async function buildSessionUser(userId: number) {
@@ -222,11 +222,11 @@ router.post('/google', loginLimiter, async (req, res) => {
 
         const googleUserUpdates: { googleId?: string; authProvider?: string; mustChangePassword?: boolean } = {};
         if (!user.googleId) {
+            if (!validation.data.currentPassword || !(await bcrypt.compare(validation.data.currentPassword, user.password))) {
+                return res.status(403).json({ message: 'Para vincular Google por primera vez, confirmá tu contraseña actual', code: 'GOOGLE_LINK_REQUIRES_PASSWORD' });
+            }
             googleUserUpdates.googleId = googleUser.googleId;
             googleUserUpdates.authProvider = user.authProvider === 'LOCAL' ? 'LOCAL_GOOGLE' : user.authProvider;
-        }
-        if (user.mustChangePassword) {
-            googleUserUpdates.mustChangePassword = false;
         }
 
         if (Object.keys(googleUserUpdates).length > 0) {
@@ -300,6 +300,16 @@ router.post('/logout', authenticateToken, async (req, res) => {
     res.json({ message: 'Sesión cerrada' });
 });
 
+router.post('/reauthenticate', authenticateToken, async (req, res) => {
+    const validation = reauthenticateSchema.safeParse(req.body);
+    if (!validation.success) return res.status(400).json({ message: 'Contraseña requerida' });
+    const authReq = req as AuthRequest;
+    const user = await prisma.usuario.findUnique({ where: { id: authReq.user!.id } });
+    if (!user || !(await bcrypt.compare(validation.data.password, user.password))) return res.status(401).json({ message: 'Contraseña incorrecta' });
+    await prisma.userSession.update({ where: { id: authReq.sessionId! }, data: { authenticatedAt: new Date() } });
+    res.json({ message: 'Identidad confirmada' });
+});
+
 // Change password (logged in user)
 router.post('/change-password', authenticateToken, async (req, res) => {
     const validation = changePasswordSchema.safeParse(req.body);
@@ -355,19 +365,10 @@ router.post('/change-password', authenticateToken, async (req, res) => {
     }
 });
 
-// Reset password (admin only)
-router.post('/reset-password/:userId', authenticateToken, async (req, res) => {
-    const validation = resetPasswordSchema.safeParse(req.body);
-    if (!validation.success) {
-        return res.status(400).json({ 
-            message: 'Datos de entrada inválidos',
-            errors: validation.error.issues.map((e: z.ZodIssue) => e.message)
-        });
-    }
-
+// Generate a one-time recovery token without choosing the user's password.
+router.post('/reset-password/:userId', authenticateToken, requireRecentAuthentication, async (req, res) => {
     const { id: actorId, role, inmobiliariaId } = (req as AuthRequest).user!;
     const { userId } = req.params;
-    const { newPassword } = validation.data;
 
     if (!(await userHasPermission(actorId, role, 'usuarios.editar'))) {
         return res.status(403).json({ message: 'Acceso denegado' });
@@ -379,23 +380,11 @@ router.post('/reset-password/:userId', authenticateToken, async (req, res) => {
         });
 
         if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
+        if (user.id === actorId || !isRoleBelow(user.rol, role)) return res.status(403).json({ message: 'No podés recuperar una cuenta con rol igual o superior al tuyo' });
 
-        const passwordErrors = validatePasswordStrength(newPassword, [user.email, user.nombreCompleto]);
-        if (passwordErrors.length > 0) {
-            return res.status(400).json({ message: 'La contraseña no cumple la política de seguridad', errors: passwordErrors });
-        }
-
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
-        await prisma.usuario.update({
-            where: { id: Number(userId) },
-            data: {
-                password: hashedPassword,
-                sessionVersion: { increment: 1 },
-                passwordChangedAt: new Date(),
-                mustChangePassword: true
-            }
-        });
-        await revokeAllUserSessions(Number(userId));
+        const token = createSecureToken(48);
+        await prisma.passwordResetToken.updateMany({ where: { usuarioId: user.id, usedAt: null }, data: { usedAt: new Date() } });
+        await prisma.passwordResetToken.create({ data: { tokenHash: sha256(token), expiresAt: new Date(Date.now() + 20 * 60 * 1000), usuarioId: user.id, creadoPorId: actorId } });
 
         await auditService.log({
             usuarioId: actorId,
@@ -409,78 +398,29 @@ router.post('/reset-password/:userId', authenticateToken, async (req, res) => {
             severidad: 'CRITICAL'
         });
 
-        res.json({ message: 'Contraseña reseteada con éxito' });
+        res.json({ message: 'Enlace de recuperación generado. Expira en 20 minutos y puede usarse una sola vez.', resetToken: token });
     } catch (error) {
         res.status(500).json({ message: 'Error al resetear contraseña' });
     }
 });
 
-// Setup Initial SuperAdmin (Solo se puede usar si no existe ninguno)
-router.post('/setup-superadmin', async (req, res) => {
-    try {
-        if (env.nodeEnv === 'production' || env.initialSetupToken) {
-            const setupToken = req.get('x-setup-token');
-            if (!env.initialSetupToken || setupToken !== env.initialSetupToken) {
-                return res.status(403).json({ message: 'Token de inicialización inválido' });
-            }
-        }
-
-        const validation = setupSuperAdminSchema.safeParse(req.body);
-        if (!validation.success) {
-            return res.status(400).json({
-                message: 'Datos de entrada inválidos',
-                errors: validation.error.issues.map((e: z.ZodIssue) => e.message)
-            });
-        }
-
-        const existingSuperAdmin = await prisma.usuario.findFirst({
-            where: { rol: 'SUPERADMIN' }
-        });
-        
-        if (existingSuperAdmin) {
-            return res.status(403).json({ message: 'Ya existe un administrador global configurado' });
-        }
-
-        const { email, password, nombreCompleto } = validation.data;
-        const passwordErrors = validatePasswordStrength(password, [email, nombreCompleto]);
-        if (passwordErrors.length > 0) {
-            return res.status(400).json({ message: 'La contraseña no cumple la política de seguridad', errors: passwordErrors });
-        }
-
-        // Enlazar al super admin a la primera inmobiliaria existente (Foreign Key)
-        // El rol de SUPERADMIN ignora la restricción de inmobiliariaId posteriormente.
-        let rootInmo = await prisma.inmobiliaria.findFirst();
-
-        if (!rootInmo) {
-            rootInmo = await prisma.inmobiliaria.create({
-                data: {
-                    nombre: 'SaaS Platform Home',
-                    activa: true
-                }
-            });
-        }
-        
-        const hashedPassword = await bcrypt.hash(password, 10);
-        
-        const superAdmin = await prisma.usuario.create({
-            data: {
-                email,
-                password: hashedPassword,
-                nombreCompleto,
-                rol: 'SUPERADMIN',
-                inmobiliariaId: rootInmo.id,
-                mustChangePassword: false
-            }
-        });
-        
-        res.status(201).json({ 
-            message: 'Super Administrador inicializado con éxito', 
-            email: superAdmin.email 
-        });
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ message: 'Error crítico de inicialización' });
-    }
+router.post('/complete-password-reset', loginLimiter, async (req, res) => {
+    const validation = completeResetSchema.safeParse(req.body);
+    if (!validation.success) return res.status(400).json({ message: 'Datos de recuperación inválidos' });
+    const record = await prisma.passwordResetToken.findUnique({ where: { tokenHash: sha256(validation.data.token) }, include: { usuario: true } });
+    if (!record || record.usedAt || record.expiresAt <= new Date() || !record.usuario.activo) return res.status(400).json({ message: 'El enlace es inválido o expiró' });
+    const errors = validatePasswordStrength(validation.data.newPassword, [record.usuario.email, record.usuario.nombreCompleto]);
+    if (errors.length) return res.status(400).json({ message: 'La contraseña no cumple la política de seguridad', errors });
+    const password = await bcrypt.hash(validation.data.newPassword, 10);
+    const consumed = await prisma.$transaction(async tx => {
+        const claim = await tx.passwordResetToken.updateMany({ where: { id: record.id, usedAt: null, expiresAt: { gt: new Date() } }, data: { usedAt: new Date() } });
+        if (claim.count !== 1) return false;
+        await tx.usuario.update({ where: { id: record.usuarioId }, data: { password, sessionVersion: { increment: 1 }, passwordChangedAt: new Date(), mustChangePassword: false } });
+        await tx.userSession.updateMany({ where: { usuarioId: record.usuarioId, revokedAt: null }, data: { revokedAt: new Date() } });
+        return true;
+    });
+    if (!consumed) return res.status(400).json({ message: 'El enlace ya fue utilizado' });
+    res.json({ message: 'Contraseña actualizada. Ya podés iniciar sesión.' });
 });
 
 export default router;

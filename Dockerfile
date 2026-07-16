@@ -24,6 +24,7 @@ WORKDIR /app
 RUN apk add --no-cache openssl postgresql-client su-exec
 ENV PORT=3000
 ENV UPLOAD_DIR=/app/uploads
+ENV BACKUPS_DIR=/app/backups
 ENV NODE_ENV=production
 ENV PRISMA_ENGINES_CACHE_DIR=/app/prisma-engines
 
@@ -38,6 +39,7 @@ RUN mkdir -p /app/uploads /app/backups /app/.seed-data \
 COPY docker-entrypoint.sh /app/
 RUN chmod +x /app/docker-entrypoint.sh
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD wget -qO- http://127.0.0.1:3000/health/ready >/dev/null || exit 1
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["node", "dist/server.js"]

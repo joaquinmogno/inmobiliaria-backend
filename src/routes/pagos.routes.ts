@@ -1,7 +1,8 @@
 import { Router } from 'express';
+import { invalidatePerformanceCache } from '../services/performance-cache.service';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
-import { MetodoPago, EstadoLiquidacion } from '@prisma/client';
+import { MetodoPago, EstadoLiquidacion, Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { auditService } from '../services/audit.service';
 import { validateBody, positiveDecimal, optionalDateOnlyString, optionalText } from '../middlewares/validation.middleware';
@@ -163,7 +164,19 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                 throw new Error('No existen liquidaciones pendientes de pago para este contrato');
             }
 
-            let montoRestante = new Decimal(monto.toString());
+            const deudaTotal = liquidacionesConDeuda.reduce(
+                (total, liquidacion) => total.plus(liquidacion.deuda),
+                new Decimal(0)
+            );
+            const montoEntregado = new Decimal(monto.toString());
+            if (montoEntregado.greaterThan(deudaTotal)) {
+                throw Object.assign(
+                    new Error(`El pago supera la deuda total. El máximo permitido es ${formatCurrency(deudaTotal.toString(), contrato.moneda)}`),
+                    { statusCode: 409, code: 'PAYMENT_EXCEEDS_DEBT' }
+                );
+            }
+
+            let montoRestante = montoEntregado;
             const pagosCreados = [];
 
             // 3. Distribuir el monto
@@ -189,6 +202,26 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                 pagosCreados.push(nuevoPago);
                 montoRestante = montoRestante.minus(montoAAplicar);
 
+                const cuentaCobro = (metodoPago === 'EFECTIVO' || !metodoPago) ? 'CAJA' : 'BANCO';
+                const dir = (liq as any).contrato?.propiedad?.direccion || 'Sin dirección';
+                const periodoStr = new Date(liq.periodo).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+                await tx.movimientoCaja.create({
+                    data: {
+                        inmobiliariaId,
+                        tipo: 'INGRESO',
+                        concepto: `Cobro Alquiler - ${dir} - Liq. ${periodoStr}`,
+                        monto: montoAAplicar,
+                        moneda: liq.moneda,
+                        fecha: new Date(fechaPago || new Date()),
+                        creadoPorId: usuarioId,
+                        contratoId: Number(contratoId),
+                        liquidacionId: liq.id,
+                        metodoPago: metodoPago || MetodoPago.EFECTIVO,
+                        cuenta: cuentaCobro
+                    }
+                });
+
                 // Si se cubrió la deuda, marcamos como PAGADA
                 if (montoAAplicar.greaterThanOrEqualTo(liq.deuda)) {
                     await tx.liquidacion.update({
@@ -196,26 +229,6 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                         data: { estado: EstadoLiquidacion.PAGADA_POR_INQUILINO }
                     });
 
-                    // Inyectar Cobro de Alquiler en la Caja Chica unificado
-                    const cuentaCobro = (metodoPago === 'EFECTIVO' || !metodoPago) ? 'CAJA' : 'BANCO';
-                    const dir = (liq as any).contrato?.propiedad?.direccion || 'Sin dirección';
-                    const periodoStr = new Date(liq.periodo).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' });
-                    
-                    await tx.movimientoCaja.create({
-                        data: {
-                            inmobiliariaId,
-                            tipo: 'INGRESO',
-                            concepto: `Cobro Alquiler - ${dir} - Liq. ${periodoStr}`,
-                            monto: montoAAplicar, // El monto total cobrado en este paso
-                            moneda: liq.moneda,
-                            fecha: new Date(fechaPago || new Date()),
-                            creadoPorId: usuarioId,
-                            contratoId: Number(contratoId),
-                            liquidacionId: liq.id,
-                            metodoPago: metodoPago || MetodoPago.EFECTIVO,
-                            cuenta: cuentaCobro
-                        }
-                    });
                 }
             }
 
@@ -228,7 +241,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                 montoSobrante: montoRestante,
                 moneda: contrato.moneda
             };
-        });
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
         await auditService.log({
             usuarioId,
@@ -285,10 +298,11 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
         });
         }));
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.status(201).json(result);
     } catch (error: any) {
         console.error(error);
-        res.status(400).json({ message: error.message || 'Error al registrar el pago' });
+        res.status(error.statusCode || 400).json({ message: error.message || 'Error al registrar el pago', code: error.code });
     }
 });
 

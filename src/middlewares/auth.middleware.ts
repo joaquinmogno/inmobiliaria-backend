@@ -15,6 +15,16 @@ export interface AuthRequest extends Request {
     };
 }
 
+const RECENT_AUTH_MS = 15 * 60 * 1000;
+
+export const requireRecentAuthentication = (req: Request, res: Response, next: NextFunction) => {
+    const authenticatedAt = (req as Request & { sessionAuthenticatedAt?: Date }).sessionAuthenticatedAt;
+    if (!authenticatedAt || Date.now() - authenticatedAt.getTime() > RECENT_AUTH_MS) {
+        return res.status(403).json({ message: 'Por seguridad, volvé a confirmar tu contraseña', code: 'REAUTHENTICATION_REQUIRED' });
+    }
+    next();
+};
+
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export const authenticateToken = async (req: Request, res: Response, next: NextFunction) => {
@@ -71,6 +81,7 @@ export const authenticateToken = async (req: Request, res: Response, next: NextF
         }).catch(() => undefined);
 
         (req as AuthRequest).sessionId = session.id;
+        (req as Request & { sessionAuthenticatedAt?: Date }).sessionAuthenticatedAt = session.authenticatedAt || session.createdAt;
         (req as AuthRequest).csrfToken = req.cookies?.[CSRF_COOKIE];
         (req as AuthRequest).user = {
             id: user.id,

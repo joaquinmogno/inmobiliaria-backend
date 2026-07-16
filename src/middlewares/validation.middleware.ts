@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { z, ZodTypeAny } from 'zod';
+import { parsePhoneNumberFromString } from 'libphonenumber-js/min';
 
 export const validateBody = (schema: ZodTypeAny) => {
     return (req: Request, res: Response, next: NextFunction) => {
@@ -32,6 +33,19 @@ export const optionalEmail = () =>
     z.preprocess(
         value => (value === '' || value === null) ? undefined : value,
         z.string().trim().toLowerCase().email('Email inválido').max(254).optional()
+    );
+
+export const optionalPhone = (defaultCountry: 'AR' = 'AR') =>
+    z.preprocess(
+        value => (value === '' || value === null) ? undefined : value,
+        z.string().trim().max(40).transform((value, ctx) => {
+            const phone = parsePhoneNumberFromString(value, defaultCountry);
+            if (!phone?.isValid()) {
+                ctx.addIssue({ code: 'custom', message: 'Teléfono inválido' });
+                return z.NEVER;
+            }
+            return phone.number;
+        }).optional()
     );
 
 export const requiredText = (field: string, max = 255) =>

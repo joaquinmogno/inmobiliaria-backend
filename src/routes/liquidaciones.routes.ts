@@ -1,8 +1,9 @@
 import { Router } from 'express';
+import { invalidatePerformanceCache } from '../services/performance-cache.service';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
 import { Decimal } from '@prisma/client/runtime/library';
-import { EstadoLiquidacion } from '@prisma/client';
+import { EstadoLiquidacion, Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import { auditService } from '../services/audit.service';
 import {
@@ -61,8 +62,11 @@ function generarConcepto(tipo: string, liquidacion: any): string {
 }
 
 // Helper para recalcular totales de una liquidación
-async function recalcularTotales(liquidacionId: number) {
-    const movimientos = await prisma.movimiento.findMany({
+async function recalcularTotales(
+    liquidacionId: number,
+    db: Prisma.TransactionClient | typeof prisma = prisma
+) {
+    const movimientos = await db.movimiento.findMany({
         where: { liquidacionId }
     });
 
@@ -85,7 +89,7 @@ async function recalcularTotales(liquidacionId: number) {
 
     const netoACobrar = totalIngresos.minus(totalDescuentosInquilino);
 
-    return (await prisma.liquidacion.update({
+    return (await db.liquidacion.update({
         where: { id: liquidacionId },
         data: {
             totalIngresos,
@@ -108,7 +112,7 @@ async function recalcularTotales(liquidacionId: number) {
 // Obtener todas las liquidaciones de la inmobiliaria
 router.get('/', requirePermission('liquidaciones.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
-    const { contratoId, page, limit, search } = req.query;
+    const { contratoId, page, limit, search, estado, periodo, propietarioId, soloDeuda } = req.query;
 
     const pageNum = page ? parseInt(String(page)) : 1;
     const limitNum = limit ? parseInt(String(limit)) : 50;
@@ -117,17 +121,30 @@ router.get('/', requirePermission('liquidaciones.ver'), async (req, res) => {
     try {
         const whereClause: any = {
             inmobiliariaId,
-            ...(contratoId ? { contratoId: Number(contratoId) } : {})
+            ...(contratoId ? { contratoId: Number(contratoId) } : {}),
+            ...(estado ? { estado: String(estado) as EstadoLiquidacion } : {}),
+            ...(periodo ? { periodo: new Date(String(periodo)) } : {})
         };
 
-        if (search) {
-            whereClause.contrato = {
-                OR: [
+        const contractFilters: any[] = [];
+        if (search) contractFilters.push({ OR: [
                     { propiedad: { direccion: { contains: String(search), mode: 'insensitive' } } },
                     { inquilinos: { some: { persona: { nombreCompleto: { contains: String(search), mode: 'insensitive' } } } } },
                     { propietarios: { some: { persona: { nombreCompleto: { contains: String(search), mode: 'insensitive' } } } } }
-                ]
-            };
+        ] });
+        if (propietarioId) contractFilters.push({ propietarios: { some: { personaId: Number(propietarioId) } } });
+        if (contractFilters.length) whereClause.contrato = { AND: contractFilters };
+
+        if (soloDeuda === 'true') {
+            const debtRows = await prisma.$queryRaw<{ id: number }[]>(Prisma.sql`
+                SELECT l.id
+                FROM "Liquidacion" l
+                LEFT JOIN "Pago" p ON p."liquidacionId" = l.id
+                WHERE l."inmobiliariaId" = ${inmobiliariaId}
+                GROUP BY l.id, l."netoACobrar"
+                HAVING l."netoACobrar" > COALESCE(SUM(p.monto), 0)
+            `);
+            whereClause.id = { in: debtRows.map(row => row.id) };
         }
 
         const total = await prisma.liquidacion.count({ where: whereClause });
@@ -162,6 +179,20 @@ router.get('/', requirePermission('liquidaciones.ver'), async (req, res) => {
         console.error('Error fetching liquidaciones:', error);
         res.status(500).json({ message: 'Error al obtener liquidaciones' });
     }
+});
+
+router.get('/filtros', requirePermission('liquidaciones.ver'), async (req, res) => {
+    const { inmobiliariaId } = (req as AuthRequest).user!;
+    const [periodRows, ownerRows] = await Promise.all([
+        prisma.liquidacion.groupBy({ by: ['periodo'], where: { inmobiliariaId }, orderBy: { periodo: 'desc' } }),
+        prisma.contratoPropietario.findMany({
+            where: { contrato: { inmobiliariaId, liquidaciones: { some: {} } } },
+            select: { persona: { select: { id: true, nombreCompleto: true } } },
+            distinct: ['personaId'],
+            orderBy: { personaId: 'asc' }
+        })
+    ]);
+    res.json({ periodos: periodRows.map(row => row.periodo), propietarios: ownerRows.map(row => row.persona) });
 });
 
 // Obtener detalle de una liquidación
@@ -219,102 +250,118 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
     const { contratoId, periodo, montoHonorarios, porcentajeHonorarios, cuotasIds } = req.body; // periodo: "YYYY-MM-01"
 
     try {
-        // Verificar que el contrato existe
-        const contrato = await prisma.contrato.findFirst({
-            where: { id: Number(contratoId), inmobiliariaId }
-        });
+        const runTransaction = () => prisma.$transaction(async (tx) => {
+            const contrato = await tx.contrato.findFirst({
+                where: { id: Number(contratoId), inmobiliariaId }
+            });
 
-        if (!contrato) {
-            return res.status(404).json({ message: 'Contrato no encontrado' });
-        }
+            if (!contrato) {
+                throw Object.assign(new Error('Contrato no encontrado'), { statusCode: 404 });
+            }
 
-        // Verificar si ya existe una liquidación para ese periodo
-        const existente = await prisma.liquidacion.findFirst({
-            where: { contratoId: Number(contratoId), periodo: new Date(periodo) }
-        });
+            const liquidacion = await tx.liquidacion.create({
+                data: {
+                    periodo: new Date(periodo),
+                    estado: 'BORRADOR',
+                    contratoId: Number(contratoId),
+                    inmobiliariaId,
+                    creadoPorId: (req as AuthRequest).user!.id,
+                    montoHonorarios: montoHonorarios ? Number(montoHonorarios) : 0,
+                    porcentajeHonorarios: porcentajeHonorarios ? Number(porcentajeHonorarios) : null,
+                    moneda: contrato.moneda
+                }
+            });
 
-        if (existente) {
-            return res.status(400).json({ message: 'Ya existe una liquidación para este periodo' });
-        }
+            await tx.movimiento.create({
+                data: {
+                    tipo: 'INGRESO',
+                    concepto: 'Alquiler Mensual',
+                    monto: contrato.montoAlquiler,
+                    moneda: contrato.moneda,
+                    liquidacionId: liquidacion.id
+                }
+            });
 
-        const cuotasSeleccionadas = [];
-        if (cuotasIds && Array.isArray(cuotasIds) && cuotasIds.length > 0) {
-            for (const cId of cuotasIds) {
-                const cuota = await prisma.cuotaPlan.findUnique({
-                    where: { id: Number(cId) },
+            for (const cuotaId of cuotasIds || []) {
+                const cuota = await tx.cuotaPlan.findFirst({
+                    where: {
+                        id: Number(cuotaId),
+                        estado: 'PENDIENTE',
+                        liquidacionId: null,
+                        movimientoId: null,
+                        plan: { contratoId: contrato.id, inmobiliariaId }
+                    },
                     include: { plan: true }
                 });
 
-                if (cuota && cuota.estado === 'PENDIENTE') {
-                    if (cuota.plan.contratoId !== contrato.id || cuota.plan.inmobiliariaId !== inmobiliariaId) {
-                        return res.status(400).json({ message: 'Una o más cuotas no pertenecen al contrato seleccionado' });
-                    }
-                    assertSameCurrency(cuota.moneda, contrato.moneda, 'No se pueden liquidar cuotas con una moneda distinta a la del contrato');
-                    assertSameCurrency(cuota.plan.moneda, contrato.moneda, 'No se pueden liquidar planes con una moneda distinta a la del contrato');
-                    cuotasSeleccionadas.push(cuota);
+                if (!cuota) {
+                    throw Object.assign(new Error('Una o más cuotas ya fueron utilizadas o no pertenecen al contrato'), { statusCode: 409 });
                 }
+
+                assertSameCurrency(cuota.moneda, contrato.moneda, 'No se pueden liquidar cuotas con una moneda distinta a la del contrato');
+                assertSameCurrency(cuota.plan.moneda, contrato.moneda, 'No se pueden liquidar planes con una moneda distinta a la del contrato');
+
+                const claimed = await tx.cuotaPlan.updateMany({
+                    where: {
+                        id: cuota.id,
+                        estado: 'PENDIENTE',
+                        liquidacionId: null,
+                        movimientoId: null
+                    },
+                    data: { liquidacionId: liquidacion.id }
+                });
+
+                if (claimed.count !== 1) {
+                    throw Object.assign(new Error('La cuota fue utilizada por otra operación'), { statusCode: 409 });
+                }
+
+                const movimiento = await tx.movimiento.create({
+                    data: {
+                        tipo: cuota.plan.tipoMovimiento,
+                        concepto: `${cuota.plan.concepto} (Cuota ${cuota.numeroCuota})`,
+                        monto: cuota.monto,
+                        moneda: contrato.moneda,
+                        liquidacionId: liquidacion.id,
+                        esParaInmobiliaria: cuota.plan.esParaInmobiliaria
+                    }
+                });
+
+                await tx.cuotaPlan.update({
+                    where: { id: cuota.id },
+                    data: { movimientoId: movimiento.id }
+                });
+            }
+
+            return recalcularTotales(liquidacion.id, tx);
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+        let actualizada;
+        try {
+            actualizada = await runTransaction();
+        } catch (error) {
+            if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+                actualizada = await runTransaction();
+            } else {
+                throw error;
             }
         }
-
-        const liquidacion = await prisma.liquidacion.create({
-            data: {
-                periodo: new Date(periodo),
-                estado: 'BORRADOR',
-                contratoId: Number(contratoId),
-                inmobiliariaId,
-                creadoPorId: (req as AuthRequest).user!.id,
-                montoHonorarios: montoHonorarios ? Number(montoHonorarios) : 0,
-                porcentajeHonorarios: porcentajeHonorarios ? Number(porcentajeHonorarios) : null,
-                moneda: contrato.moneda
-            }
-        });
-
-        await prisma.movimiento.create({
-            data: {
-                tipo: 'INGRESO',
-                concepto: 'Alquiler Mensual',
-                monto: contrato.montoAlquiler,
-                moneda: contrato.moneda,
-                liquidacionId: liquidacion.id
-            }
-        });
-
-        // Crear movimientos para cuotas seleccionadas
-        for (const cuota of cuotasSeleccionadas) {
-            const mov = await prisma.movimiento.create({
-                data: {
-                    tipo: cuota.plan.tipoMovimiento,
-                    concepto: `${cuota.plan.concepto} (Cuota ${cuota.numeroCuota})`,
-                    monto: cuota.monto,
-                    moneda: contrato.moneda,
-                    liquidacionId: liquidacion.id,
-                    esParaInmobiliaria: cuota.plan.esParaInmobiliaria
-                }
-            });
-
-            await prisma.cuotaPlan.update({
-                where: { id: cuota.id },
-                data: {
-                    liquidacionId: liquidacion.id,
-                    movimientoId: mov.id
-                }
-            });
-            }
-
-        const actualizada = await recalcularTotales(liquidacion.id);
         
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
             inmobiliariaId,
             accion: 'CREAR_LIQUIDACION',
             entidad: 'Liquidacion',
-            entidadId: liquidacion.id,
+            entidadId: actualizada.id,
             detalle: `Liquidación creada para contrato ${contratoId}, periodo ${periodo}`
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.status(201).json(actualizada);
     } catch (error: any) {
         console.error(error);
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+            return res.status(409).json({ message: 'Ya existe una liquidación para este contrato y período' });
+        }
         res.status(error.statusCode || 500).json({ message: error.message || 'Error al crear liquidación' });
     }
 });
@@ -361,6 +408,7 @@ router.post('/:id/movimientos', requirePermission('liquidaciones.editar'), valid
             detalle: `${tipo}: ${concepto} por monto ${monto}`
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.status(201).json(actualizada);
     } catch (error) {
         res.status(500).json({ message: 'Error al agregar movimiento' });
@@ -401,6 +449,7 @@ router.delete('/movimientos/:movimientoId', requirePermission('liquidaciones.edi
             detalle: `${movimiento.tipo}: ${movimiento.concepto} por monto ${movimiento.monto}`
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.json(actualizada);
     } catch (error) {
         res.status(500).json({ message: 'Error al eliminar movimiento' });
@@ -442,6 +491,7 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.editar'), async 
             detalle: 'Liquidación confirmada y pasada a pendiente de pago'
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.json(actualizada);
     } catch (error) {
         res.status(500).json({ message: 'Error al confirmar liquidación' });
@@ -506,6 +556,7 @@ router.patch('/:id/honorarios', requirePermission('liquidaciones.editar'), valid
             })
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.json(actualizada);
     } catch (error) {
         console.error('Error updates honorarios:', error);
@@ -543,6 +594,7 @@ router.delete('/:id', requirePermission('liquidaciones.eliminar'), async (req, r
             entidadId: Number(id)
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.json({ message: 'Liquidación eliminada' });
     } catch (error) {
         res.status(500).json({ message: 'Error al eliminar liquidación' });
@@ -643,6 +695,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.editar')
             detalle: `Pago a ${result.propietarioNombre} por ${formatCurrency(result.montoPropietario, result.moneda)} - ${result.propiedadDireccion} - ${result.periodoTexto}`
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.json(result);
     } catch (error: any) {
         console.error(error);

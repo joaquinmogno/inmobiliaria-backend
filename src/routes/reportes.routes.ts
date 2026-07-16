@@ -1,9 +1,11 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
-import { userHasPermission } from '../services/permissions.service';
+import { getUserPermissions } from '../services/permissions.service';
+import { cached } from '../services/performance-cache.service';
+import { Prisma } from '@prisma/client';
 import { requirePermission } from '../middlewares/permissions.middleware';
-import { startOfMonth, subMonths, endOfMonth } from 'date-fns';
+import { startOfMonth, endOfMonth } from 'date-fns';
 
 const router = Router();
 
@@ -14,15 +16,16 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
     const { id: userId, role, inmobiliariaId } = (req as AuthRequest).user!;
 
     try {
-        const canViewSalaries = await userHasPermission(userId, role, 'sueldos.ver');
-        const canViewFinancialReports = await userHasPermission(userId, role, 'reportes.financieros.ver');
-        const canViewContractReports = await userHasPermission(userId, role, 'reportes.contratos.ver');
-        const canViewDelinquencyReports = await userHasPermission(userId, role, 'reportes.morosidad.ver');
+        const permissions = new Set(await getUserPermissions(userId, role));
+        const canViewSalaries = permissions.has('sueldos.ver');
+        const canViewFinancialReports = permissions.has('reportes.financieros.ver');
+        const canViewContractReports = permissions.has('reportes.contratos.ver');
+        const canViewDelinquencyReports = permissions.has('reportes.morosidad.ver');
+        const permissionScope = [canViewSalaries, canViewFinancialReports, canViewContractReports, canViewDelinquencyReports].map(Number).join('');
+        const response = await cached(`inmobiliaria:${inmobiliariaId}:dashboard:${permissionScope}`, 20_000, async () => {
         const today = new Date();
         const startOfCurrentMonth = startOfMonth(today);
         const endOfCurrentMonth = endOfMonth(today);
-        const startOfPreviousMonth = startOfMonth(subMonths(today, 1));
-        const endOfPreviousMonth = endOfMonth(subMonths(today, 1));
 
         // 1. Estadísticas de Propiedades
         const [totalPropiedades, propiedadesDisponibles, propiedadesAlquiladas] = await Promise.all([
@@ -45,92 +48,6 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
             })
         ]);
 
-        // 3. Recaudación y Morosidad (Mes Actual vs Mes Anterior)
-        const [liquidacionesActual, liquidacionesAnterior, movimientosActual, sueldosActual] = await Promise.all([
-            prisma.liquidacion.findMany({
-                where: {
-                    inmobiliariaId,
-                    periodo: { gte: startOfCurrentMonth, lte: endOfCurrentMonth }
-                },
-                include: { pagos: true, movimientos: true }
-            }),
-            prisma.liquidacion.findMany({
-                where: {
-                    inmobiliariaId,
-                    periodo: { gte: startOfPreviousMonth, lte: endOfPreviousMonth }
-                },
-                include: { pagos: true, movimientos: true }
-            }),
-            prisma.movimientoCaja.findMany({
-                where: {
-                    inmobiliariaId,
-                    fecha: { gte: startOfCurrentMonth, lte: endOfCurrentMonth }
-                }
-            }),
-            canViewSalaries ? prisma.pagoSueldo.findMany({
-                where: {
-                    inmobiliariaId,
-                    fecha: { gte: startOfCurrentMonth, lte: endOfCurrentMonth }
-                }
-            }) : Promise.resolve([])
-        ]);
-
-        const calcFinanzasAgencia = (liquidaciones: any[], movimientos: any[], sueldos: any[], moneda: 'ARS' | 'USD') => {
-            let totalCobradoBruto = 0; // Todo lo que entró a caja (del inquilino)
-            let honorariosAgencia = 0; // Parte de las liquidaciones que es para la agencia
-            let facturadoTotal = 0;
-
-            liquidaciones.filter(liq => liq.moneda === moneda).forEach(liq => {
-                const neto = Number(liq.netoACobrar);
-                facturadoTotal += neto;
-                
-                // Honorarios fijos + Movimientos internos para la inmobiliaria
-                const honsFijos = Number(liq.montoHonorarios || 0);
-                const honsMovimientos = liq.movimientos
-                    .filter((m: any) => m.esParaInmobiliaria)
-                    .reduce((acc: number, m: any) => acc + Number(m.monto), 0);
-                
-                const honsTotales = honsFijos + honsMovimientos;
-
-                const cobradoLiq = liq.pagos.reduce((acc: number, p: any) => acc + Number(p.monto), 0);
-                totalCobradoBruto += cobradoLiq;
-
-                // Proporción de honorarios cobrados (si el inquilino pagó parcial, cobramos honorarios proporcionales)
-                if (neto > 0 && cobradoLiq > 0) {
-                    const ratio = Math.min(cobradoLiq / neto, 1);
-                    honorariosAgencia += honsTotales * ratio;
-                }
-            });
-
-            // Movimientos Directos de Caja (Manuales)
-            const ingresosInmo = movimientos
-                .filter(m => m.moneda === moneda && m.tipo === 'INGRESO' && m.liquidacionId === null) // Ingresos manuales
-                .reduce((acc, m) => acc + Number(m.monto), 0);
-            
-            const egresosInmo = movimientos
-                .filter(m => m.moneda === moneda && m.tipo === 'EGRESO' && m.liquidacionId === null) // Gastos manuales (admin, servicios, etc)
-                .reduce((acc, m) => acc + Number(m.monto), 0);
-
-            const gananciaBruta = honorariosAgencia + ingresosInmo;
-            const totalSueldos = sueldos
-                .filter(sueldo => sueldo.moneda === moneda)
-                .reduce((acc, sueldo) => acc + Number(sueldo.monto), 0);
-            const gastosAgencia = egresosInmo + totalSueldos;
-            const utilidadNeta = gananciaBruta - gastosAgencia;
-
-            // Fondo en Custodia: Lo que se cobró de liquidaciones pero no es de la agencia
-            const fondoCustodia = totalCobradoBruto - honorariosAgencia;
-
-            return {
-                recaudadoTotal: totalCobradoBruto,
-                gananciaBruta,
-                gastosAgencia,
-                utilidadNeta,
-                fondoCustodia,
-                morosidad: facturadoTotal > 0 ? ((facturadoTotal - totalCobradoBruto) / facturadoTotal) * 100 : 0
-            };
-        };
-
         const emptyMetrics = {
                 recaudadoTotal: 0,
                 gananciaBruta: 0,
@@ -139,11 +56,55 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
                 fondoCustodia: 0,
                 morosidad: 0
             };
+        const financialRows = canViewFinancialReports ? await prisma.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
+          WITH monedas(moneda) AS (VALUES ('ARS'::"Moneda"), ('USD'::"Moneda")),
+          liquidaciones AS (
+            SELECT l.moneda, SUM(l."netoACobrar") AS facturado,
+              SUM(COALESCE(p.cobrado, 0)) AS cobrado,
+              SUM((l."montoHonorarios" + COALESCE(m.honorarios, 0)) *
+                CASE WHEN l."netoACobrar" > 0 THEN LEAST(COALESCE(p.cobrado, 0) / l."netoACobrar", 1) ELSE 0 END) AS honorarios
+            FROM "Liquidacion" l
+            LEFT JOIN LATERAL (SELECT SUM(monto) AS cobrado FROM "Pago" WHERE "liquidacionId" = l.id) p ON true
+            LEFT JOIN LATERAL (SELECT SUM(monto) AS honorarios FROM "Movimiento" WHERE "liquidacionId" = l.id AND "esParaInmobiliaria" = true) m ON true
+            WHERE l."inmobiliariaId" = ${inmobiliariaId} AND l.periodo >= ${startOfCurrentMonth} AND l.periodo <= ${endOfCurrentMonth}
+            GROUP BY l.moneda
+          ), caja AS (
+            SELECT moneda,
+              SUM(monto) FILTER (WHERE tipo = 'INGRESO' AND "liquidacionId" IS NULL) AS ingresos_manuales,
+              SUM(monto) FILTER (WHERE tipo = 'EGRESO' AND "liquidacionId" IS NULL) AS egresos_manuales,
+              SUM(monto) FILTER (WHERE tipo = 'EGRESO' AND "liquidacionId" IS NOT NULL) AS pagos_propietarios
+            FROM "MovimientoCaja"
+            WHERE "inmobiliariaId" = ${inmobiliariaId} AND fecha >= ${startOfCurrentMonth} AND fecha <= ${endOfCurrentMonth}
+            GROUP BY moneda
+          ), sueldos AS (
+            SELECT moneda, SUM(monto) AS total FROM "PagoSueldo"
+            WHERE ${canViewSalaries} AND "inmobiliariaId" = ${inmobiliariaId} AND fecha >= ${startOfCurrentMonth} AND fecha <= ${endOfCurrentMonth}
+            GROUP BY moneda
+          )
+          SELECT mo.moneda, COALESCE(l.facturado, 0) AS facturado, COALESCE(l.cobrado, 0) AS cobrado,
+            COALESCE(l.honorarios, 0) AS honorarios, COALESCE(c.ingresos_manuales, 0) AS ingresos_manuales,
+            COALESCE(c.egresos_manuales, 0) AS egresos_manuales, COALESCE(c.pagos_propietarios, 0) AS pagos_propietarios,
+            COALESCE(s.total, 0) AS sueldos
+          FROM monedas mo LEFT JOIN liquidaciones l ON l.moneda = mo.moneda
+          LEFT JOIN caja c ON c.moneda = mo.moneda LEFT JOIN sueldos s ON s.moneda = mo.moneda
+        `) : [];
+        const metricsByCurrency = new Map(financialRows.map(row => {
+            const cobrado = Number(row.cobrado);
+            const honorarios = Number(row.honorarios);
+            const gananciaBruta = honorarios + Number(row.ingresos_manuales);
+            const gastosAgencia = Number(row.egresos_manuales) + Number(row.sueldos);
+            const facturado = Number(row.facturado);
+            return [String(row.moneda), {
+                recaudadoTotal: cobrado,
+                gananciaBruta,
+                gastosAgencia,
+                utilidadNeta: gananciaBruta - gastosAgencia,
+                fondoCustodia: Math.max(0, cobrado - honorarios - Number(row.pagos_propietarios)),
+                morosidad: facturado > 0 ? ((facturado - cobrado) / facturado) * 100 : 0
+            }];
+        }));
         const finanzasPorMoneda = canViewFinancialReports
-            ? {
-                ARS: calcFinanzasAgencia(liquidacionesActual, movimientosActual, sueldosActual, 'ARS'),
-                USD: calcFinanzasAgencia(liquidacionesActual, movimientosActual, sueldosActual, 'USD')
-            }
+            ? { ARS: metricsByCurrency.get('ARS') || emptyMetrics, USD: metricsByCurrency.get('USD') || emptyMetrics }
             : {
                 ARS: emptyMetrics,
                 USD: emptyMetrics
@@ -151,7 +112,7 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
         const metricasActual = finanzasPorMoneda.ARS;
         
         // Respuesta
-        res.json({
+        return {
             propiedades: {
                 total: totalPropiedades,
                 disponibles: propiedadesDisponibles,
@@ -175,7 +136,9 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
                     totalInmo: metricasActual.gananciaBruta
                 }
             }
+        };
         });
+        res.json(response);
 
     } catch (error) {
         console.error('Error generando reportes:', error);

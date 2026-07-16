@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
-import { upload } from '../middlewares/upload.middleware';
+import { cleanupFailedUpload, commitUploadedFile, removeUploadedFile, upload, validateUploadedFileContent } from '../middlewares/upload.middleware';
 import { Decimal } from '@prisma/client/runtime/library';
 import { auditService } from '../services/audit.service';
 import {
@@ -13,6 +13,7 @@ import {
     optionalText,
     optionalBooleanFromForm,
     optionalEmail,
+    optionalPhone,
     requiredText
 } from '../middlewares/validation.middleware';
 import { z } from 'zod';
@@ -22,7 +23,10 @@ import { AppError } from '../errors/app-error';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { userHasPermission } from '../services/permissions.service';
 import { formatCurrency } from '../utils/currency';
+import { parsePagination } from '../utils/pagination';
 import { resolveMoneda } from '../services/currency-rules.service';
+import { deleteContractPermanently } from '../services/contract-deletion.service';
+import { TRASH_RETENTION_DAYS } from '../services/maintenance.service';
 
 const router = Router();
 
@@ -49,7 +53,7 @@ const personCandidateSchema = z.object({
     nombreCompleto: optionalText(140),
     dni: optionalText(30),
     email: optionalEmail(),
-    telefono: optionalText(40),
+    telefono: optionalPhone(),
     direccion: optionalText(180),
     estado: z.enum(['ACTIVO', 'INACTIVO']).optional().default('ACTIVO')
 }).superRefine((value, ctx) => {
@@ -185,20 +189,31 @@ const normalizeUpdateSettings = (payload: Pick<ContractCreateInput, 'requiereAct
 // Get all contracts
 router.get('/', requirePermission('contratos.ver'), async (req, res) => {
     const { id: userId, role, inmobiliariaId } = (req as AuthRequest).user!;
-    const { search } = req.query;
+    const { search, page, limit, expired, status } = req.query;
+    const pagination = parsePagination(page, limit, 10);
 
     try {
-        const contracts = await prisma.contrato.findMany({
-            where: { 
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const where: Prisma.ContratoWhereInput = {
                 inmobiliariaId,
+                ...(status ? { estado: String(status) as any } : {}),
+                ...(expired === 'true' ? { fechaFin: { lt: today } } : {}),
+                ...(expired === 'false' ? { fechaFin: { gte: today } } : {}),
                 ...(search ? {
                     OR: [
                         { propiedad: { direccion: { contains: String(search), mode: 'insensitive' } } },
                         { inquilinos: { some: { persona: { nombreCompleto: { contains: String(search), mode: 'insensitive' } } } } },
-                        { propietarios: { some: { persona: { nombreCompleto: { contains: String(search), mode: 'insensitive' } } } } }
+                        { inquilinos: { some: { persona: { telefono: { contains: String(search), mode: 'insensitive' } } } } },
+                        { propietarios: { some: { persona: { nombreCompleto: { contains: String(search), mode: 'insensitive' } } } } },
+                        { propietarios: { some: { persona: { telefono: { contains: String(search), mode: 'insensitive' } } } } }
                     ]
                 } : {})
-            },
+        };
+        const [total, contracts] = await prisma.$transaction([
+          prisma.contrato.count({ where }),
+          prisma.contrato.findMany({
+            where,
             include: {
                 propiedad: true,
                 inquilinos: {
@@ -211,14 +226,35 @@ router.get('/', requirePermission('contratos.ver'), async (req, res) => {
                 },
                 adjuntos: true
             },
-            orderBy: { fechaCreacion: 'desc' }
-        });
+            orderBy: [{ fechaCreacion: 'desc' }, { id: 'desc' }],
+            skip: pagination.skip,
+            take: pagination.limit
+          })
+        ]);
         const canViewFiles = await userHasPermission(userId, role, 'contratos.archivos.ver');
-        res.json(canViewFiles ? contracts : contracts.map(contract => ({
+        let data = canViewFiles ? contracts : contracts.map(contract => ({
             ...contract,
             rutaArchivoContrato: null,
             adjuntos: []
-        })));
+        }));
+        if (status === 'PAPELERA') {
+            data = data.map(contract => ({
+                ...contract,
+                daysUntilDeletion: contract.eliminadoEn
+                    ? Math.max(0, Math.ceil((contract.eliminadoEn.getTime() + TRASH_RETENTION_DAYS * 86_400_000 - Date.now()) / 86_400_000))
+                    : TRASH_RETENTION_DAYS
+            }));
+        }
+        res.json({
+            data,
+            meta: {
+                total,
+                page: pagination.page,
+                limit: pagination.limit,
+                totalPages: Math.ceil(total / pagination.limit),
+                ...(status === 'PAPELERA' ? { retentionDays: TRASH_RETENTION_DAYS } : {})
+            }
+        });
     } catch (error) {
         console.error('Error fetching contracts:', error);
         res.status(500).json({ message: 'Error al obtener contratos' });
@@ -309,7 +345,48 @@ const ensureExistingProperty = async (tx: TxClient, inmobiliariaId: number, prop
         });
     }
 
+    if (propiedad.estado === 'INACTIVO') {
+        throw new AppError('No se puede crear un contrato sobre una propiedad inactiva', {
+            statusCode: 409,
+            code: 'PROPERTY_INACTIVE'
+        });
+    }
+
     return propiedad;
+};
+
+const assertPropertyAvailableForPeriod = async (
+    tx: TxClient,
+    propiedadId: number,
+    fechaInicio: Date,
+    fechaFin: Date,
+    excludeContractId?: number
+) => {
+    const overlapping = await tx.contrato.findFirst({
+        where: {
+            propiedadId,
+            estado: 'ACTIVO',
+            ...(excludeContractId ? { id: { not: excludeContractId } } : {}),
+            fechaInicio: { lte: fechaFin },
+            fechaFin: { gte: fechaInicio }
+        },
+        select: { id: true }
+    });
+    if (overlapping) {
+        throw new AppError('La propiedad ya tiene un contrato activo para el período seleccionado', {
+            statusCode: 409,
+            code: 'PROPERTY_ALREADY_RENTED',
+            details: { conflictingContractId: overlapping.id }
+        });
+    }
+};
+
+const syncPropertyState = async (tx: TxClient, propiedadId: number) => {
+    const activeContracts = await tx.contrato.count({ where: { propiedadId, estado: 'ACTIVO' } });
+    await tx.propiedad.updateMany({
+        where: { id: propiedadId, estado: { not: 'INACTIVO' } },
+        data: { estado: activeContracts > 0 ? 'ALQUILADO' : 'DISPONIBLE' }
+    });
 };
 
 const ensureExistingPeople = async (
@@ -466,17 +543,23 @@ const buildContractCreateError = (error: unknown, req: AuthRequest) => {
 };
 
 // Create contract
-router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), validateBody(contractCreateSchema), async (req, res) => {
+router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), validateUploadedFileContent, cleanupFailedUpload, validateBody(contractCreateSchema), async (req, res) => {
     const authReq = req as AuthRequest;
     const { inmobiliariaId, id: userId } = authReq.user!;
     const payload = req.body as ContractCreateInput;
     const updateSettings = normalizeUpdateSettings(payload);
 
-    const contractFilePath = req.file ? `inmobiliaria-${inmobiliariaId}/${req.file.filename}` : null;
+    const contractFilePath = await commitUploadedFile(req.file, inmobiliariaId);
 
     try {
         const contract = await prisma.$transaction(async (tx) => {
             const propiedad = await createPropertyIfNeeded(tx, payload, inmobiliariaId, userId);
+            await assertPropertyAvailableForPeriod(
+                tx,
+                propiedad.id,
+                parseDateOnly(payload.fechaInicio),
+                parseDateOnly(payload.fechaFin)
+            );
             const propietariosIds = await createPeopleIfNeeded(
                 tx,
                 payload.propietarios,
@@ -529,6 +612,8 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                 }
             });
 
+            await syncPropertyState(tx, propiedad.id);
+
             if (payload.honorarioInicial && Number(payload.honorarioInicial) > 0) {
                 await tx.movimientoCaja.create({
                     data: {
@@ -546,7 +631,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
             }
 
             return { newContract, propiedad };
-        });
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
         await auditService.log({
             usuarioId: userId,
@@ -633,7 +718,7 @@ router.get('/:id', requirePermission('contratos.ver'), async (req, res) => {
 });
 
 // Add attachment
-router.post('/:id/adjuntos', requirePermission('contratos.editar'), upload.single('archivo'), async (req, res) => {
+router.post('/:id/adjuntos', requirePermission('contratos.editar'), upload.single('archivo'), validateUploadedFileContent, cleanupFailedUpload, async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const { nombreArchivo } = req.body;
@@ -642,7 +727,7 @@ router.post('/:id/adjuntos', requirePermission('contratos.editar'), upload.singl
         return res.status(400).json({ message: 'No se subió ningún archivo' });
     }
 
-    const filePath = `inmobiliaria-${inmobiliariaId}/${req.file.filename}`;
+    const filePath = await commitUploadedFile(req.file, inmobiliariaId);
 
     try {
         const contract = await prisma.contrato.findFirst({
@@ -655,7 +740,7 @@ router.post('/:id/adjuntos', requirePermission('contratos.editar'), upload.singl
 
         const attachment = await prisma.adjuntoContrato.create({
             data: {
-                rutaArchivo: filePath,
+                rutaArchivo: filePath!,
                 nombreArchivo: nombreArchivo || req.file.originalname,
                 contratoId: Number(id)
             }
@@ -690,13 +775,17 @@ router.delete('/:id', requirePermission('contratos.eliminar'), async (req, res) 
             return res.status(404).json({ message: 'Contrato no encontrado' });
         }
 
-        await prisma.contrato.update({
-            where: { id: Number(id) },
-            data: {
-                estado: 'PAPELERA',
-                eliminadoEn: new Date(),
-                actualizadoPorId: (req as AuthRequest).user!.id
-            }
+        await prisma.$transaction(async tx => {
+            await tx.contrato.update({
+                where: { id: Number(id) },
+                data: {
+                    estadoAnteriorPapelera: contract.estado === 'PAPELERA' ? contract.estadoAnteriorPapelera : contract.estado,
+                    estado: 'PAPELERA',
+                    eliminadoEn: new Date(),
+                    actualizadoPorId: (req as AuthRequest).user!.id
+                }
+            });
+            await syncPropertyState(tx, contract.propiedadId);
         });
         
         await auditService.log({
@@ -728,14 +817,29 @@ router.post('/:id/restaurar', requirePermission('contratos.restaurar'), async (r
             return res.status(404).json({ message: 'Contrato no encontrado' });
         }
 
-        await prisma.contrato.update({
-            where: { id: Number(id) },
-            data: {
-                estado: 'ACTIVO',
-                eliminadoEn: null,
-                actualizadoPorId: (req as AuthRequest).user!.id
+        if (contract.estado !== 'PAPELERA') {
+            return res.status(409).json({ message: 'Solo se pueden restaurar contratos que estén en la papelera' });
+        }
+
+        const restoredState = contract.estadoAnteriorPapelera && contract.estadoAnteriorPapelera !== 'PAPELERA'
+            ? contract.estadoAnteriorPapelera
+            : 'ACTIVO';
+
+        await prisma.$transaction(async tx => {
+            if (restoredState === 'ACTIVO') {
+                await assertPropertyAvailableForPeriod(tx, contract.propiedadId, contract.fechaInicio, contract.fechaFin, contract.id);
             }
-        });
+            await tx.contrato.update({
+                where: { id: Number(id) },
+                data: {
+                    estado: restoredState,
+                    estadoAnteriorPapelera: null,
+                    eliminadoEn: null,
+                    actualizadoPorId: (req as AuthRequest).user!.id
+                }
+            });
+            await syncPropertyState(tx, contract.propiedadId);
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
         
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -747,6 +851,9 @@ router.post('/:id/restaurar', requirePermission('contratos.restaurar'), async (r
 
         res.json({ message: 'Contrato restaurado con éxito' });
     } catch (error) {
+        if (error instanceof AppError) {
+            return res.status(error.statusCode).json({ message: error.message, code: error.code });
+        }
         res.status(500).json({ message: 'Error al restaurar contrato' });
     }
 });
@@ -757,17 +864,7 @@ router.delete('/:id/permanente', requirePermission('contratos.eliminar'), async 
     const { id } = req.params;
 
     try {
-        const contract = await prisma.contrato.findFirst({
-            where: { id: Number(id), inmobiliariaId }
-        });
-
-        if (!contract) {
-            return res.status(404).json({ message: 'Contrato no encontrado' });
-        }
-
-        await prisma.contrato.delete({
-            where: { id: Number(id) }
-        });
+        const result = await deleteContractPermanently(Number(id), inmobiliariaId);
         
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -778,8 +875,11 @@ router.delete('/:id/permanente', requirePermission('contratos.eliminar'), async 
             detalle: 'Eliminación definitiva del contrato'
         });
 
-        res.json({ message: 'Contrato eliminado permanentemente' });
+        res.json({ message: 'Contrato eliminado permanentemente', ...result });
     } catch (error) {
+        if (error instanceof AppError) {
+            return res.status(error.statusCode).json({ message: error.message, code: error.code, details: error.details });
+        }
         res.status(500).json({ message: 'Error al eliminar contrato permanentemente' });
     }
 });
@@ -799,13 +899,16 @@ router.patch('/:id/estado', requirePermission('contratos.editar'), validateBody(
             return res.status(404).json({ message: 'Contrato no encontrado' });
         }
 
-        await prisma.contrato.update({
-            where: { id: Number(id) },
-            data: {
-                estado,
-                actualizadoPorId: (req as AuthRequest).user!.id
+        await prisma.$transaction(async tx => {
+            if (estado === 'ACTIVO') {
+                await assertPropertyAvailableForPeriod(tx, contract.propiedadId, contract.fechaInicio, contract.fechaFin, contract.id);
             }
-        });
+            await tx.contrato.update({
+                where: { id: Number(id) },
+                data: { estado, actualizadoPorId: (req as AuthRequest).user!.id }
+            });
+            await syncPropertyState(tx, contract.propiedadId);
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -818,12 +921,15 @@ router.patch('/:id/estado', requirePermission('contratos.editar'), validateBody(
 
         res.json({ message: `Estado del contrato actualizado a ${estado}` });
     } catch (error) {
+        if (error instanceof AppError) {
+            return res.status(error.statusCode).json({ message: error.message, code: error.code });
+        }
         res.status(500).json({ message: 'Error al actualizar estado del contrato' });
     }
 });
 
 // Update contract
-router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), validateBody(contractUpdateSchema), async (req, res) => {
+router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), validateUploadedFileContent, cleanupFailedUpload, validateBody(contractUpdateSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const {
@@ -842,6 +948,8 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         requiereActualizacion,
         moneda
     } = req.body;
+
+    const uploadedFilePath = await commitUploadedFile(req.file, inmobiliariaId);
 
     try {
         const contract = await prisma.contrato.findFirst({
@@ -948,8 +1056,8 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
             updateData.administrado = administrado === 'true' || administrado === true;
             changes.administrado = { anterior: contract.administrado, nuevo: updateData.administrado };
         }
-        if (req.file) {
-            updateData.rutaArchivoContrato = `inmobiliaria-${inmobiliariaId}/${req.file.filename}`;
+        if (uploadedFilePath) {
+            updateData.rutaArchivoContrato = uploadedFilePath;
             changes.rutaArchivoContrato = { anterior: contract.rutaArchivoContrato, nuevo: updateData.rutaArchivoContrato };
         }
 
@@ -964,6 +1072,10 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
             }
         });
         
+        if (uploadedFilePath && contract.rutaArchivoContrato && contract.rutaArchivoContrato !== uploadedFilePath) {
+            await removeUploadedFile(contract.rutaArchivoContrato);
+        }
+
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
             inmobiliariaId,

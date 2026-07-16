@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
-import { validateBody, requiredText, optionalText, optionalEmail } from '../middlewares/validation.middleware';
+import { validateBody, requiredText, optionalText, optionalEmail, optionalPhone } from '../middlewares/validation.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
+import { parsePagination } from '../utils/pagination';
 
 const router = Router();
 
@@ -14,7 +15,7 @@ const personaSchema = z.object({
     nombreCompleto: requiredText('El nombre completo', 140),
     dni: optionalText(30),
     email: optionalEmail(),
-    telefono: optionalText(40),
+    telefono: optionalPhone(),
     direccion: optionalText(180),
     estado: z.enum(['ACTIVO', 'INACTIVO']).optional().default('ACTIVO')
 });
@@ -22,18 +23,26 @@ const personaSchema = z.object({
 // Get all persons with their computed roles
 router.get('/', requirePermission('personas.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
-    const { search } = req.query;
+    const { search, page, limit } = req.query;
+    const pagination = parsePagination(page, limit);
 
     try {
-        const personas = await prisma.persona.findMany({
+        const where = {
+            inmobiliariaId,
+            ...(search ? {
+                OR: [
+                    { nombreCompleto: { contains: String(search), mode: 'insensitive' as const } },
+                    { dni: { contains: String(search), mode: 'insensitive' as const } },
+                    { email: { contains: String(search), mode: 'insensitive' as const } },
+                    { telefono: { contains: String(search), mode: 'insensitive' as const } }
+                ]
+            } : {})
+        };
+        const [total, personas] = await prisma.$transaction([
+          prisma.persona.count({ where }),
+          prisma.persona.findMany({
             where: {
-                inmobiliariaId,
-                ...(search ? {
-                    OR: [
-                        { nombreCompleto: { contains: String(search), mode: 'insensitive' } },
-                        { dni: { contains: String(search), mode: 'insensitive' } }
-                    ]
-                } : {})
+                ...where
             },
             include: {
                 _count: {
@@ -44,8 +53,11 @@ router.get('/', requirePermission('personas.ver'), async (req, res) => {
                     }
                 }
             },
-            orderBy: { nombreCompleto: 'asc' }
-        });
+            orderBy: [{ nombreCompleto: 'asc' }, { id: 'asc' }],
+            skip: pagination.skip,
+            take: pagination.limit
+          })
+        ]);
 
         // Map to include roles
         const data = personas.map(p => ({
@@ -57,7 +69,10 @@ router.get('/', requirePermission('personas.ver'), async (req, res) => {
             ].filter(Boolean)
         }));
 
-        res.json(data);
+        res.json({
+            data,
+            meta: { total, page: pagination.page, limit: pagination.limit, totalPages: Math.ceil(total / pagination.limit) }
+        });
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: 'Error al obtener personas' });

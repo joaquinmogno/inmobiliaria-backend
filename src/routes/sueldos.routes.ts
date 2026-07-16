@@ -1,10 +1,13 @@
 import { Router } from 'express';
+import { invalidatePerformanceCache } from '../services/performance-cache.service';
+import { parsePagination } from '../utils/pagination';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { Decimal } from '@prisma/client/runtime/library';
 import { auditService } from '../services/audit.service';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 
 const router = Router();
 
@@ -15,7 +18,7 @@ const sueldoSchema = z.object({
     monto: z.coerce.number().positive(),
     moneda: z.enum(['ARS', 'USD']).optional().default('ARS'),
     fecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha debe tener formato YYYY-MM-DD'),
-    periodo: z.string().trim().min(4, 'El periodo es obligatorio').max(20),
+    periodo: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'El período debe tener formato AAAA-MM'),
     metodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional().default('EFECTIVO'),
     observaciones: z.string().trim().max(1000).optional().nullable()
 });
@@ -28,11 +31,23 @@ const sueldoUpdateSchema = sueldoSchema.partial().refine(
 // Get salaries
 router.get('/', requirePermission('sueldos.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
+    const pagination = parsePagination(req.query.page, req.query.limit, 25);
+    const search = String(req.query.search || '').trim();
+    const periodo = String(req.query.periodo || '').trim();
 
     try {
-        const where: any = { inmobiliariaId };
+        const where: any = {
+            inmobiliariaId,
+            ...(periodo ? { periodo } : {}),
+            ...(search ? { usuario: { OR: [
+                { nombreCompleto: { contains: search, mode: 'insensitive' } },
+                { email: { contains: search, mode: 'insensitive' } }
+            ] } } : {})
+        };
 
-        const sueldos = await prisma.pagoSueldo.findMany({
+        const [total, sueldos] = await prisma.$transaction([
+          prisma.pagoSueldo.count({ where }),
+          prisma.pagoSueldo.findMany({
             where,
             include: {
                 usuario: {
@@ -48,10 +63,13 @@ router.get('/', requirePermission('sueldos.ver'), async (req, res) => {
                     }
                 }
             },
-            orderBy: { fecha: 'desc' }
-        });
+            orderBy: [{ fecha: 'desc' }, { id: 'desc' }],
+            skip: pagination.skip,
+            take: pagination.limit
+          })
+        ]);
 
-        res.json(sueldos);
+        res.json({ data: sueldos, meta: { total, page: pagination.page, limit: pagination.limit, totalPages: Math.ceil(total / pagination.limit) } });
     } catch (error) {
         console.error('Error fetching salaries:', error);
         res.status(500).json({ message: 'Error al obtener sueldos' });
@@ -110,9 +128,13 @@ router.post('/', requirePermission('sueldos.crear'), async (req, res) => {
             detalle: `Pago de sueldo registrado para ${sueldo.usuario.nombreCompleto} - Periodo: ${periodo}`
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.status(201).json(sueldo);
     } catch (error) {
         console.error('Error creating salary payment:', error);
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+            return res.status(409).json({ message: 'Ya existe un pago de sueldo para ese usuario, período y moneda' });
+        }
         res.status(500).json({ message: 'Error al registrar el pago de sueldo' });
     }
 });
@@ -184,9 +206,13 @@ router.put('/:id', requirePermission('sueldos.editar'), async (req, res) => {
             detalle: `Pago de sueldo editado - Periodo: ${updated.periodo}`
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.json(updated);
     } catch (error) {
         console.error('Error updating salary payment:', error);
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+            return res.status(409).json({ message: 'Ya existe un pago de sueldo para ese usuario, período y moneda' });
+        }
         res.status(500).json({ message: 'Error al actualizar el pago de sueldo' });
     }
 });
@@ -222,6 +248,7 @@ router.delete('/:id', requirePermission('sueldos.eliminar'), async (req, res) =>
             detalle: `Pago de sueldo eliminado para ${sueldo.usuario.nombreCompleto} - Periodo: ${sueldo.periodo}`
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.json({ message: 'Pago de sueldo eliminado con éxito' });
     } catch (error) {
         console.error('Error deleting salary payment:', error);

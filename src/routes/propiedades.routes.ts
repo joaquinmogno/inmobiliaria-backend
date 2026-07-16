@@ -5,6 +5,7 @@ import { validateBody, requiredText, optionalText } from '../middlewares/validat
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
+import { parsePagination } from '../utils/pagination';
 
 const router = Router();
 
@@ -22,20 +23,36 @@ const propiedadSchema = z.object({
 // Get all properties
 router.get('/', requirePermission('propiedades.ver'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
-    const { search } = req.query;
+    const { search, page, limit } = req.query;
+    const pagination = parsePagination(page, limit);
 
     try {
-        const properties = await prisma.propiedad.findMany({
-            where: {
-                inmobiliariaId,
-                ...(search ? {
-                    direccion: { contains: String(search), mode: 'insensitive' }
-                } : {})
-            },
+        const term = String(search || '').trim();
+        const normalized = term.toUpperCase();
+        const propertyTypes = ['DEPARTAMENTO', 'CASA', 'LOCAL', 'OTRO'] as const;
+        const propertyStates = ['DISPONIBLE', 'ALQUILADO', 'INACTIVO'] as const;
+        const where = {
+            inmobiliariaId,
+            ...(term ? { OR: [
+                { direccion: { contains: term, mode: 'insensitive' as const } },
+                ...(propertyTypes.includes(normalized as typeof propertyTypes[number]) ? [{ tipo: normalized as typeof propertyTypes[number] }] : []),
+                ...(propertyStates.includes(normalized as typeof propertyStates[number]) ? [{ estado: normalized as typeof propertyStates[number] }] : [])
+            ] } : {})
+        };
+        const [total, properties] = await prisma.$transaction([
+          prisma.propiedad.count({ where }),
+          prisma.propiedad.findMany({
+            where,
             // propietario removed from include as it is no longer directly linked
-            orderBy: { direccion: 'asc' }
+            orderBy: [{ direccion: 'asc' }, { id: 'asc' }],
+            skip: pagination.skip,
+            take: pagination.limit
+          })
+        ]);
+        res.json({
+            data: properties,
+            meta: { total, page: pagination.page, limit: pagination.limit, totalPages: Math.ceil(total / pagination.limit) }
         });
-        res.json(properties);
     } catch (error) {
         res.status(500).json({ message: 'Error al obtener propiedades' });
     }
@@ -139,20 +156,34 @@ router.delete('/:id', requirePermission('propiedades.eliminar'), async (req, res
             return res.status(404).json({ message: 'Propiedad no encontrada' });
         }
 
-        await prisma.propiedad.delete({
-            where: { id: Number(id) }
+        const contractCounts = await prisma.contrato.groupBy({
+            by: ['estado'],
+            where: { propiedadId: existing.id, inmobiliariaId },
+            _count: true
         });
+        const totalContracts = contractCounts.reduce((total, item) => total + item._count, 0);
+        const activeContracts = contractCounts.filter(item => item.estado === 'ACTIVO').reduce((total, item) => total + item._count, 0);
+
+        if (activeContracts > 0) {
+            return res.status(409).json({ message: 'No se puede eliminar ni desactivar una propiedad con contratos activos. Finalizá o rescindí esos contratos primero.' });
+        }
+
+        if (totalContracts > 0) {
+            await prisma.propiedad.update({ where: { id: existing.id }, data: { estado: 'INACTIVO', actualizadoPorId: (req as AuthRequest).user!.id } });
+        } else {
+            await prisma.propiedad.delete({ where: { id: existing.id } });
+        }
 
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
             inmobiliariaId,
-            accion: 'ELIMINAR_PROPIEDAD',
+            accion: totalContracts > 0 ? 'DESACTIVAR_PROPIEDAD' : 'ELIMINAR_PROPIEDAD',
             entidad: 'Propiedad',
             entidadId: Number(id),
             detalle: `Propiedad eliminada: ${existing.direccion}`
         });
 
-        res.json({ message: 'Propiedad eliminada' });
+        res.json({ message: totalContracts > 0 ? 'La propiedad conserva su historial y quedó inactiva' : 'Propiedad eliminada', deactivated: totalContracts > 0 });
     } catch (error) {
         res.status(500).json({ message: 'Error al eliminar propiedad' });
     }

@@ -24,6 +24,8 @@ import multer from 'multer';
 import { requestContext } from './middlewares/request-context.middleware';
 import { logger } from './services/logger.service';
 import { AppError } from './errors/app-error';
+import { prisma } from './prisma';
+import { invalidatePerformanceCache } from './services/performance-cache.service';
 
 import helmet from 'helmet';
 
@@ -65,6 +67,16 @@ app.use('/api', (_req, res, next) => {
   next();
 });
 
+app.use('/api', (req, res, next) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    res.on('finish', () => {
+      const user = (req as express.Request & { user?: { inmobiliariaId: number } }).user;
+      if (user && res.statusCode < 400) invalidatePerformanceCache(user.inmobiliariaId);
+    });
+  }
+  next();
+});
+
 // Routes
 app.use('/api/auth', authRoutes);
 // app.use('/api/propietarios', propietariosRoutes);
@@ -84,8 +96,29 @@ app.use('/api/planes-cuotas', planesCuotasRoutes);
 app.use('/api/sueldos', sueldosRoutes);
 app.use('/api/files', filesRoutes);
 
-app.get('/health', (_req, res) => {
+app.get('/health/live', (_req, res) => {
   res.json({ status: 'ok' });
+});
+
+app.get('/health/ready', async (_req, res) => {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      prisma.$queryRaw`SELECT 1`,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('Database readiness timeout')), 3000);
+      })
+    ]);
+    res.json({ status: 'ready', database: 'ok' });
+  } catch {
+    res.status(503).json({ status: 'not_ready', database: 'unavailable' });
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+});
+
+app.get('/health', (_req, res) => {
+  res.redirect(307, '/health/ready');
 });
 
 app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {

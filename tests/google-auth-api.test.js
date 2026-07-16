@@ -7,6 +7,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
 const cookieParser = require('cookie-parser');
+const bcrypt = require('bcrypt');
 
 const { prisma } = require('../dist/prisma');
 const { auditService } = require('../dist/services/audit.service');
@@ -16,7 +17,7 @@ const authRoutes = require('../dist/routes/auth.routes').default;
 const baseUser = {
   id: 1001,
   email: 'admin@propcontrol.test',
-  password: 'hashed-password',
+  password: bcrypt.hashSync('ValidPassword!123', 4),
   googleId: null,
   authProvider: 'LOCAL',
   nombreCompleto: 'Admin PropControl',
@@ -87,11 +88,11 @@ async function withServer(run) {
   }
 }
 
-async function googleLogin(baseUrl) {
+async function googleLogin(baseUrl, currentPassword) {
   const response = await fetch(`${baseUrl}/api/auth/google`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ idToken: 'valid-google-token' }),
+    body: JSON.stringify({ idToken: 'valid-google-token', currentPassword }),
   });
 
   const body = await response.json();
@@ -115,7 +116,7 @@ test('Google login links an existing local user and creates the normal session',
   installMocks(baseUser);
 
   await withServer(async (baseUrl) => {
-    const { response, body } = await googleLogin(baseUrl);
+    const { response, body } = await googleLogin(baseUrl, 'ValidPassword!123');
 
     assert.equal(response.status, 200);
     assert.equal(body.user.email, baseUser.email);
@@ -130,37 +131,44 @@ test('Google login links an existing local user and creates the normal session',
   });
 });
 
-test('Google login clears mandatory local password change for verified Google users', async () => {
+test('Google login does not bypass mandatory password change while linking', async () => {
   installMocks({ ...baseUser, mustChangePassword: true });
 
   await withServer(async (baseUrl) => {
-    const { response, body } = await googleLogin(baseUrl);
+    const { response, body } = await googleLogin(baseUrl, 'ValidPassword!123');
 
     assert.equal(response.status, 200);
-    assert.equal(body.user.mustChangePassword, false);
+    assert.equal(body.user.mustChangePassword, true);
     assert.equal(updates.length, 1);
     assert.deepEqual(updates[0].data, {
       googleId: 'google-sub-123',
       authProvider: 'LOCAL_GOOGLE',
-      mustChangePassword: false,
     });
     assert.equal(sessions.length, 1);
   });
 });
 
-test('Google login clears mandatory password change for already linked Google users', async () => {
+test('Google login does not bypass mandatory password change for linked users', async () => {
   installMocks({ ...baseUser, googleId: 'google-sub-123', authProvider: 'LOCAL_GOOGLE', mustChangePassword: true });
 
   await withServer(async (baseUrl) => {
     const { response, body } = await googleLogin(baseUrl);
 
     assert.equal(response.status, 200);
-    assert.equal(body.user.mustChangePassword, false);
-    assert.equal(updates.length, 1);
-    assert.deepEqual(updates[0].data, {
-      mustChangePassword: false,
-    });
+    assert.equal(body.user.mustChangePassword, true);
+    assert.equal(updates.length, 0);
     assert.equal(sessions.length, 1);
+  });
+});
+
+test('Google login refuses first-time linking without the local password', async () => {
+  installMocks(baseUser);
+  await withServer(async (baseUrl) => {
+    const { response, body } = await googleLogin(baseUrl);
+    assert.equal(response.status, 403);
+    assert.equal(body.code, 'GOOGLE_LINK_REQUIRES_PASSWORD');
+    assert.equal(updates.length, 0);
+    assert.equal(sessions.length, 0);
   });
 });
 
