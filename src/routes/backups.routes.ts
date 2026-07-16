@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { authenticateToken, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { AuthRequest } from '../middlewares/auth.middleware';
-import { requireSuperAdmin } from '../middlewares/permissions.middleware';
+import { requirePermission } from '../middlewares/permissions.middleware';
 import { auditService } from '../services/audit.service';
 import { decryptFileToFile, encryptFile, getClientIp, getUserAgent } from '../services/security.service';
 import path from 'path';
@@ -29,7 +29,6 @@ const MIN_FREE_BYTES = Number(process.env.MIN_BACKUP_FREE_BYTES || 1024 * 1024 *
 const RETENTION_DAYS = Number(process.env.BACKUP_RETENTION_DAYS || 90);
 
 router.use(authenticateToken);
-router.use(requireSuperAdmin);
 
 const backupBytes = async () => {
     let total = 0;
@@ -96,7 +95,7 @@ const getPgDumpUrl = (databaseUrl: string) => {
 };
 
 // Listar todos los backups
-router.get('/', async (_req, res) => {
+router.get('/', requirePermission('configuracion.backups.ver'), async (_req, res) => {
     try {
         const getFiles = (dir: string, type: 'db' | 'uploads') => {
             if (!fs.existsSync(dir)) return [];
@@ -126,7 +125,7 @@ router.get('/', async (_req, res) => {
 });
 
 // Generar backup manual de DB
-router.post('/db', requireRecentAuthentication, async (req, res) => {
+router.post('/db', requirePermission('configuracion.backups.crear'), requireRecentAuthentication, async (req, res) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `manual-db-backup-${timestamp}.sql`;
     const filepath = path.join(DB_BACKUPS_DIR, filename);
@@ -184,7 +183,7 @@ router.post('/db', requireRecentAuthentication, async (req, res) => {
 });
 
 // Generar backup manual de Uploads
-router.post('/uploads', requireRecentAuthentication, async (req, res) => {
+router.post('/uploads', requirePermission('configuracion.backups.crear'), requireRecentAuthentication, async (req, res) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const sourceDir = process.env.UPLOAD_DIR || path.join(__dirname, '../../../uploads');
     const sourceName = path.basename(sourceDir);
@@ -232,7 +231,7 @@ router.post('/uploads', requireRecentAuthentication, async (req, res) => {
 });
 
 // Descargar un backup
-router.get('/download/:type/:filename', requireRecentAuthentication, async (req, res) => {
+router.get('/download/:type/:filename', requirePermission('configuracion.backups.descargar'), requireRecentAuthentication, async (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
     const filepath = resolveBackupPath(type, filename);
 
@@ -275,7 +274,7 @@ router.get('/download/:type/:filename', requireRecentAuthentication, async (req,
     }
 });
 
-router.post('/:type/:filename/verify', requireRecentAuthentication, async (req, res) => {
+router.post('/:type/:filename/verify', requirePermission('configuracion.backups.descargar'), requireRecentAuthentication, async (req, res) => {
     const { type, filename } = req.params as { type: string; filename: string };
     const filepath = resolveBackupPath(type, filename);
     const sessionId = (req as AuthRequest).sessionId!;
@@ -330,7 +329,7 @@ router.post('/:type/:filename/verify', requireRecentAuthentication, async (req, 
 });
 
 // Eliminar un backup
-router.delete('/:type/:filename', requireRecentAuthentication, (req, res) => {
+router.delete('/:type/:filename', requirePermission('configuracion.backups.eliminar'), requireRecentAuthentication, (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
     const filepath = resolveBackupPath(type, filename);
 

@@ -12,11 +12,12 @@ const { prisma } = require('../dist/prisma');
 const { authenticateToken } = require('../dist/middlewares/auth.middleware');
 const { requirePermission } = require('../dist/middlewares/permissions.middleware');
 const { SESSION_COOKIE, CSRF_COOKIE, sha256 } = require('../dist/services/security.service');
+const backupsRouter = require('../dist/routes/backups.routes').default;
 
 const SESSION_TOKEN = 'permissions-session-token';
 const CSRF_TOKEN = 'permissions-csrf-token';
 
-function installSessionMock() {
+function installSessionMock(role = 'SUPERADMIN') {
   prisma.userSession = {
     findUnique: async ({ where }) => {
       if (where.tokenHash !== sha256(SESSION_TOKEN)) return null;
@@ -30,7 +31,7 @@ function installSessionMock() {
         usuario: {
           id: 9001,
           email: 'permisos.test@inmobiliaria.local',
-          rol: 'SUPERADMIN',
+          rol: role,
           inmobiliariaId: 1,
           activo: true,
           mfaEnabled: true,
@@ -42,6 +43,13 @@ function installSessionMock() {
     },
     update: async () => undefined,
   };
+}
+
+function createBackupsApp() {
+  const app = express();
+  app.use(cookieParser());
+  app.use('/api/backups', backupsRouter);
+  return app;
 }
 
 function authHeaders() {
@@ -172,4 +180,24 @@ test('HTTP auth/me returns refreshed permissions on each request', async () => {
   });
 
   permissionsService.getUserPermissions = original;
+});
+
+test('HTTP backups: ADMIN access is controlled by the specific view permission', async () => {
+  installSessionMock('ADMIN');
+  const original = permissionsService.userHasPermission;
+  let allowed = false;
+  permissionsService.userHasPermission = async (_userId, role, permission) =>
+    role === 'ADMIN' && permission === 'configuracion.backups.ver' && allowed;
+
+  await withServer(createBackupsApp(), async (baseUrl) => {
+    const denied = await fetch(`${baseUrl}/api/backups`, { headers: authHeaders() });
+    assert.equal(denied.status, 403);
+
+    allowed = true;
+    const permitted = await fetch(`${baseUrl}/api/backups`, { headers: authHeaders() });
+    assert.equal(permitted.status, 200);
+    assert.ok(Array.isArray(await permitted.json()));
+  });
+
+  permissionsService.userHasPermission = original;
 });
