@@ -62,6 +62,5 @@ export const env = {
     uploadDir: process.env.UPLOAD_DIR,
     backupsDir: process.env.BACKUPS_DIR,
     scriptsDir: process.env.SCRIPTS_DIR,
-    googleClientId: process.env.GOOGLE_CLIENT_ID,
     backupEncryptionKey: process.env.BACKUP_ENCRYPTION_KEY || 'development-backup-key-change-me-32',
 };

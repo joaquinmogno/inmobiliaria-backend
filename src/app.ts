@@ -3,11 +3,10 @@ import cors from 'cors';
 import path from 'path';
 import cookieParser from 'cookie-parser';
 import authRoutes from './routes/auth.routes';
-// import propietariosRoutes from './routes/propietarios.routes';
-// import inquilinosRoutes from './routes/inquilinos.routes';
 import propiedadesRoutes from './routes/propiedades.routes';
 import contratosRoutes from './routes/contratos.routes';
 import usuariosRoutes from './routes/usuarios.routes';
+import rolesRoutes from './routes/roles.routes';
 import personasRoutes from './routes/personas.routes';
 import liquidacionesRoutes from './routes/liquidaciones.routes';
 import pagosRoutes from './routes/pagos.routes';
@@ -15,17 +14,18 @@ import backupsRoutes from './routes/backups.routes';
 import inmobiliariaRoutes from './routes/inmobiliaria.routes';
 import reportesRoutes from './routes/reportes.routes';
 import cajachicaRoutes from './routes/cajachica.routes';
-import superadminRoutes from './routes/superadmin.routes';
 import planesCuotasRoutes from './routes/planes-cuotas.routes';
 import sueldosRoutes from './routes/sueldos.routes';
+import alertasOperativasRoutes from './routes/alertas-operativas.routes';
 import filesRoutes from './routes/files.routes';
-import { apiLimiter } from './middlewares/rateLimiter.middleware';
+import { apiLimiter, expensiveApiLimiter } from './middlewares/rateLimiter.middleware';
 import multer from 'multer';
 import { requestContext } from './middlewares/request-context.middleware';
 import { logger } from './services/logger.service';
 import { AppError } from './errors/app-error';
 import { prisma } from './prisma';
 import { invalidatePerformanceCache } from './services/performance-cache.service';
+import { authenticateToken } from './middlewares/auth.middleware';
 
 import helmet from 'helmet';
 
@@ -38,7 +38,6 @@ app.use(requestContext);
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" } // Allow loading images from different origins
 }));
-app.use(apiLimiter);
 
 const allowedOrigins = [
   ...(process.env.NODE_ENV === 'production' ? [] : [
@@ -54,7 +53,8 @@ app.use(cors({
     if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error('Origen no permitido por CORS'));
   },
-  credentials: true
+  credentials: true,
+  exposedHeaders: ['Content-Disposition']
 }));
 
 app.use(express.json({ limit: '10kb' }));
@@ -79,22 +79,24 @@ app.use('/api', (req, res, next) => {
 
 // Routes
 app.use('/api/auth', authRoutes);
-// app.use('/api/propietarios', propietariosRoutes);
-// app.use('/api/inquilinos', inquilinosRoutes);
-app.use('/api/propiedades', propiedadesRoutes);
-app.use('/api/contratos', contratosRoutes);
-app.use('/api/usuarios', usuariosRoutes);
-app.use('/api/personas', personasRoutes);
-app.use('/api/liquidaciones', liquidacionesRoutes);
-app.use('/api/pagos', pagosRoutes);
-app.use('/api/backups', backupsRoutes);
-app.use('/api/inmobiliaria', inmobiliariaRoutes);
-app.use('/api/reportes', reportesRoutes);
-app.use('/api/cajachica', cajachicaRoutes);
-app.use('/api/superadmin', superadminRoutes);
-app.use('/api/planes-cuotas', planesCuotasRoutes);
-app.use('/api/sueldos', sueldosRoutes);
-app.use('/api/files', filesRoutes);
+// El login posee un backoff persistente por IP + cuenta. El resto de la API se
+// dimensiona por sesión para que una oficina detrás de NAT no comparta cuota.
+const sessionRateLimit = [authenticateToken, apiLimiter];
+app.use('/api/propiedades', ...sessionRateLimit, propiedadesRoutes);
+app.use('/api/contratos', ...sessionRateLimit, contratosRoutes);
+app.use('/api/usuarios', ...sessionRateLimit, usuariosRoutes);
+app.use('/api/roles', ...sessionRateLimit, rolesRoutes);
+app.use('/api/personas', ...sessionRateLimit, personasRoutes);
+app.use('/api/liquidaciones', ...sessionRateLimit, liquidacionesRoutes);
+app.use('/api/pagos', ...sessionRateLimit, pagosRoutes);
+app.use('/api/backups', ...sessionRateLimit, expensiveApiLimiter, backupsRoutes);
+app.use('/api/inmobiliaria', ...sessionRateLimit, inmobiliariaRoutes);
+app.use('/api/reportes', ...sessionRateLimit, expensiveApiLimiter, reportesRoutes);
+app.use('/api/cajachica', ...sessionRateLimit, cajachicaRoutes);
+app.use('/api/planes-cuotas', ...sessionRateLimit, planesCuotasRoutes);
+app.use('/api/sueldos', ...sessionRateLimit, sueldosRoutes);
+app.use('/api/alertas-operativas', ...sessionRateLimit, alertasOperativasRoutes);
+app.use('/api/files', ...sessionRateLimit, expensiveApiLimiter, filesRoutes);
 
 app.get('/health/live', (_req, res) => {
   res.json({ status: 'ok' });
@@ -121,8 +123,12 @@ app.get('/health', (_req, res) => {
   res.redirect(307, '/health/ready');
 });
 
-app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
   const requestId = (req as express.Request & { requestId?: string }).requestId;
+
+  // Si una descarga o stream falla después de comenzar la respuesta, Express debe
+  // cerrar la conexión mediante su manejador por defecto; ya no es posible enviar JSON.
+  if (res.headersSent) return next(err);
 
   if (err instanceof AppError) {
     logger.warn('Application error', {

@@ -50,7 +50,22 @@ fi
 echo "Ejecutando migraciones de Prisma..."
 run_as_node npx prisma migrate deploy
 
-if [ "$RUN_DEMO_SEED" = "true" ] && [ ! -f "$SEED_STATE_DIR/.seed-completed" ]; then
+INITIAL_ADMIN_EMAIL_VALUE="${INITIAL_ADMIN_EMAIL:-${INSTALLATION_ADMIN_EMAIL:-}}"
+INITIAL_ADMIN_PASSWORD_VALUE="${INITIAL_ADMIN_PASSWORD:-${INSTALLATION_ADMIN_PASSWORD:-}}"
+
+if [ -n "$INITIAL_ADMIN_EMAIL_VALUE" ] || [ -n "$INITIAL_ADMIN_PASSWORD_VALUE" ]; then
+  if [ -z "$INITIAL_ADMIN_EMAIL_VALUE" ] || [ -z "$INITIAL_ADMIN_PASSWORD_VALUE" ]; then
+    echo "INITIAL_ADMIN_EMAIL e INITIAL_ADMIN_PASSWORD deben configurarse juntos." >&2
+    exit 1
+  fi
+
+  echo "Verificando administrador inicial..."
+  run_as_node node dist/scripts/setup-installation.js
+else
+  echo "Bootstrap de administrador omitido: no se configuraron credenciales iniciales."
+fi
+
+if [ "${RUN_DEMO_SEED:-false}" = "true" ] && [ ! -f "$SEED_STATE_DIR/.seed-completed" ]; then
   echo "Ejecutando seed demo..."
   run_as_node npx prisma db seed
   run_as_node sh -c "mkdir -p '$SEED_STATE_DIR' && touch '$SEED_STATE_DIR/.seed-completed'"

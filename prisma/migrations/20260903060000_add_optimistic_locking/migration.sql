@@ -1,0 +1,6 @@
+-- Prevent concurrent edits from silently overwriting each other.
+ALTER TABLE "Rol" ADD COLUMN "version" INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE "Persona" ADD COLUMN "version" INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE "Propiedad" ADD COLUMN "version" INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE "Contrato" ADD COLUMN "version" INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE "PagoSueldo" ADD COLUMN "version" INTEGER NOT NULL DEFAULT 1;

@@ -89,22 +89,40 @@ test('physical contract files are removed after the database deletion', async t 
 
 test('maintenance deletes expired sessions and old revoked sessions', async t => {
   const originalDeleteMany = prisma.userSession.deleteMany;
+  const originalThrottleDeleteMany = prisma.loginThrottle.deleteMany;
+  const originalAuditDeleteMany = prisma.auditLog.deleteMany;
   const originalFindMany = prisma.contrato.findMany;
+  const originalPropertyAttachmentFindMany = prisma.adjuntoPropiedad.findMany;
+  const originalPropertyAttachmentDelete = prisma.adjuntoPropiedad.delete;
   let receivedWhere;
+  let receivedAuditWhere;
   prisma.userSession.deleteMany = async args => {
     receivedWhere = args.where;
     return { count: 2 };
   };
+  prisma.loginThrottle.deleteMany = async () => ({ count: 1 });
+  prisma.auditLog.deleteMany = async args => {
+    receivedAuditWhere = args.where;
+    return { count: 3 };
+  };
   prisma.contrato.findMany = async () => [];
+  prisma.adjuntoPropiedad.findMany = async () => [];
+  prisma.adjuntoPropiedad.delete = async () => ({ id: 1 });
   t.after(() => {
     prisma.userSession.deleteMany = originalDeleteMany;
+    prisma.loginThrottle.deleteMany = originalThrottleDeleteMany;
+    prisma.auditLog.deleteMany = originalAuditDeleteMany;
     prisma.contrato.findMany = originalFindMany;
+    prisma.adjuntoPropiedad.findMany = originalPropertyAttachmentFindMany;
+    prisma.adjuntoPropiedad.delete = originalPropertyAttachmentDelete;
   });
 
   await runMaintenance();
   assert.ok(receivedWhere.OR[0].expiresAt.lt instanceof Date);
   assert.ok(receivedWhere.OR[1].revokedAt.lt instanceof Date);
   assert.ok(receivedWhere.OR[1].revokedAt.lt < receivedWhere.OR[0].expiresAt.lt);
+  assert.ok(receivedAuditWhere.fechaCreacion.lt instanceof Date);
+  assert.ok(receivedAuditWhere.fechaCreacion.lt < receivedWhere.OR[1].revokedAt.lt);
 });
 
 test('Argentine phone numbers are stored in E.164 and invalid values are rejected', () => {

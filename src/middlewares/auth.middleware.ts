@@ -9,7 +9,7 @@ export interface AuthRequest extends Request {
     user?: {
         id: number;
         email: string;
-        role: string;
+        tipo: 'ADMIN' | 'USUARIO';
         inmobiliariaId: number;
         mustChangePassword?: boolean;
     };
@@ -28,6 +28,9 @@ export const requireRecentAuthentication = (req: Request, res: Response, next: N
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export const authenticateToken = async (req: Request, res: Response, next: NextFunction) => {
+    const alreadyAuthenticated = req as AuthRequest;
+    if (alreadyAuthenticated.user && alreadyAuthenticated.sessionId) return next();
+
     const sessionToken = req.cookies?.[SESSION_COOKIE];
 
     if (!sessionToken || typeof sessionToken !== 'string') {
@@ -49,7 +52,7 @@ export const authenticateToken = async (req: Request, res: Response, next: NextF
             return res.status(401).json({ message: 'Sesión revocada' });
         }
 
-        if (user.rol !== 'SUPERADMIN' && (!user.inmobiliaria || !user.inmobiliaria.activa)) {
+        if (!user.inmobiliaria || !user.inmobiliaria.activa) {
             return res.status(403).json({ message: 'Cuenta suspendida, contacte al administrador' });
         }
 
@@ -86,7 +89,7 @@ export const authenticateToken = async (req: Request, res: Response, next: NextF
         (req as AuthRequest).user = {
             id: user.id,
             email: user.email,
-            role: user.rol,
+            tipo: user.tipo,
             inmobiliariaId: user.inmobiliariaId,
             mustChangePassword: user.mustChangePassword
         };

@@ -10,7 +10,6 @@ export const SESSION_COOKIE = 'pc_session';
 export const CSRF_COOKIE = 'pc_csrf';
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
-export const privilegedRoles = new Set(['SUPERADMIN', 'OWNER', 'JEFE', 'ADMIN']);
 
 export function sha256(value: string) {
   return crypto.createHmac('sha256', env.sessionSecret).update(value).digest('hex');

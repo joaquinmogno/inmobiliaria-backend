@@ -69,6 +69,7 @@ test('pagination rejects invalid values and caps page size', () => {
   assert.deepEqual(parsePagination('-5', '999'), { page: 1, limit: 100, skip: 0 });
   assert.deepEqual(parsePagination('3', '25'), { page: 3, limit: 25, skip: 50 });
   assert.deepEqual(parsePagination('abc', 'abc'), { page: 1, limit: 25, skip: 0 });
+  assert.deepEqual(parsePagination('999999999', '100'), { page: 10000, limit: 100, skip: 999900 });
 });
 
 test('liveness is independent and readiness reflects database availability', async () => {

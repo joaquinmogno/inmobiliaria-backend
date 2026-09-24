@@ -78,6 +78,9 @@ function installPrismaMocks() {
   prisma.rolPermiso = { findMany: async () => allPermissions };
   prisma.usuarioPermiso = { findMany: async () => [] };
   prisma.usuarioPermisoDenegado = { findMany: async () => [] };
+  // Las pruebas de operaciones financieras usan períodos abiertos por defecto.
+  // El cierre se cubre de forma aislada en cash-closing.service.test.js.
+  prisma.cierreCaja = { findUnique: async () => null };
   prisma.userSession = {
     findUnique: async ({ where }) => {
       if (where.tokenHash !== sha256(SESSION_TOKEN)) return null;
@@ -91,7 +94,7 @@ function installPrismaMocks() {
         usuario: {
           id: 7001,
           email: 'moneda.test@inmobiliaria.local',
-          rol: 'SUPERADMIN',
+          tipo: 'ADMIN',
           inmobiliariaId: 1,
           activo: true,
           mfaEnabled: true,
@@ -132,6 +135,7 @@ function installPrismaMocks() {
     create: async ({ data }) => {
       const contrato = {
         id: createdContracts.length + 1,
+        version: 1,
         ...data,
         moneda: data.moneda || 'ARS',
         requiereActualizacion: data.requiereActualizacion ?? true,
@@ -141,7 +145,37 @@ function installPrismaMocks() {
       createdContracts.push(contrato);
       return contrato;
     },
-    findFirst: async ({ where }) => createdContracts.find((item) => item.id === where.id) || null,
+    findFirst: async ({ where }) => {
+      const item = createdContracts.find((contract) => contract.id === where.id);
+      return item ? {
+        fechaInicio: new Date('2026-01-01T00:00:00.000Z'),
+        fechaFin: new Date('2027-12-31T00:00:00.000Z'),
+        pagaHonorarios: 'INQUILINO',
+        administrado: true,
+        diaVencimiento: 10,
+        porcentajeHonorarios: null,
+        montoHonorarios: 0,
+        actualizaciones: [],
+        ...item,
+        estado: item.estado || 'ACTIVO',
+        propiedad: item.propiedad || { id: 10, direccion: 'Av. Test 123' },
+        inquilinos: item.inquilinos || [{ persona: { id: 101, nombreCompleto: 'Inquilino Test' } }],
+        propietarios: item.propietarios || [{ persona: { id: 102, nombreCompleto: 'Propietario Test' } }],
+      } : null;
+    },
+    findUniqueOrThrow: async ({ where }) => {
+      const contrato = createdContracts.find((item) => item.id === where.id);
+      if (!contrato) throw new Error('Contract not found');
+      return contrato;
+    },
+    updateMany: async ({ where, data }) => {
+      const contrato = createdContracts.find((item) => item.id === where.id && item.version === where.version);
+      if (!contrato) return { count: 0 };
+      const nextData = { ...data };
+      if (typeof data.version === 'object') nextData.version = contrato.version + data.version.increment;
+      Object.assign(contrato, nextData);
+      return { count: 1 };
+    },
     update: async ({ where, data }) => {
       const contrato = createdContracts.find((item) => item.id === where.id);
       Object.assign(contrato, data);
@@ -154,6 +188,19 @@ function installPrismaMocks() {
       if (where.id) return createdLiquidaciones.find((item) => item.id === where.id && item.inmobiliariaId === where.inmobiliariaId) || null;
       if (where.contratoId && where.periodo) return createdLiquidaciones.find((item) => item.contratoId === where.contratoId) || null;
       return null;
+    },
+    findUniqueOrThrow: async ({ where }) => {
+      const liquidacion = createdLiquidaciones.find((item) => item.id === where.id);
+      if (!liquidacion) throw new Error('Liquidation not found');
+      return liquidacion;
+    },
+    findUnique: async ({ where }) => {
+      const liquidacion = createdLiquidaciones.find((item) => item.id === where.id);
+      return liquidacion ? {
+        ...liquidacion,
+        pagos: createdPagos.filter((pago) => pago.liquidacionId === liquidacion.id && !pago.anuladoEn),
+        aplicacionesCredito: [],
+      } : null;
     },
     findMany: async ({ where }) => createdLiquidaciones
       .filter((item) => item.contratoId === where.contratoId && item.inmobiliariaId === where.inmobiliariaId && item.estado === where.estado)
@@ -172,6 +219,8 @@ function installPrismaMocks() {
         totalIngresos: 0,
         totalDescuentos: 0,
         netoACobrar: 0,
+        montoPropietario: 0,
+        pagaHonorarios: data.pagaHonorarios || 'INQUILINO',
         movimientos: [],
       };
       createdLiquidaciones.push(liquidacion);
@@ -181,6 +230,14 @@ function installPrismaMocks() {
       const liquidacion = createdLiquidaciones.find((item) => item.id === where.id);
       Object.assign(liquidacion, data);
       return liquidacion;
+    },
+    updateMany: async ({ where, data }) => {
+      const liquidacion = createdLiquidaciones.find((item) => item.id === where.id && (!where.estado || item.estado === where.estado) && (!where.version || item.version === where.version));
+      if (!liquidacion) return { count: 0 };
+      const nextData = { ...data };
+      if (typeof data.version === 'object') nextData.version = (liquidacion.version || 1) + data.version.increment;
+      Object.assign(liquidacion, nextData);
+      return { count: 1 };
     },
     aggregate: async () => ({ _sum: { netoACobrar: 0 } }),
   };
@@ -197,7 +254,13 @@ function installPrismaMocks() {
     findFirst: async ({ where }) => createdCuotas.find(item =>
       item.id === where.id && item.estado === where.estado && item.liquidacionId === null && item.movimientoId === null
     ) || null,
+    findMany: async ({ where }) => createdCuotas.filter(item => item.liquidacionId === where.liquidacionId),
     updateMany: async ({ where, data }) => {
+      if (where.id?.in) {
+        const cuotas = createdCuotas.filter(item => where.id.in.includes(item.id) && (!where.estado?.in || where.estado.in.includes(item.estado)));
+        cuotas.forEach(cuota => Object.assign(cuota, data));
+        return { count: cuotas.length };
+      }
       const cuota = createdCuotas.find(item =>
         item.id === where.id && item.estado === where.estado && item.liquidacionId === null && item.movimientoId === null
       );
@@ -256,6 +319,7 @@ function installPrismaMocks() {
   };
   prisma.planCuotas = {
     count: async ({ where }) => createdLiquidaciones.some((item) => item.contratoId === where.contratoId) ? 0 : 0,
+    findMany: async () => [],
   };
 
   auditService.log = async () => ({ id: 1 });
@@ -331,6 +395,7 @@ test('API contracts: can skip scheduled rent updates for USD contracts', async (
 test('API contracts: disabling scheduled updates clears update fields', async () => {
   createdContracts.push({
     id: 1,
+    version: 1,
     inmobiliariaId: 1,
     moneda: 'USD',
     montoAlquiler: 1000,
@@ -343,7 +408,7 @@ test('API contracts: disabling scheduled updates clears update fields', async ()
   await withServer(async (app) => {
     const response = await request(app, '/api/contratos/1', {
       method: 'PUT',
-      body: JSON.stringify({ requiereActualizacion: false }),
+      body: JSON.stringify({ requiereActualizacion: false, version: 1 }),
     });
 
     assert.equal(response.status, 200);
@@ -379,6 +444,7 @@ test('API liquidations: a claimed installment cannot be reused and the failed tr
     monto: 200,
     moneda: 'ARS',
     numeroCuota: 1,
+    fechaVencimiento: new Date('2026-06-01T00:00:00.000Z'),
     plan: { contratoId: 1, inmobiliariaId: 1, moneda: 'ARS', tipoMovimiento: 'DESCUENTO', concepto: 'Arreglo', esParaInmobiliaria: false }
   });
 
@@ -407,7 +473,7 @@ test('API currency: payment currency must match pending liquidation currency', a
     contratoId: 1,
     inmobiliariaId: 1,
     moneda: 'USD',
-    estado: 'PENDIENTE_PAGO',
+    estado: 'CONFIRMADA', estadoCobroInquilino: 'PENDIENTE', estadoPagoPropietario: 'PENDIENTE',
     netoACobrar: 1500,
     periodo: new Date('2026-06-01T00:00:00.000Z'),
   });
@@ -434,7 +500,7 @@ test('API currency: payment currency must match pending liquidation currency', a
 test('API payments: a partial payment creates its cash income immediately', async () => {
   createdContracts.push({ id: 1, inmobiliariaId: 1, moneda: 'ARS', montoAlquiler: 1500 });
   createdLiquidaciones.push({
-    id: 1, contratoId: 1, inmobiliariaId: 1, moneda: 'ARS', estado: 'PENDIENTE_PAGO',
+    id: 1, contratoId: 1, inmobiliariaId: 1, moneda: 'ARS', estado: 'CONFIRMADA', estadoCobroInquilino: 'PENDIENTE', estadoPagoPropietario: 'PENDIENTE',
     netoACobrar: 1500, periodo: new Date('2026-06-01T00:00:00.000Z'),
   });
 
@@ -448,14 +514,14 @@ test('API payments: a partial payment creates its cash income immediately', asyn
     assert.equal(Number(createdPagos[0].monto), 500);
     assert.equal(createdCaja.length, 1);
     assert.equal(Number(createdCaja[0].monto), 500);
-    assert.equal(createdLiquidaciones[0].estado, 'PENDIENTE_PAGO');
+    assert.equal(createdLiquidaciones[0].estadoCobroInquilino, 'PARCIAL');
   });
 });
 
 test('API payments: rejects overpayments without creating payments or cash movements', async () => {
   createdContracts.push({ id: 1, inmobiliariaId: 1, moneda: 'ARS', montoAlquiler: 1500 });
   createdLiquidaciones.push({
-    id: 1, contratoId: 1, inmobiliariaId: 1, moneda: 'ARS', estado: 'PENDIENTE_PAGO',
+    id: 1, contratoId: 1, inmobiliariaId: 1, moneda: 'ARS', estado: 'CONFIRMADA', estadoCobroInquilino: 'PENDIENTE', estadoPagoPropietario: 'PENDIENTE',
     netoACobrar: 1500, periodo: new Date('2026-06-01T00:00:00.000Z'),
   });
 
@@ -490,13 +556,13 @@ test('API currency: cashbox manual movements keep separate currencies', async ()
 });
 
 test('API currency: contract currency change is rejected when financial operations exist', async () => {
-  createdContracts.push({ id: 1, inmobiliariaId: 1, moneda: 'ARS', montoAlquiler: 1000 });
+  createdContracts.push({ id: 1, version: 1, inmobiliariaId: 1, moneda: 'ARS', montoAlquiler: 1000 });
   createdLiquidaciones.push({ id: 1, contratoId: 1, inmobiliariaId: 1, moneda: 'ARS' });
 
   await withServer(async (app) => {
     const response = await request(app, '/api/contratos/1', {
       method: 'PUT',
-      body: JSON.stringify({ moneda: 'USD' }),
+      body: JSON.stringify({ moneda: 'USD', version: 1 }),
     });
 
     assert.equal(response.status, 400);

@@ -7,17 +7,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { canCreateRole, isRoleBelow } = require('../dist/services/permissions.service');
 const { getCookieOptions } = require('../dist/services/security.service');
 const { validateUploadedFileContent } = require('../dist/middlewares/upload.middleware');
-
-test('role hierarchy prevents vertical privilege escalation', () => {
-  assert.equal(canCreateRole('ADMIN', 'OWNER'), false);
-  assert.equal(canCreateRole('JEFE', 'JEFE'), false);
-  assert.equal(canCreateRole('OWNER', 'OWNER'), true);
-  assert.equal(isRoleBelow('AGENTE', 'ADMIN'), true);
-  assert.equal(isRoleBelow('OWNER', 'ADMIN'), false);
-});
 
 test('production cookies remain Secure and use SameSite=Lax', () => {
   const options = getCookieOptions(true);
