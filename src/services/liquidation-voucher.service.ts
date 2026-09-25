@@ -57,6 +57,8 @@ export type LiquidationVoucherSnapshot = {
         tipo: string;
         concepto: string;
         motivo: string;
+        montoInquilino?: number;
+        montoPropietario?: number;
         monto: number;
         impactoInquilino: number;
         impactoPropietario: number;
@@ -111,6 +113,8 @@ export const getVoucherSummary = (voucher: { id: number; version: number; fechaE
             tipo: ajuste.tipo,
             concepto: ajuste.concepto,
             motivo: ajuste.motivo,
+            montoInquilino: ajuste.montoInquilino ?? Math.abs(ajuste.impactoInquilino),
+            montoPropietario: ajuste.montoPropietario ?? Math.abs(ajuste.impactoPropietario),
             impactoInquilino: ajuste.impactoInquilino,
             impactoPropietario: ajuste.impactoPropietario,
             creadoPor: ajuste.creadoPor,
@@ -256,6 +260,8 @@ export const createLiquidationVoucherSnapshot = async ({
             concepto: item.concepto,
             motivo: item.motivo,
             monto: asNumber(item.monto),
+            montoInquilino: asNumber(item.montoInquilino),
+            montoPropietario: asNumber(item.montoPropietario),
             impactoInquilino: asNumber(item.impactoInquilino),
             impactoPropietario: asNumber(item.impactoPropietario),
             fechaCreacion: asDate(item.fechaCreacion)!,

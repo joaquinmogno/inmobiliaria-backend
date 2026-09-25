@@ -19,6 +19,10 @@ export type PreparationIssue = {
 };
 
 const periodEnd = (period: Date) => new Date(Date.UTC(period.getUTCFullYear(), period.getUTCMonth() + 1, 0));
+const hasTenantCollectionPending = (state: string | null | undefined) => state === 'PENDIENTE' || state === 'PARCIAL';
+const hasOwnerPaymentPending = (state: string | null | undefined) => state === 'PENDIENTE' || state === 'PARCIAL';
+const isTenantCollectionResolved = (state: string | null | undefined) => state === 'COBRADO' || state === 'NO_APLICA';
+const isOwnerPaymentResolved = (state: string | null | undefined) => state === 'PAGADO' || state === 'NO_APLICA';
 
 const stateLabel: Record<EstadoContrato, string> = {
     PROGRAMADO: 'programado',
@@ -183,8 +187,8 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             estadoCobroInquilino: existing?.estadoCobroInquilino || null,
             estadoPagoPropietario: existing?.estadoPagoPropietario || null,
             proximaAccion: existing?.estado === 'BORRADOR' ? 'Revisar borrador'
-                : existing?.estado === 'CONFIRMADA' && existing.estadoCobroInquilino !== 'COBRADO' ? 'Registrar cobro del inquilino'
-                    : existing?.estado === 'CONFIRMADA' && existing.estadoPagoPropietario !== 'PAGADO' ? `Pagar a ${existing.propietarioNombre || contract.propietarios[0]?.persona.nombreCompleto || 'propietario'}`
+                : existing?.estado === 'CONFIRMADA' && hasTenantCollectionPending(existing.estadoCobroInquilino) ? 'Registrar cobro del inquilino'
+                    : existing?.estado === 'CONFIRMADA' && hasOwnerPaymentPending(existing.estadoPagoPropietario) ? `Pagar a ${existing.propietarioNombre || contract.propietarios[0]?.persona.nombreCompleto || 'propietario'}`
                         : existing?.estado === 'CONFIRMADA' ? 'Ver comprobantes'
                             : status === 'LISTA' ? 'Generar borrador'
                                 : status === 'REVISAR' ? 'Resolver excepción'
@@ -195,7 +199,7 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             totalLiquidacion: existing?.netoACobrar.toString() || null,
             pagado: paid.toString(),
             pendiente: remaining.toString(),
-            vencida: Boolean(existing?.estado === 'CONFIRMADA' && existing.estadoCobroInquilino !== 'COBRADO' && existing.fechaVencimiento && existing.fechaVencimiento < argentinaTodayAsDate()),
+            vencida: Boolean(existing?.estado === 'CONFIRMADA' && hasTenantCollectionPending(existing.estadoCobroInquilino) && existing.fechaVencimiento && existing.fechaVencimiento < argentinaTodayAsDate()),
             cuotasPeriodo: currentInstallments.map(mapInstallment),
             cuotasVencidas: overdueInstallments.map(mapInstallment),
             moneda: contract.moneda,
@@ -216,9 +220,9 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             total: rows.length,
             pendientesGenerar: rows.filter(row => row.status === 'LISTA').length,
             borradores: rows.filter(row => row.estadoLiquidacion === 'BORRADOR').length,
-            pendientesCobro: rows.filter(row => row.estadoLiquidacion === 'CONFIRMADA' && row.estadoCobroInquilino !== 'COBRADO').length,
-            pendientesPagoPropietario: rows.filter(row => row.estadoLiquidacion === 'CONFIRMADA' && row.estadoPagoPropietario !== 'PAGADO').length,
-            finalizadas: rows.filter(row => row.estadoLiquidacion === 'CONFIRMADA' && row.estadoCobroInquilino === 'COBRADO' && row.estadoPagoPropietario === 'PAGADO').length,
+            pendientesCobro: rows.filter(row => row.estadoLiquidacion === 'CONFIRMADA' && hasTenantCollectionPending(row.estadoCobroInquilino)).length,
+            pendientesPagoPropietario: rows.filter(row => row.estadoLiquidacion === 'CONFIRMADA' && hasOwnerPaymentPending(row.estadoPagoPropietario)).length,
+            finalizadas: rows.filter(row => row.estadoLiquidacion === 'CONFIRMADA' && isTenantCollectionResolved(row.estadoCobroInquilino) && isOwnerPaymentResolved(row.estadoPagoPropietario)).length,
             revisar: rows.filter(row => row.status === 'REVISAR').length,
             noElegibles: rows.filter(row => row.status === 'NO_ELEGIBLE').length,
             listas: rows.filter(row => row.status === 'LISTA').length,

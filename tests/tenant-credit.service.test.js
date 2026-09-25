@@ -41,6 +41,21 @@ test('a credit can fully settle a tenant balance without fabricating a cash coll
   assert.equal(getTenantCollectionState(liquidation), 'COBRADO');
 });
 
+test('a fully credited zero obligation is not reported as pending or collected', () => {
+  const liquidation = {
+    netoACobrar: new Decimal(0),
+    montoPropietario: new Decimal(0),
+    pagos: [],
+    aplicacionesCredito: [],
+    pagosPropietario: [],
+  };
+
+  assert.equal(getTenantSettlement(liquidation).saldo.toString(), '0');
+  assert.equal(getTenantCollectionState(liquidation), 'NO_APLICA');
+  assert.equal(getOwnerPaymentSettlement(liquidation).saldo.toString(), '0');
+  assert.equal(getOwnerPaymentState(liquidation), 'NO_APLICA');
+});
+
 test('legacy split collections reconcile as collected and settle the reconstructed owner payment', () => {
   // Regresión de la liquidación histórica: dos pagos vigentes que totalizan
   // el neto no pueden conservar el estado PENDIENTE después de la migración.

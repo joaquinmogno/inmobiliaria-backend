@@ -752,7 +752,12 @@ model AjusteLiquidacion {
   tipo               TipoAjusteLiquidacion
   concepto           String                @db.VarChar(255)
   motivo             String                @db.Text
+  // `monto` se conserva para comprobantes emitidos antes de separar los
+  // importes por parte. Los nuevos ajustes usan los dos importes explícitos;
+  // el signo se deriva exclusivamente de `tipo` en el backend.
   monto              Decimal               @db.Decimal(10, 2)
+  montoInquilino     Decimal               @default(0) @db.Decimal(10, 2)
+  montoPropietario   Decimal               @default(0) @db.Decimal(10, 2)
   moneda             Moneda
   impactoInquilino   Decimal               @default(0) @db.Decimal(10, 2)
   impactoPropietario Decimal               @default(0) @db.Decimal(10, 2)
@@ -856,12 +861,14 @@ enum EstadoCobroInquilino {
   PENDIENTE
   PARCIAL
   COBRADO
+  NO_APLICA
 }
 
 enum EstadoPagoPropietario {
   PENDIENTE
   PARCIAL
   PAGADO
+  NO_APLICA
 }
 
 enum OrigenPagoPropietario {

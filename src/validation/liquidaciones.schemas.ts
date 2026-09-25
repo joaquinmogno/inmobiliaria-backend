@@ -50,18 +50,21 @@ export const ajusteLiquidacionSchema = z.object({
     tipo: z.enum(['CREDITO', 'DEBITO']),
     concepto: requiredText('El concepto', 255),
     motivo: requiredText('El motivo', 1000).refine(value => value.length >= 5, { message: 'El motivo debe tener al menos 5 caracteres' }),
-    monto: positiveDecimal('El monto'),
-    // Los impactos se expresan con signo: negativo reduce el saldo de esa parte.
-    impactoInquilino: z.coerce.number().finite().refine(value => Number.isFinite(value), 'Impacto de inquilino inválido'),
-    impactoPropietario: z.coerce.number().finite().refine(value => Number.isFinite(value), 'Impacto de propietario inválido'),
+    // El operador informa importes positivos. El backend define el signo según
+    // el tipo para impedir que el comprobante y los saldos se contradigan.
+    montoInquilino: nonNegativeDecimal('El importe del inquilino').optional().default(0),
+    montoPropietario: nonNegativeDecimal('El importe del propietario').optional().default(0),
     destinoCredito: z.enum(['DEVOLUCION', 'SALDO_A_FAVOR', 'COMPENSACION']).optional(),
     liquidacionDestinoId: z.coerce.number().int().positive('Liquidación destino inválida').optional(),
     fechaDevolucion: optionalDateOnlyString('La fecha de devolución'),
     metodoDevolucion: paymentMethodSchema.optional().default('EFECTIVO'),
     observacionesDevolucion: optionalText(1000)
-}).refine(data => data.impactoInquilino !== 0 || data.impactoPropietario !== 0, {
+}).refine(data => data.montoInquilino > 0 || data.montoPropietario > 0, {
     message: 'El ajuste debe afectar al inquilino o al propietario'
 }).superRefine((data, ctx) => {
+    if (data.tipo !== 'CREDITO' && data.destinoCredito) {
+        ctx.addIssue({ code: 'custom', path: ['destinoCredito'], message: 'Sólo una nota de crédito puede generar devolución, saldo a favor o compensación' });
+    }
     if (data.destinoCredito === 'COMPENSACION' && !data.liquidacionDestinoId) {
         ctx.addIssue({ code: 'custom', path: ['liquidacionDestinoId'], message: 'Elegí la liquidación a compensar' });
     }

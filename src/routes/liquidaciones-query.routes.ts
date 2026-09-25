@@ -24,8 +24,8 @@ router.get('/', requirePermission('liquidaciones.ver'), withPagination(50), asyn
     if (moneda && !['ARS', 'USD'].includes(String(moneda))) {
         return res.status(400).json({ message: 'Moneda inválida' });
     }
-    if (estadoCobro && !['PENDIENTE', 'PARCIAL', 'COBRADO'].includes(String(estadoCobro))) return res.status(400).json({ message: 'Estado de cobro inválido' });
-    if (estadoPagoPropietario && !['PENDIENTE', 'PARCIAL', 'PAGADO'].includes(String(estadoPagoPropietario))) return res.status(400).json({ message: 'Estado de pago al propietario inválido' });
+    if (estadoCobro && !['PENDIENTE', 'PARCIAL', 'COBRADO', 'NO_APLICA'].includes(String(estadoCobro))) return res.status(400).json({ message: 'Estado de cobro inválido' });
+    if (estadoPagoPropietario && !['PENDIENTE', 'PARCIAL', 'PAGADO', 'NO_APLICA'].includes(String(estadoPagoPropietario))) return res.status(400).json({ message: 'Estado de pago al propietario inválido' });
     try {
         const where: any = {
             inmobiliariaId,

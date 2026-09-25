@@ -24,9 +24,13 @@ export const getTenantCollectionState = (liquidacion: {
     pagos?: Amount[];
     aplicacionesCredito?: Amount[];
 }): EstadoCobroInquilino => {
+    const totalDocumentado = new Decimal(liquidacion.netoACobrar);
+    // No se informa como "cobrado": una corrección pudo dejar la obligación
+    // en cero sin que haya existido un cobro de caja.
+    if (totalDocumentado.lessThanOrEqualTo(0)) return EstadoCobroInquilino.NO_APLICA;
     const { totalAplicado } = getTenantSettlement(liquidacion);
     if (totalAplicado.lessThanOrEqualTo(0)) return EstadoCobroInquilino.PENDIENTE;
-    return totalAplicado.lessThan(new Decimal(liquidacion.netoACobrar))
+    return totalAplicado.lessThan(totalDocumentado)
         ? EstadoCobroInquilino.PARCIAL
         : EstadoCobroInquilino.COBRADO;
 };
@@ -44,6 +48,8 @@ export const getOwnerPaymentState = (liquidacion: {
     montoPropietario: Decimal | number | string;
     pagosPropietario?: Amount[];
 }): EstadoPagoPropietario => {
+    const totalDocumentado = new Decimal(liquidacion.montoPropietario);
+    if (totalDocumentado.lessThanOrEqualTo(0)) return EstadoPagoPropietario.NO_APLICA;
     const { pagado, saldo } = getOwnerPaymentSettlement(liquidacion);
     if (pagado.lessThanOrEqualTo(0)) return EstadoPagoPropietario.PENDIENTE;
     return saldo.greaterThan(0) ? EstadoPagoPropietario.PARCIAL : EstadoPagoPropietario.PAGADO;

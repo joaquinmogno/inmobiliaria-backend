@@ -54,6 +54,7 @@ import {
     readLiquidationVoucherSnapshot,
     voucherSnapshotToPdfData
 } from '../services/liquidation-voucher.service';
+import { calculateLiquidationAdjustment } from '../services/liquidation-adjustment.service';
 
 const router = Router();
 
@@ -100,10 +101,13 @@ const drawVoucherCorrectionsPdf = (
     snapshot.ajustes.forEach(ajuste => {
         y = ensurePdfSpace(doc, y, 54);
         const impact = ajuste[impactKey];
-        const sign = impact >= 0 ? '+' : '−';
+        const documentedAmount = recipient === 'INQUILINO'
+            ? (ajuste.montoInquilino ?? Math.abs(impact))
+            : (ajuste.montoPropietario ?? Math.abs(impact));
+        const sign = ajuste.tipo === 'CREDITO' ? '−' : '+';
         doc.fillColor('#111827').fontSize(9).font('Helvetica-Bold')
             .text(`${ajuste.tipo === 'CREDITO' ? 'Nota de crédito' : 'Nota de débito'} #${ajuste.id}: ${ajuste.concepto}`, 58, y, { width: pageWidth - 145 });
-        doc.fillColor(impact >= 0 ? '#065F46' : '#991B1B').text(`${sign}${moneyPdf(Math.abs(impact))}`, 50 + pageWidth - 100, y, { width: 90, align: 'right' });
+        doc.fillColor(ajuste.tipo === 'DEBITO' ? '#065F46' : '#991B1B').text(`${sign}${moneyPdf(documentedAmount)}`, 50 + pageWidth - 100, y, { width: 90, align: 'right' });
         doc.fillColor('#4B5563').font('Helvetica')
             .text(`Motivo: ${ajuste.motivo}`, 58, y + 13, { width: pageWidth - 16 })
             .text(`Emitido por ${ajuste.creadoPor.nombreCompleto} · ${formatDatePdf(ajuste.fechaCreacion)}`, 58, y + 26, { width: pageWidth - 16 });
@@ -839,7 +843,7 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
     const liquidacionId = Number(req.params.id);
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
     const {
-        tipo, concepto, motivo, monto, impactoInquilino, impactoPropietario,
+        tipo, concepto, motivo, montoInquilino, montoPropietario,
         destinoCredito, liquidacionDestinoId, fechaDevolucion, metodoDevolucion, observacionesDevolucion
     } = req.body;
     try {
@@ -855,6 +859,18 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
             if (!liquidation) throw Object.assign(new Error('Liquidación no encontrada'), { statusCode: 404, code: 'LIQUIDATION_NOT_FOUND' });
             if (liquidation.estado !== EstadoLiquidacion.CONFIRMADA) throw Object.assign(new Error('Sólo una liquidación confirmada admite ajustes'), { statusCode: 409, code: 'LIQUIDATION_NOT_CONFIRMED' });
 
+            const adjustmentAmounts = calculateLiquidationAdjustment({
+                tipo,
+                montoInquilino,
+                montoPropietario
+            });
+            const {
+                montoInquilino: tenantAdjustment,
+                montoPropietario: ownerAdjustment,
+                impactoInquilino,
+                impactoPropietario,
+                montoHistorico
+            } = adjustmentAmounts;
             const correctedTenant = new Decimal(liquidation.netoACobrar.toString()).plus(impactoInquilino);
             const correctedOwner = new Decimal(liquidation.montoPropietario.toString()).plus(impactoPropietario);
             if (correctedTenant.lessThan(0) || correctedOwner.lessThan(0)) throw Object.assign(new Error('El ajuste dejaría un importe negativo'), { statusCode: 409, code: 'NEGATIVE_ADJUSTED_TOTAL' });
@@ -876,7 +892,7 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
                 await releaseCreditApplicationsForCorrection({ tx, liquidacionId, montoALiberar: creditApplicationExcess });
             }
 
-            if (cashExcess.greaterThan(0) && (tipo !== 'CREDITO' || impactoInquilino >= 0)) {
+            if (cashExcess.greaterThan(0) && tipo !== 'CREDITO') {
                 throw Object.assign(new Error('Sólo una nota de crédito al inquilino puede generar un saldo a favor'), { statusCode: 409, code: 'INVALID_TENANT_CREDIT_SETTLEMENT' });
             }
             if (cashExcess.greaterThan(0) && !destinoCredito) {
@@ -884,7 +900,21 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
             }
 
             const adjustment = await tx.ajusteLiquidacion.create({
-                data: { liquidacionId, tipo, concepto, motivo, monto, moneda: liquidation.moneda, impactoInquilino, impactoPropietario, creadoPorId: usuarioId }
+                // `monto` conserva compatibilidad histórica. Los importes
+                // documentales reales son los específicos de cada parte.
+                data: {
+                    liquidacionId,
+                    tipo,
+                    concepto,
+                    motivo,
+                    monto: montoHistorico,
+                    montoInquilino: tenantAdjustment,
+                    montoPropietario: ownerAdjustment,
+                    moneda: liquidation.moneda,
+                    impactoInquilino,
+                    impactoPropietario,
+                    creadoPorId: usuarioId
+                }
             });
 
             let creditoInquilino: { id: number; montoOriginal: Decimal; saldoPendiente: Decimal; destino: DestinoCreditoInquilino; estado: EstadoCreditoInquilino } | null = null;
@@ -965,7 +995,7 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
         await auditService.log({
             usuarioId, inmobiliariaId, accion: 'AJUSTAR_LIQUIDACION', entidad: 'Liquidacion', entidadId: liquidacionId, severidad: 'WARNING',
-            detalle: JSON.stringify({ tipo, concepto, motivo, monto, impactoInquilino, impactoPropietario, destinoCredito, liquidacionDestinoId })
+            detalle: JSON.stringify({ tipo, concepto, motivo, montoInquilino, montoPropietario, destinoCredito, liquidacionDestinoId })
         });
         invalidatePerformanceCache(inmobiliariaId);
         res.status(201).json(result);
