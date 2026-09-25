@@ -1,5 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { z, ZodTypeAny } from 'zod';
+import { parsePhoneNumberFromString } from 'libphonenumber-js/min';
+import { parseDateOnly } from '../utils/argentina-date';
+import { normalizePersonDni } from '../utils/person-dni';
+import { normalizePersonCuit } from '../utils/person-identity';
+import { isValidBankAlias, isValidCbu, isValidCuit, normalizeBankAlias, normalizeCbu } from '../utils/bank-account';
 
 export const validateBody = (schema: ZodTypeAny) => {
     return (req: Request, res: Response, next: NextFunction) => {
@@ -22,16 +27,77 @@ export const validateBody = (schema: ZodTypeAny) => {
 
 export const idParamSchema = z.coerce.number().int().positive('ID inválido');
 
+export const paymentMethodSchema = z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE']);
+
 export const optionalText = (max = 255) =>
     z.preprocess(
         value => (value === '' || value === null) ? undefined : value,
         z.string().trim().max(max, `Máximo ${max} caracteres`).optional()
     );
 
+export const optionalDni = () =>
+    z.preprocess(
+        value => (value === '' || value === null) ? undefined : value,
+        z.string()
+            .trim()
+            .max(30, 'Máximo 30 caracteres')
+            .transform(normalizePersonDni)
+            .refine(value => value.length > 0, 'El DNI/CUIT debe contener letras o números')
+            .optional()
+    );
+
+export const optionalCuit = () =>
+    z.preprocess(
+        value => (value === '' || value === null) ? undefined : value,
+        z.string()
+            .trim()
+            .max(30, 'Máximo 30 caracteres')
+            .transform(normalizePersonCuit)
+            .refine(value => value.length === 11, 'El CUIT debe tener 11 dígitos')
+            .refine(isValidCuit, 'El CUIT no supera la validación de dígito verificador')
+            .optional()
+    );
+
+export const optionalCbu = () =>
+    z.preprocess(
+        value => (value === '' || value === null) ? undefined : value,
+        z.string()
+            .trim()
+            .max(40, 'Máximo 40 caracteres')
+            .transform(normalizeCbu)
+            .refine(value => value.length === 22, 'El CBU debe tener exactamente 22 dígitos')
+            .refine(isValidCbu, 'El CBU no supera la validación de sus dígitos verificadores')
+            .optional()
+    );
+
+export const optionalBankAlias = () =>
+    z.preprocess(
+        value => (value === '' || value === null) ? undefined : value,
+        z.string()
+            .trim()
+            .max(40, 'Máximo 40 caracteres')
+            .transform(normalizeBankAlias)
+            .refine(isValidBankAlias, 'El alias debe tener entre 6 y 20 caracteres alfanuméricos; puede incluir punto, guion o guion bajo')
+            .optional()
+    );
+
 export const optionalEmail = () =>
     z.preprocess(
         value => (value === '' || value === null) ? undefined : value,
         z.string().trim().toLowerCase().email('Email inválido').max(254).optional()
+    );
+
+export const optionalPhone = (defaultCountry: 'AR' = 'AR') =>
+    z.preprocess(
+        value => (value === '' || value === null) ? undefined : value,
+        z.string().trim().max(40).transform((value, ctx) => {
+            const phone = parsePhoneNumberFromString(value, defaultCountry);
+            if (!phone?.isValid()) {
+                ctx.addIssue({ code: 'custom', message: 'Teléfono inválido' });
+                return z.NEVER;
+            }
+            return phone.number;
+        }).optional()
     );
 
 export const requiredText = (field: string, max = 255) =>
@@ -50,7 +116,15 @@ export const nonNegativeDecimal = (field: string) =>
 
 export const dateOnlyString = (field: string) =>
     z.string({ error: `${field} es obligatorio` })
-        .regex(/^\d{4}-\d{2}-\d{2}$/, `${field} debe tener formato YYYY-MM-DD`);
+        .regex(/^\d{4}-\d{2}-\d{2}$/, `${field} debe tener formato YYYY-MM-DD`)
+        .refine(value => {
+            try {
+                parseDateOnly(value);
+                return true;
+            } catch {
+                return false;
+            }
+        }, `${field} no es una fecha válida`);
 
 export const optionalDateOnlyString = (field: string) =>
     z.preprocess(

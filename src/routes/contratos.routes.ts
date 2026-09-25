@@ -1,288 +1,57 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
-import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
-import { upload } from '../middlewares/upload.middleware';
+import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
+import { cleanupFailedUpload, commitUploadedFile, removeUploadedFile, upload, validateUploadedFileContent } from '../middlewares/upload.middleware';
 import { Decimal } from '@prisma/client/runtime/library';
 import { auditService } from '../services/audit.service';
-import {
-    validateBody,
-    dateOnlyString,
-    optionalDateOnlyString,
-    nonNegativeDecimal,
-    positiveDecimal,
-    optionalText,
-    optionalBooleanFromForm,
-    optionalEmail,
-    requiredText
-} from '../middlewares/validation.middleware';
-import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { validateBody } from '../middlewares/validation.middleware';
+import { Prisma, TipoDocumentoContrato } from '@prisma/client';
 import { logger } from '../services/logger.service';
 import { AppError } from '../errors/app-error';
 import { requirePermission } from '../middlewares/permissions.middleware';
-import { userHasPermission } from '../services/permissions.service';
 import { formatCurrency } from '../utils/currency';
 import { resolveMoneda } from '../services/currency-rules.service';
+import { deleteContractPermanently } from '../services/contract-deletion.service';
+import {
+    assertContractCanBeRescinded,
+    getContractFinancialHistory,
+    getContractOutstandingObligations,
+    hasContractFinancialHistory,
+    hasContractOutstandingObligations
+} from '../services/contract-financial-integrity.service';
+import {
+    getContractStateForDates,
+    syncPropertyOccupancy
+} from '../services/contract-lifecycle.service';
+import { argentinaTodayAsDate, parseDateOnly } from '../utils/argentina-date';
+import { assertCashPeriodOpen } from '../services/cash-closing.service';
+import { assertOptimisticUpdate } from '../utils/optimistic-lock';
+import {
+    contractAttachmentSchema,
+    contractCreateSchema,
+    contractRentUpdateSchema,
+    contractRescissionSchema,
+    contractUpdateSchema,
+    normalizeContractUpdateSettings,
+    type ContractCreateInput
+} from '../validation/contratos.schemas';
+import {
+    assertPropertyAvailableForPeriod,
+    buildContractCreateError,
+    createPeopleIfNeeded,
+    createPropertyIfNeeded,
+    ensureExistingProperty,
+    assertUniqueContractParties
+} from '../services/contract-write.service';
+import { createPrincipalContractDocument } from '../services/contract-document-version.service';
+import { assertValidContractRenewal } from '../services/contract-renewal.service';
+import contractQueryRouter from './contratos-query.routes';
 
 const router = Router();
 
 router.use(authenticateToken);
+router.use(contractQueryRouter);
 
-const parseJsonField = <T extends z.ZodTypeAny>(schema: T) => z.preprocess(value => {
-    if (typeof value !== 'string') return value;
-
-    try {
-        return JSON.parse(value);
-    } catch {
-        return value;
-    }
-}, schema);
-
-const idListFromForm = z.preprocess(value => {
-    if (Array.isArray(value)) return value;
-    if (typeof value === 'string') return value.split(',').map(v => v.trim()).filter(Boolean);
-    return value;
-}, z.array(z.coerce.number().int().positive()).min(1, 'Debe seleccionar al menos una persona'));
-
-const personCandidateSchema = z.object({
-    id: z.coerce.number().int().positive().optional(),
-    nombreCompleto: optionalText(140),
-    dni: optionalText(30),
-    email: optionalEmail(),
-    telefono: optionalText(40),
-    direccion: optionalText(180),
-    estado: z.enum(['ACTIVO', 'INACTIVO']).optional().default('ACTIVO')
-}).superRefine((value, ctx) => {
-    if (!value.id && !value.nombreCompleto) {
-        ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['nombreCompleto'],
-            message: 'El nombre completo es obligatorio para una persona nueva'
-        });
-    }
-});
-
-const propertyCandidateSchema = z.object({
-    direccion: requiredText('La dirección', 180),
-    piso: optionalText(30),
-    departamento: optionalText(30),
-    tipo: z.enum(['DEPARTAMENTO', 'CASA', 'LOCAL', 'OTRO']).optional().default('DEPARTAMENTO'),
-    estado: z.enum(['DISPONIBLE', 'ALQUILADO', 'INACTIVO']).optional().default('DISPONIBLE'),
-    observaciones: optionalText(1000)
-});
-
-const contractCreateSchemaBase = z.object({
-    fechaInicio: dateOnlyString('La fecha de inicio'),
-    fechaFin: dateOnlyString('La fecha de fin'),
-    fechaActualizacion: optionalDateOnlyString('La fecha de actualización'),
-    observaciones: optionalText(2000),
-    propiedadId: z.coerce.number().int().positive('Propiedad inválida').optional(),
-    propiedad: parseJsonField(propertyCandidateSchema).optional(),
-    propietarioIds: idListFromForm.optional(),
-    inquilinoIds: idListFromForm.optional(),
-    propietarios: parseJsonField(z.array(personCandidateSchema).min(1, 'Debe seleccionar al menos un propietario')).optional(),
-    inquilinos: parseJsonField(z.array(personCandidateSchema).min(1, 'Debe seleccionar al menos un inquilino')).optional(),
-    montoAlquiler: positiveDecimal('El monto de alquiler'),
-    montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional().default(0),
-    moneda: z.enum(['ARS', 'USD']).optional().default('ARS'),
-    porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional()),
-    pagaHonorarios: z.enum(['INQUILINO', 'PROPIETARIO']).optional().default('INQUILINO'),
-    diaVencimiento: z.coerce.number().int().min(1).max(31).optional().default(10),
-    porcentajeActualizacion: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de actualización').max(999).optional()),
-    tipoAjuste: optionalText(80),
-    administrado: optionalBooleanFromForm.default(true),
-    requiereActualizacion: optionalBooleanFromForm.default(true),
-    honorarioInicial: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El honorario inicial').optional()),
-    honorarioInicialMetodoPago: z.enum(['EFECTIVO', 'TRANSFERENCIA', 'CHEQUE', 'OTROS']).optional()
-});
-
-const contractCreateSchema = contractCreateSchemaBase.superRefine((value, ctx) => {
-    if (!value.propiedadId && !value.propiedad) {
-        ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['propiedad'],
-            message: 'Debe seleccionar una propiedad existente o cargar una nueva'
-        });
-    }
-
-    if (!value.propietarioIds && !value.propietarios) {
-        ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['propietarios'],
-            message: 'Debe indicar al menos un propietario'
-        });
-    }
-
-    if (!value.inquilinoIds && !value.inquilinos) {
-        ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['inquilinos'],
-            message: 'Debe indicar al menos un inquilino'
-        });
-    }
-
-    if (parseDateOnly(value.fechaInicio) > parseDateOnly(value.fechaFin)) {
-        ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['fechaFin'],
-            message: 'La fecha de fin debe ser posterior o igual a la fecha de inicio'
-        });
-    }
-
-    if (value.fechaActualizacion && parseDateOnly(value.fechaActualizacion) < parseDateOnly(value.fechaInicio)) {
-        ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['fechaActualizacion'],
-            message: 'La próxima actualización no puede ser anterior al inicio del contrato'
-        });
-    }
-
-    if (value.requiereActualizacion && !value.fechaActualizacion) {
-        ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['fechaActualizacion'],
-            message: 'La próxima actualización es obligatoria si el contrato tiene actualización programada'
-        });
-    }
-});
-
-const contractUpdateSchema = contractCreateSchemaBase
-    .omit({ propiedadId: true, propietarioIds: true, inquilinoIds: true, honorarioInicial: true, honorarioInicialMetodoPago: true })
-    .partial()
-    .extend({
-        administrado: optionalBooleanFromForm,
-        requiereActualizacion: optionalBooleanFromForm
-    });
-
-const contractStatusSchema = z.object({
-    estado: z.enum(['ACTIVO', 'FINALIZADO', 'RESCINDIDO'])
-});
-
-const contractRentUpdateSchema = z.object({
-    montoNuevo: positiveDecimal('El monto nuevo'),
-    fechaProximaNueva: dateOnlyString('La próxima fecha'),
-    observaciones: optionalText(1000)
-});
-
-const normalizeUpdateSettings = (payload: Pick<ContractCreateInput, 'requiereActualizacion' | 'fechaActualizacion' | 'porcentajeActualizacion' | 'tipoAjuste'>) => {
-    if (!payload.requiereActualizacion) {
-        return {
-            requiereActualizacion: false,
-            fechaProximaActualizacion: null,
-            porcentajeActualizacion: null,
-            tipoAjuste: null
-        };
-    }
-
-    return {
-        requiereActualizacion: true,
-        fechaProximaActualizacion: payload.fechaActualizacion ? parseDateOnly(payload.fechaActualizacion) : null,
-        porcentajeActualizacion: payload.porcentajeActualizacion ? new Decimal(payload.porcentajeActualizacion) : null,
-        tipoAjuste: payload.tipoAjuste || null
-    };
-};
-
-// Get all contracts
-router.get('/', requirePermission('contratos.ver'), async (req, res) => {
-    const { id: userId, role, inmobiliariaId } = (req as AuthRequest).user!;
-    const { search } = req.query;
-
-    try {
-        const contracts = await prisma.contrato.findMany({
-            where: { 
-                inmobiliariaId,
-                ...(search ? {
-                    OR: [
-                        { propiedad: { direccion: { contains: String(search), mode: 'insensitive' } } },
-                        { inquilinos: { some: { persona: { nombreCompleto: { contains: String(search), mode: 'insensitive' } } } } },
-                        { propietarios: { some: { persona: { nombreCompleto: { contains: String(search), mode: 'insensitive' } } } } }
-                    ]
-                } : {})
-            },
-            include: {
-                propiedad: true,
-                inquilinos: {
-                    where: { esPrincipal: true },
-                    include: { persona: true }
-                },
-                propietarios: {
-                    where: { esPrincipal: true },
-                    include: { persona: true }
-                },
-                adjuntos: true
-            },
-            orderBy: { fechaCreacion: 'desc' }
-        });
-        const canViewFiles = await userHasPermission(userId, role, 'contratos.archivos.ver');
-        res.json(canViewFiles ? contracts : contracts.map(contract => ({
-            ...contract,
-            rutaArchivoContrato: null,
-            adjuntos: []
-        })));
-    } catch (error) {
-        console.error('Error fetching contracts:', error);
-        res.status(500).json({ message: 'Error al obtener contratos' });
-    }
-});
-
-// Get upcoming alerts (updates and expirations)
-router.get('/alertas', requirePermission('contratos.ver'), async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
-
-    try {
-        const today = new Date();
-        const thirtyDaysOut = new Date();
-        thirtyDaysOut.setDate(today.getDate() + 30);
-
-        const sixtyDaysOut = new Date();
-        sixtyDaysOut.setDate(today.getDate() + 60);
-
-        const contracts = await prisma.contrato.findMany({
-            where: {
-                inmobiliariaId,
-                estado: 'ACTIVO',
-                OR: [
-                    {
-                        requiereActualizacion: true,
-                        fechaProximaActualizacion: {
-                            gte: today,
-                            lte: thirtyDaysOut
-                        }
-                    },
-                    {
-                        fechaFin: {
-                            gte: today,
-                            lte: sixtyDaysOut
-                        }
-                    }
-                ]
-            },
-            include: {
-                propiedad: true,
-                inquilinos: {
-                    where: { esPrincipal: true },
-                    include: { persona: true }
-                },
-                propietarios: {
-                    where: { esPrincipal: true },
-                    include: { persona: true }
-                }
-            },
-            orderBy: { fechaFin: 'asc' }
-        });
-
-        res.json(contracts);
-    } catch (error) {
-        console.error('Error fetching contract alerts:', error);
-        res.status(500).json({ message: 'Error al obtener alertas de contratos' });
-    }
-});
-
-
-function parseDateOnly(dateStr: string) {
-    const [year, month, day] = dateStr.split('-').map(Number);
-    return new Date(year, month - 1, day);
-}
 
 function compactChanges(changes: Record<string, { anterior: unknown; nuevo: unknown }>) {
     return JSON.stringify(changes, (_key, value) => {
@@ -292,191 +61,32 @@ function compactChanges(changes: Record<string, { anterior: unknown; nuevo: unkn
     });
 }
 
-type PersonCandidate = z.infer<typeof personCandidateSchema>;
-type PropertyCandidate = z.infer<typeof propertyCandidateSchema>;
-type ContractCreateInput = z.infer<typeof contractCreateSchema>;
-type TxClient = Prisma.TransactionClient;
-
-const ensureExistingProperty = async (tx: TxClient, inmobiliariaId: number, propiedadId: number) => {
-    const propiedad = await tx.propiedad.findFirst({
-        where: { id: propiedadId, inmobiliariaId }
-    });
-
-    if (!propiedad) {
-        throw new AppError('La propiedad seleccionada no existe o no pertenece a la inmobiliaria', {
-            statusCode: 400,
-            code: 'INVALID_PROPERTY_REFERENCE'
-        });
-    }
-
-    return propiedad;
-};
-
-const ensureExistingPeople = async (
-    tx: TxClient,
-    inmobiliariaId: number,
-    ids: number[],
-    roleLabel: 'propietario' | 'inquilino'
-) => {
-    const people = await tx.persona.findMany({
-        where: {
-            id: { in: ids },
-            inmobiliariaId
-        }
-    });
-
-    if (people.length !== ids.length) {
-        throw new AppError(`Uno o más ${roleLabel}s seleccionados no existen o no pertenecen a la inmobiliaria`, {
-            statusCode: 400,
-            code: 'INVALID_PERSON_REFERENCE'
-        });
-    }
-
-    const peopleById = new Map(people.map(person => [person.id, person.id]));
-    return ids.map(id => peopleById.get(id)!);
-};
-
-const createPropertyIfNeeded = async (
-    tx: TxClient,
-    payload: ContractCreateInput,
-    inmobiliariaId: number,
-    userId: number
-) => {
-    if (payload.propiedadId) {
-        return ensureExistingProperty(tx, inmobiliariaId, payload.propiedadId);
-    }
-
-    const propertyInput = payload.propiedad as PropertyCandidate | undefined;
-    if (!propertyInput) {
-        throw new AppError('Faltan los datos de la propiedad', {
-            statusCode: 400,
-            code: 'MISSING_PROPERTY_DATA'
-        });
-    }
-
-    return tx.propiedad.create({
-        data: {
-            ...propertyInput,
-            inmobiliariaId,
-            creadoPorId: userId
-        }
-    });
-};
-
-const createPeopleIfNeeded = async (
-    tx: TxClient,
-    candidates: PersonCandidate[] | undefined,
-    legacyIds: number[] | undefined,
-    inmobiliariaId: number,
-    userId: number,
-    roleLabel: 'propietario' | 'inquilino'
-) => {
-    if (candidates && candidates.length > 0) {
-        const resolvedIds: number[] = [];
-
-        for (const candidate of candidates) {
-            if (candidate.id) {
-                const existing = await tx.persona.findFirst({
-                    where: { id: candidate.id, inmobiliariaId }
-                });
-
-                if (!existing) {
-                    throw new AppError(`El ${roleLabel} seleccionado no existe o no pertenece a la inmobiliaria`, {
-                        statusCode: 400,
-                        code: 'INVALID_PERSON_REFERENCE'
-                    });
-                }
-
-                resolvedIds.push(existing.id);
-                continue;
-            }
-
-            if (candidate.dni) {
-                const duplicate = await tx.persona.findFirst({
-                    where: { dni: candidate.dni, inmobiliariaId }
-                });
-
-                if (duplicate) {
-                    throw new AppError(`Ya existe un ${roleLabel} con el DNI ${candidate.dni}`, {
-                        statusCode: 409,
-                        code: 'PERSON_DUPLICATE_DNI'
-                    });
-                }
-            }
-
-            const created = await tx.persona.create({
-                data: {
-                    nombreCompleto: candidate.nombreCompleto!,
-                    dni: candidate.dni,
-                    email: candidate.email,
-                    telefono: candidate.telefono,
-                    direccion: candidate.direccion,
-                    estado: candidate.estado || 'ACTIVO',
-                    inmobiliariaId,
-                    creadoPorId: userId
-                }
-            });
-
-            resolvedIds.push(created.id);
-        }
-
-        return resolvedIds;
-    }
-
-    if (!legacyIds || legacyIds.length === 0) {
-        throw new AppError(`Debe indicar al menos un ${roleLabel}`, {
-            statusCode: 400,
-            code: 'MISSING_CONTRACT_PARTY'
-        });
-    }
-
-    return ensureExistingPeople(tx, inmobiliariaId, legacyIds, roleLabel);
-};
-
-const buildContractCreateError = (error: unknown, req: AuthRequest) => {
-    if (error instanceof AppError) {
-        return error;
-    }
-
-    if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        return new AppError('No se pudo guardar el contrato por un conflicto de datos en la base', {
-            statusCode: 409,
-            code: 'DATABASE_CONFLICT',
-            details: {
-                prismaCode: error.code,
-                target: error.meta?.target,
-                requestId: req.requestId
-            }
-        });
-    }
-
-    if (error instanceof Prisma.PrismaClientValidationError) {
-        return new AppError('Los datos del contrato son inválidos para persistir en la base', {
-            statusCode: 400,
-            code: 'DATABASE_VALIDATION_ERROR',
-            details: { requestId: req.requestId }
-        });
-    }
-
-    return new AppError('Ocurrió un error inesperado al crear el contrato', {
-        statusCode: 500,
-        code: 'CONTRACT_CREATE_FAILED',
-        details: { requestId: req.requestId }
-    });
-};
-
 // Create contract
-router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), validateBody(contractCreateSchema), async (req, res) => {
+router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), validateUploadedFileContent, cleanupFailedUpload, validateBody(contractCreateSchema), async (req, res) => {
     const authReq = req as AuthRequest;
     const { inmobiliariaId, id: userId } = authReq.user!;
     const payload = req.body as ContractCreateInput;
-    const updateSettings = normalizeUpdateSettings(payload);
+    const updateSettings = normalizeContractUpdateSettings(payload);
+    const fechaInicio = parseDateOnly(payload.fechaInicio);
+    const fechaFin = parseDateOnly(payload.fechaFin);
 
-    const contractFilePath = req.file ? `inmobiliaria-${inmobiliariaId}/${req.file.filename}` : null;
+    const contractFilePath = await commitUploadedFile(req.file, inmobiliariaId);
 
     try {
         const contract = await prisma.$transaction(async (tx) => {
             const propiedad = await createPropertyIfNeeded(tx, payload, inmobiliariaId, userId);
+            await assertPropertyAvailableForPeriod(
+                tx,
+                propiedad.id,
+                fechaInicio,
+                fechaFin
+            );
+            const contratoAnterior = await assertValidContractRenewal(tx, {
+                contratoAnteriorId: payload.contratoAnteriorId,
+                inmobiliariaId,
+                propiedadId: propiedad.id,
+                fechaInicio
+            });
             const propietariosIds = await createPeopleIfNeeded(
                 tx,
                 payload.propietarios,
@@ -493,11 +103,16 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                 userId,
                 'inquilino'
             );
+            assertUniqueContractParties(propietariosIds, inquilinosIds);
 
             const newContract = await tx.contrato.create({
                 data: {
-                    fechaInicio: parseDateOnly(payload.fechaInicio),
-                    fechaFin: parseDateOnly(payload.fechaFin),
+                    fechaInicio,
+                    fechaFin,
+                    estado: getContractStateForDates(
+                        fechaInicio,
+                        fechaFin
+                    ),
                     fechaProximaActualizacion: updateSettings.fechaProximaActualizacion,
                     observaciones: payload.observaciones,
                     rutaArchivoContrato: contractFilePath,
@@ -514,6 +129,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                     administrado: Boolean(payload.administrado),
                     requiereActualizacion: updateSettings.requiereActualizacion,
                     creadoPorId: userId,
+                    contratoAnteriorId: contratoAnterior?.id,
                     propietarios: {
                         create: propietariosIds.map((id, index) => ({
                             personaId: id,
@@ -529,24 +145,47 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                 }
             });
 
+            if (contractFilePath) {
+                await createPrincipalContractDocument(tx, {
+                    contratoId: newContract.id,
+                    rutaArchivo: contractFilePath,
+                    nombreArchivo: req.file?.originalname,
+                    observacion: payload.observacionDocumento,
+                    creadoPorId: userId
+                });
+            }
+
+            await syncPropertyOccupancy(tx, [propiedad.id]);
+
             if (payload.honorarioInicial && Number(payload.honorarioInicial) > 0) {
+                const initialFeePaymentMethod = payload.honorarioInicialMetodoPago || 'EFECTIVO';
+                const initialFeeDate = argentinaTodayAsDate();
+                const initialFeeAccount = initialFeePaymentMethod === 'EFECTIVO' ? 'CAJA' : 'BANCO';
+                const initialFeeCurrency = resolveMoneda(payload.moneda);
+                await assertCashPeriodOpen(tx, {
+                    inmobiliariaId,
+                    fecha: initialFeeDate,
+                    cuenta: initialFeeAccount,
+                    moneda: initialFeeCurrency
+                });
                 await tx.movimientoCaja.create({
                     data: {
                         inmobiliariaId,
                         tipo: 'INGRESO',
                         concepto: `Honorarios por Alta de Contrato - ${propiedad.direccion}`,
                         monto: new Decimal(payload.honorarioInicial),
-                            moneda: resolveMoneda(payload.moneda),
-                        fecha: new Date(), // Utilizamos la fecha actual de cobro
+                        moneda: initialFeeCurrency,
+                        fecha: initialFeeDate,
                         creadoPorId: userId,
                         contratoId: newContract.id,
-                        metodoPago: payload.honorarioInicialMetodoPago || 'EFECTIVO'
+                        metodoPago: initialFeePaymentMethod,
+                        cuenta: initialFeeAccount
                     }
                 });
             }
 
-            return { newContract, propiedad };
-        });
+            return { newContract, propiedad, contratoAnterior };
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
         await auditService.log({
             usuarioId: userId,
@@ -554,12 +193,14 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
             accion: 'CREAR_CONTRATO',
             entidad: 'Contrato',
             entidadId: contract.newContract.id,
-            detalle: `Contrato creado para propiedad: ${contract.propiedad.direccion}`
+            detalle: contract.contratoAnterior
+                ? `Contrato creado como renovación del contrato #${contract.contratoAnterior.id} para propiedad: ${contract.propiedad.direccion}`
+                : `Contrato creado para propiedad: ${contract.propiedad.direccion}`
         });
 
         res.status(201).json(contract.newContract);
     } catch (error) {
-        const appError = buildContractCreateError(error, authReq);
+        const appError = buildContractCreateError(error, authReq.requestId);
         logger.error('Error creating contract', {
             requestId: authReq.requestId,
             inmobiliariaId,
@@ -577,72 +218,18 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
     }
 });
 
-// Get contract details
-router.get('/:id', requirePermission('contratos.ver'), async (req, res) => {
-    const { id: userId, role, inmobiliariaId } = (req as AuthRequest).user!;
-    const { id } = req.params;
-
-    try {
-        const contract = await prisma.contrato.findFirst({
-            where: { id: Number(id), inmobiliariaId },
-            include: {
-                propiedad: true,
-                inquilinos: {
-                    include: { persona: true },
-                    orderBy: { esPrincipal: 'desc' }
-                },
-                propietarios: {
-                    include: { persona: true },
-                    orderBy: { esPrincipal: 'desc' }
-                },
-                adjuntos: true,
-                creadoPor: {
-                    select: { id: true, nombreCompleto: true, email: true }
-                },
-                actualizadoPor: {
-                    select: { id: true, nombreCompleto: true, email: true }
-                },
-                actualizaciones: {
-                    orderBy: { fechaActualizacion: 'desc' },
-                    include: { usuario: true }
-                }
-            }
-        });
-
-        if (!contract) {
-            return res.status(404).json({ message: 'Contrato no encontrado' });
-        }
-
-        const auditLogs = await auditService.history({
-            inmobiliariaId,
-            entidad: 'Contrato',
-            entidadId: Number(id)
-        });
-
-        const canViewFiles = await userHasPermission(userId, role, 'contratos.archivos.ver');
-
-        res.json({
-            ...contract,
-            rutaArchivoContrato: canViewFiles ? contract.rutaArchivoContrato : null,
-            adjuntos: canViewFiles ? contract.adjuntos : [],
-            auditLogs
-        });
-    } catch (error) {
-        res.status(500).json({ message: 'Error al obtener contrato' });
-    }
-});
-
 // Add attachment
-router.post('/:id/adjuntos', requirePermission('contratos.editar'), upload.single('archivo'), async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
+router.post('/:id/adjuntos', requirePermission('contratos.editar'), upload.single('archivo'), validateUploadedFileContent, cleanupFailedUpload, validateBody(contractAttachmentSchema), async (req, res) => {
+    const { inmobiliariaId, id: userId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { nombreArchivo } = req.body;
+    const { nombreArchivo, tipo, fechaDocumento, observacion } = req.body;
 
     if (!req.file) {
         return res.status(400).json({ message: 'No se subió ningún archivo' });
     }
 
-    const filePath = `inmobiliaria-${inmobiliariaId}/${req.file.filename}`;
+    const filePath = await commitUploadedFile(req.file, inmobiliariaId);
+    let attachmentCreated = false;
 
     try {
         const contract = await prisma.contrato.findFirst({
@@ -650,16 +237,22 @@ router.post('/:id/adjuntos', requirePermission('contratos.editar'), upload.singl
         });
 
         if (!contract) {
+            await removeUploadedFile(filePath);
             return res.status(404).json({ message: 'Contrato no encontrado' });
         }
 
         const attachment = await prisma.adjuntoContrato.create({
             data: {
-                rutaArchivo: filePath,
+                rutaArchivo: filePath!,
                 nombreArchivo: nombreArchivo || req.file.originalname,
-                contratoId: Number(id)
+                contratoId: Number(id),
+                tipo: tipo === 'ADENDA' ? TipoDocumentoContrato.ADENDA : TipoDocumentoContrato.ADJUNTO,
+                fechaDocumento: fechaDocumento ? parseDateOnly(fechaDocumento) : argentinaTodayAsDate(),
+                observacion: observacion || null,
+                creadoPorId: userId
             }
         });
+        attachmentCreated = true;
 
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -667,40 +260,55 @@ router.post('/:id/adjuntos', requirePermission('contratos.editar'), upload.singl
             accion: 'AGREGAR_ADJUNTO_CONTRATO',
             entidad: 'Contrato',
             entidadId: Number(id),
-            detalle: `Adjunto agregado: ${attachment.nombreArchivo || req.file.originalname}`
+            detalle: `${attachment.tipo === TipoDocumentoContrato.ADENDA ? 'Adenda' : 'Adjunto'} agregado: ${attachment.nombreArchivo || req.file.originalname}`
         });
 
         res.status(201).json(attachment);
     } catch (error) {
+        if (!attachmentCreated) await removeUploadedFile(filePath);
         res.status(500).json({ message: 'Error al subir adjunto' });
     }
 });
 
 // Soft delete (Move to trash)
 router.delete('/:id', requirePermission('contratos.eliminar'), async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
+    const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
     const { id } = req.params;
 
     try {
-        const contract = await prisma.contrato.findFirst({
-            where: { id: Number(id), inmobiliariaId }
-        });
+        const contract = await prisma.$transaction(async tx => {
+            const current = await tx.contrato.findFirst({ where: { id: Number(id), inmobiliariaId } });
+            if (!current) throw new AppError('Contrato no encontrado', { statusCode: 404, code: 'CONTRACT_NOT_FOUND' });
+            if (current.estado === 'PAPELERA') throw new AppError('El contrato ya está en la papelera', { statusCode: 409, code: 'CONTRACT_ALREADY_IN_TRASH' });
 
-        if (!contract) {
-            return res.status(404).json({ message: 'Contrato no encontrado' });
-        }
-
-        await prisma.contrato.update({
-            where: { id: Number(id) },
-            data: {
-                estado: 'PAPELERA',
-                eliminadoEn: new Date(),
-                actualizadoPorId: (req as AuthRequest).user!.id
+            const [history, obligations] = await Promise.all([
+                getContractFinancialHistory(tx, current.id),
+                getContractOutstandingObligations(tx, current.id)
+            ]);
+            if (hasContractFinancialHistory(history) || hasContractOutstandingObligations(obligations)) {
+                throw new AppError('El contrato tiene historial financiero u obligaciones pendientes y no puede enviarse a la papelera. Usá la rescisión con motivo después de regularizar los saldos.', {
+                    statusCode: 409,
+                    code: 'CONTRACT_REQUIRES_RESCISSION',
+                    details: { history, obligations }
+                });
             }
-        });
-        
+
+            await tx.contrato.update({
+                where: { id: current.id },
+                data: {
+                    estadoAnteriorPapelera: current.estado,
+                    estado: 'PAPELERA',
+                    eliminadoEn: new Date(),
+                    actualizadoPorId: usuarioId,
+                    version: { increment: 1 }
+                }
+            });
+            await syncPropertyOccupancy(tx, [current.propiedadId]);
+            return current;
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
         await auditService.log({
-            usuarioId: (req as AuthRequest).user!.id,
+            usuarioId,
             inmobiliariaId,
             accion: 'ELIMINAR_CONTRATO',
             entidad: 'Contrato',
@@ -710,7 +318,74 @@ router.delete('/:id', requirePermission('contratos.eliminar'), async (req, res) 
 
         res.json({ message: 'Contrato movido a la papelera' });
     } catch (error) {
+        if (error instanceof AppError) {
+            return res.status(error.statusCode).json({ message: error.message, code: error.code, details: error.details });
+        }
         res.status(500).json({ message: 'Error al eliminar contrato' });
+    }
+});
+
+// La rescisión conserva el vínculo contractual y su trazabilidad. No sustituye
+// pagos, liquidaciones ni planes pendientes: éstos deben regularizarse antes.
+router.post('/:id/rescindir', requirePermission('contratos.editar'), requireRecentAuthentication, validateBody(contractRescissionSchema), async (req, res) => {
+    const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
+    const contractId = Number(req.params.id);
+    const { motivo, fechaRescision, version } = req.body;
+
+    try {
+        const updated = await prisma.$transaction(async tx => {
+            const contract = await tx.contrato.findFirst({ where: { id: contractId, inmobiliariaId } });
+            if (!contract) throw new AppError('Contrato no encontrado', { statusCode: 404, code: 'CONTRACT_NOT_FOUND' });
+            if (contract.version !== version) assertOptimisticUpdate(0, version, contract.version);
+            if (contract.estado === 'PAPELERA') throw new AppError('Restaurá el contrato antes de rescindirlo', { statusCode: 409, code: 'CONTRACT_IN_TRASH' });
+            if (contract.estado === 'RESCINDIDO') throw new AppError('El contrato ya fue rescindido', { statusCode: 409, code: 'CONTRACT_ALREADY_RESCINDED' });
+            if (contract.estado === 'FINALIZADO') throw new AppError('Un contrato finalizado no puede rescindirse', { statusCode: 409, code: 'CONTRACT_ALREADY_FINALIZED' });
+
+            const effectiveDate = fechaRescision ? parseDateOnly(fechaRescision) : argentinaTodayAsDate();
+            if (effectiveDate < contract.fechaInicio) {
+                throw new AppError('La fecha de rescisión no puede ser anterior al inicio del contrato', { statusCode: 400, code: 'INVALID_RESCISSION_DATE' });
+            }
+            if (effectiveDate > argentinaTodayAsDate()) {
+                throw new AppError('La fecha de rescisión no puede ser futura', { statusCode: 400, code: 'INVALID_RESCISSION_DATE' });
+            }
+            await assertContractCanBeRescinded(tx, contract.id);
+
+            const claim = await tx.contrato.updateMany({
+                where: { id: contract.id, inmobiliariaId, version },
+                data: {
+                    estado: 'RESCINDIDO',
+                    fechaRescision: effectiveDate,
+                    motivoRescision: motivo,
+                    rescindidoPorId: usuarioId,
+                    actualizadoPorId: usuarioId,
+                    eliminadoEn: null,
+                    estadoAnteriorPapelera: null,
+                    version: { increment: 1 }
+                }
+            });
+            const currentVersion = claim.count === 0
+                ? (await tx.contrato.findFirst({ where: { id: contract.id, inmobiliariaId }, select: { version: true } }))?.version
+                : undefined;
+            assertOptimisticUpdate(claim.count, version, currentVersion);
+            await syncPropertyOccupancy(tx, [contract.propiedadId]);
+            return tx.contrato.findUniqueOrThrow({ where: { id: contract.id } });
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+        await auditService.log({
+            usuarioId,
+            inmobiliariaId,
+            accion: 'RESCINDIR_CONTRATO',
+            entidad: 'Contrato',
+            entidadId: contractId,
+            severidad: 'WARNING',
+            detalle: compactChanges({ motivo: { anterior: null, nuevo: motivo }, fechaRescision: { anterior: null, nuevo: updated.fechaRescision } })
+        });
+        res.json({ message: 'Contrato rescindido correctamente', version: updated.version, fechaRescision: updated.fechaRescision });
+    } catch (error) {
+        if (error instanceof AppError) {
+            return res.status(error.statusCode).json({ message: error.message, code: error.code, details: error.details });
+        }
+        res.status(500).json({ message: 'No se pudo rescindir el contrato' });
     }
 });
 
@@ -728,14 +403,33 @@ router.post('/:id/restaurar', requirePermission('contratos.restaurar'), async (r
             return res.status(404).json({ message: 'Contrato no encontrado' });
         }
 
-        await prisma.contrato.update({
-            where: { id: Number(id) },
-            data: {
-                estado: 'ACTIVO',
-                eliminadoEn: null,
-                actualizadoPorId: (req as AuthRequest).user!.id
+        if (contract.estado !== 'PAPELERA') {
+            return res.status(409).json({ message: 'Solo se pueden restaurar contratos que estén en la papelera' });
+        }
+
+        const previousState = contract.estadoAnteriorPapelera && contract.estadoAnteriorPapelera !== 'PAPELERA'
+            ? contract.estadoAnteriorPapelera
+            : null;
+        const restoredState = previousState === 'FINALIZADO' || previousState === 'RESCINDIDO'
+            ? previousState
+            : getContractStateForDates(contract.fechaInicio, contract.fechaFin);
+
+        await prisma.$transaction(async tx => {
+            if (restoredState === 'ACTIVO' || restoredState === 'PROGRAMADO') {
+                await assertPropertyAvailableForPeriod(tx, contract.propiedadId, contract.fechaInicio, contract.fechaFin, contract.id);
             }
-        });
+            await tx.contrato.update({
+                where: { id: Number(id) },
+                data: {
+                    estado: restoredState,
+                    estadoAnteriorPapelera: null,
+                    eliminadoEn: null,
+                    actualizadoPorId: (req as AuthRequest).user!.id,
+                    version: { increment: 1 }
+                }
+            });
+            await syncPropertyOccupancy(tx, [contract.propiedadId]);
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
         
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -747,6 +441,9 @@ router.post('/:id/restaurar', requirePermission('contratos.restaurar'), async (r
 
         res.json({ message: 'Contrato restaurado con éxito' });
     } catch (error) {
+        if (error instanceof AppError) {
+            return res.status(error.statusCode).json({ message: error.message, code: error.code });
+        }
         res.status(500).json({ message: 'Error al restaurar contrato' });
     }
 });
@@ -757,17 +454,7 @@ router.delete('/:id/permanente', requirePermission('contratos.eliminar'), async 
     const { id } = req.params;
 
     try {
-        const contract = await prisma.contrato.findFirst({
-            where: { id: Number(id), inmobiliariaId }
-        });
-
-        if (!contract) {
-            return res.status(404).json({ message: 'Contrato no encontrado' });
-        }
-
-        await prisma.contrato.delete({
-            where: { id: Number(id) }
-        });
+        const result = await deleteContractPermanently(Number(id), inmobiliariaId);
         
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -778,52 +465,17 @@ router.delete('/:id/permanente', requirePermission('contratos.eliminar'), async 
             detalle: 'Eliminación definitiva del contrato'
         });
 
-        res.json({ message: 'Contrato eliminado permanentemente' });
+        res.json({ message: 'Contrato eliminado permanentemente', ...result });
     } catch (error) {
+        if (error instanceof AppError) {
+            return res.status(error.statusCode).json({ message: error.message, code: error.code, details: error.details });
+        }
         res.status(500).json({ message: 'Error al eliminar contrato permanentemente' });
     }
 });
 
-// Update status
-router.patch('/:id/estado', requirePermission('contratos.editar'), validateBody(contractStatusSchema), async (req, res) => {
-    const { inmobiliariaId } = (req as AuthRequest).user!;
-    const { id } = req.params;
-    const { estado } = req.body;
-
-    try {
-        const contract = await prisma.contrato.findFirst({
-            where: { id: Number(id), inmobiliariaId }
-        });
-
-        if (!contract) {
-            return res.status(404).json({ message: 'Contrato no encontrado' });
-        }
-
-        await prisma.contrato.update({
-            where: { id: Number(id) },
-            data: {
-                estado,
-                actualizadoPorId: (req as AuthRequest).user!.id
-            }
-        });
-
-        await auditService.log({
-            usuarioId: (req as AuthRequest).user!.id,
-            inmobiliariaId,
-            accion: 'CAMBIAR_ESTADO_CONTRATO',
-            entidad: 'Contrato',
-            entidadId: Number(id),
-            detalle: compactChanges({ estado: { anterior: contract.estado, nuevo: estado } })
-        });
-
-        res.json({ message: `Estado del contrato actualizado a ${estado}` });
-    } catch (error) {
-        res.status(500).json({ message: 'Error al actualizar estado del contrato' });
-    }
-});
-
 // Update contract
-router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), validateBody(contractUpdateSchema), async (req, res) => {
+router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), validateUploadedFileContent, cleanupFailedUpload, validateBody(contractUpdateSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const {
@@ -840,8 +492,12 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         tipoAjuste,
         administrado,
         requiereActualizacion,
-        moneda
+        moneda,
+        observacionDocumento,
+        version
     } = req.body;
+
+    const uploadedFilePath = await commitUploadedFile(req.file, inmobiliariaId);
 
     try {
         const contract = await prisma.contrato.findFirst({
@@ -850,6 +506,14 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
 
         if (!contract) {
             return res.status(404).json({ message: 'Contrato no encontrado' });
+        }
+
+        if (contract.version !== version) {
+            assertOptimisticUpdate(0, version, contract.version);
+        }
+
+        if (contract.estado === 'PAPELERA') {
+            return res.status(409).json({ message: 'Restaurá el contrato antes de editarlo' });
         }
 
         const updateData: any = {
@@ -948,21 +612,82 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
             updateData.administrado = administrado === 'true' || administrado === true;
             changes.administrado = { anterior: contract.administrado, nuevo: updateData.administrado };
         }
-        if (req.file) {
-            updateData.rutaArchivoContrato = `inmobiliaria-${inmobiliariaId}/${req.file.filename}`;
+        if (uploadedFilePath) {
+            updateData.rutaArchivoContrato = uploadedFilePath;
             changes.rutaArchivoContrato = { anterior: contract.rutaArchivoContrato, nuevo: updateData.rutaArchivoContrato };
         }
 
-        const updated = await prisma.contrato.update({
-            where: { id: Number(id) },
-            data: updateData,
-            include: { 
-                propiedad: true, 
-                inquilinos: { include: { persona: true } }, 
-                propietarios: { include: { persona: true } }, 
-                adjuntos: true 
+        const nextStartDate = updateData.fechaInicio || contract.fechaInicio;
+        const nextEndDate = updateData.fechaFin || contract.fechaFin;
+        if (nextStartDate > nextEndDate) {
+            throw new AppError('La fecha de fin debe ser posterior o igual a la fecha de inicio', {
+                statusCode: 400,
+                code: 'INVALID_CONTRACT_DATES'
+            });
+        }
+
+        if (contract.estado === 'ACTIVO' || contract.estado === 'PROGRAMADO') {
+            updateData.estado = getContractStateForDates(nextStartDate, nextEndDate);
+            if (updateData.estado !== contract.estado) {
+                changes.estado = { anterior: contract.estado, nuevo: updateData.estado };
             }
-        });
+        }
+
+        const rentChanged = updateData.montoAlquiler !== undefined
+            && !new Decimal(updateData.montoAlquiler).equals(contract.montoAlquiler);
+
+        const updated = await prisma.$transaction(async tx => {
+            if (updateData.estado === 'ACTIVO' || updateData.estado === 'PROGRAMADO') {
+                await assertPropertyAvailableForPeriod(tx, contract.propiedadId, nextStartDate, nextEndDate, contract.id);
+            }
+            const claim = await tx.contrato.updateMany({
+                where: { id: Number(id), inmobiliariaId, version },
+                data: { ...updateData, version: { increment: 1 } }
+            });
+            const currentVersion = claim.count === 0
+                ? (await tx.contrato.findFirst({ where: { id: Number(id), inmobiliariaId }, select: { version: true } }))?.version
+                : undefined;
+            assertOptimisticUpdate(claim.count, version, currentVersion);
+            if (rentChanged) {
+                await tx.actualizacionContrato.create({
+                    data: {
+                        contratoId: contract.id,
+                        montoAnterior: contract.montoAlquiler,
+                        montoNuevo: updateData.montoAlquiler,
+                        moneda: contract.moneda,
+                        fechaProximaAnterior: contract.fechaProximaActualizacion,
+                        fechaProximaNueva: updateData.fechaProximaActualizacion
+                            || contract.fechaProximaActualizacion
+                            || argentinaTodayAsDate(),
+                        observaciones: 'Cambio de alquiler registrado desde la edición del contrato',
+                        usuarioId: (req as AuthRequest).user!.id
+                    }
+                });
+            }
+            if (uploadedFilePath) {
+                await createPrincipalContractDocument(tx, {
+                    contratoId: contract.id,
+                    rutaArchivo: uploadedFilePath,
+                    nombreArchivo: req.file?.originalname,
+                    observacion: observacionDocumento,
+                    creadoPorId: (req as AuthRequest).user!.id
+                });
+            }
+            const result = await tx.contrato.findUniqueOrThrow({
+                where: { id: Number(id) },
+                include: {
+                    propiedad: true,
+                    inquilinos: { include: { persona: true } },
+                    propietarios: { include: { persona: true } },
+                    adjuntos: {
+                        include: { creadoPor: { select: { id: true, nombreCompleto: true } } },
+                        orderBy: [{ tipo: 'asc' }, { versionDocumento: 'desc' }, { id: 'desc' }]
+                    }
+                }
+            });
+            await syncPropertyOccupancy(tx, [contract.propiedadId]);
+            return result;
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
         
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -975,6 +700,10 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
 
         res.json(updated);
     } catch (error) {
+        if (uploadedFilePath) await removeUploadedFile(uploadedFilePath);
+        if (error instanceof AppError) {
+            return res.status(error.statusCode).json({ message: error.message, code: error.code, details: error.details });
+        }
         console.error(error);
         res.status(500).json({ message: 'Error al actualizar contrato' });
     }
@@ -984,7 +713,7 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
 router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBody(contractRentUpdateSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { montoNuevo, fechaProximaNueva, observaciones } = req.body;
+    const { montoNuevo, fechaProximaNueva, observaciones, version } = req.body;
 
     try {
         const contrato = await prisma.contrato.findFirst({
@@ -995,12 +724,30 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
             return res.status(404).json({ message: 'Contrato no encontrado' });
         }
 
+        if (contrato.version !== version) {
+            assertOptimisticUpdate(0, version, contrato.version);
+        }
+
         if (!contrato.requiereActualizacion) {
             return res.status(400).json({ message: 'Este contrato no tiene actualización de alquiler programada.' });
         }
 
         const result = await prisma.$transaction(async (tx) => {
-            // 1. Crear registro de historia
+            const claim = await tx.contrato.updateMany({
+                where: { id: Number(id), inmobiliariaId, version },
+                data: {
+                    montoAlquiler: new Decimal(montoNuevo),
+                    fechaProximaActualizacion: parseDateOnly(fechaProximaNueva),
+                    actualizadoPorId: (req as AuthRequest).user!.id,
+                    version: { increment: 1 }
+                }
+            });
+            const currentVersion = claim.count === 0
+                ? (await tx.contrato.findFirst({ where: { id: Number(id), inmobiliariaId }, select: { version: true } }))?.version
+                : undefined;
+            assertOptimisticUpdate(claim.count, version, currentVersion);
+
+            // Registrar la historia sólo después de reservar la versión del contrato.
             await tx.actualizacionContrato.create({
                 data: {
                     contratoId: Number(id),
@@ -1014,14 +761,8 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
                 }
             });
 
-            // 2. Actualizar el contrato
-            const actualizado = await tx.contrato.update({
+            const actualizado = await tx.contrato.findUniqueOrThrow({
                 where: { id: Number(id) },
-                data: {
-                    montoAlquiler: new Decimal(montoNuevo),
-                    fechaProximaActualizacion: parseDateOnly(fechaProximaNueva),
-                    actualizadoPorId: (req as AuthRequest).user!.id
-                },
                 include: {
                     propiedad: true,
                     inquilinos: { include: { persona: true } },
@@ -1048,6 +789,9 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
 
         res.json(result);
     } catch (error) {
+        if (error instanceof AppError) {
+            return res.status(error.statusCode).json({ message: error.message, code: error.code, details: error.details });
+        }
         console.error('Error al actualizar monto de contrato:', error);
         res.status(500).json({ message: 'Error al actualizar contrato' });
     }

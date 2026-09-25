@@ -1,6 +1,6 @@
 import { EstadoLiquidacion } from '@prisma/client';
-import { Decimal } from '@prisma/client/runtime/library';
 import { prisma } from '../prisma';
+import { getTenantSettlement } from './tenant-credit.service';
 
 export async function getContractDebtSummary(
     contratoId: number,
@@ -11,24 +11,26 @@ export async function getContractDebtSummary(
         where: {
             contratoId,
             inmobiliariaId,
-            estado: { not: EstadoLiquidacion.BORRADOR },
+            estado: EstadoLiquidacion.CONFIRMADA,
             ...(excludeLiquidacionId ? { id: { not: excludeLiquidacionId } } : {})
         },
         include: {
-            pagos: true
+            pagos: { where: { anuladoEn: null } },
+            aplicacionesCredito: true
         },
         orderBy: { periodo: 'asc' }
     });
 
     const detalle = liquidaciones.map(liq => {
-        const totalPagado = liq.pagos.reduce((acc, p) => acc.plus(p.monto), new Decimal(0));
-        const deuda = new Decimal(liq.netoACobrar.toString()).minus(totalPagado);
+        const { pagos, creditosAplicados, saldo } = getTenantSettlement(liq);
 
         return {
+            id: liq.id,
             periodo: liq.periodo,
             neto: Number(liq.netoACobrar),
-            pagado: Number(totalPagado),
-            deuda: deuda.greaterThan(0) ? Number(deuda) : 0,
+            pagado: Number(pagos),
+            creditosAplicados: Number(creditosAplicados),
+            deuda: Number(saldo),
             moneda: liq.moneda,
             estado: liq.estado
         };

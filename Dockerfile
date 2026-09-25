@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 ENV PRISMA_ENGINES_CACHE_DIR=/app/prisma-engines
@@ -18,12 +18,13 @@ RUN npx prisma generate
 
 RUN npm run build
 
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 RUN apk add --no-cache openssl postgresql-client su-exec
 ENV PORT=3000
 ENV UPLOAD_DIR=/app/uploads
+ENV BACKUPS_DIR=/app/backups
 ENV NODE_ENV=production
 ENV PRISMA_ENGINES_CACHE_DIR=/app/prisma-engines
 
@@ -38,6 +39,7 @@ RUN mkdir -p /app/uploads /app/backups /app/.seed-data \
 COPY docker-entrypoint.sh /app/
 RUN chmod +x /app/docker-entrypoint.sh
 EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD wget -qO- http://127.0.0.1:3000/health/ready >/dev/null || exit 1
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["node", "dist/server.js"]

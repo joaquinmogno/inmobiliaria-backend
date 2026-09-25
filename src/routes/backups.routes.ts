@@ -1,13 +1,15 @@
-import { Router } from 'express';
-import { authenticateToken } from '../middlewares/auth.middleware';
+import { NextFunction, Router } from 'express';
+import { authenticateToken, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { AuthRequest } from '../middlewares/auth.middleware';
-import { requirePermission } from '../middlewares/permissions.middleware';
+import { requireAdmin } from '../middlewares/permissions.middleware';
 import { auditService } from '../services/audit.service';
-import { decryptFileToBuffer, encryptFile, getClientIp, getUserAgent } from '../services/security.service';
+import { decryptFileToFile, encryptFile, getClientIp, getUserAgent } from '../services/security.service';
 import path from 'path';
 import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import crypto from 'crypto';
+import os from 'os';
 
 const execFilePromise = promisify(execFile);
 const router = Router();
@@ -17,8 +19,18 @@ const BACKUPS_ROOT = process.env.BACKUPS_DIR || path.join(__dirname, '../../../b
 const DB_BACKUPS_DIR = path.join(BACKUPS_ROOT, 'db');
 const UPLOADS_BACKUPS_DIR = path.join(BACKUPS_ROOT, 'uploads');
 const BACKUP_FILENAME_PATTERN = /^[a-zA-Z0-9._-]+\.enc$/;
+let generationInProgress = false;
 
-router.use(authenticateToken);
+router.use(authenticateToken, requireAdmin);
+
+const beginGeneration = () => {
+    if (generationInProgress) throw Object.assign(new Error('Ya hay un backup en curso'), { statusCode: 429 });
+    generationInProgress = true;
+};
+
+const endGeneration = () => {
+    generationInProgress = false;
+};
 
 const getBackupDir = (type: string) => {
     if (type === 'db') return DB_BACKUPS_DIR;
@@ -37,6 +49,25 @@ const resolveBackupPath = (type: string, filename: string) => {
     return resolvedFile;
 };
 
+const getDownloadErrorCode = (error: unknown) => {
+    if (error && typeof error === 'object' && 'code' in error) {
+        const code = String((error as { code?: unknown }).code || '').trim();
+        if (/^[A-Z0-9_-]{1,50}$/i.test(code)) return code;
+    }
+    return 'BACKUP_DOWNLOAD_ERROR';
+};
+
+const getDownloadAuditDetail = (params: {
+    type: string;
+    filename: string;
+    requestId?: string;
+    error?: unknown;
+}) => [
+    `archivo=${params.type}/${params.filename}`,
+    params.requestId ? `requestId=${params.requestId}` : undefined,
+    params.error ? `errorCode=${getDownloadErrorCode(params.error)}` : undefined
+].filter(Boolean).join('; ');
+
 const getPgDumpUrl = (databaseUrl: string) => {
     const url = new URL(databaseUrl);
     url.searchParams.delete('schema');
@@ -44,7 +75,7 @@ const getPgDumpUrl = (databaseUrl: string) => {
 };
 
 // Listar todos los backups
-router.get('/', requirePermission('configuracion.backups.ver'), async (_req, res) => {
+router.get('/', async (_req, res) => {
     try {
         const getFiles = (dir: string, type: 'db' | 'uploads') => {
             if (!fs.existsSync(dir)) return [];
@@ -74,14 +105,18 @@ router.get('/', requirePermission('configuracion.backups.ver'), async (_req, res
 });
 
 // Generar backup manual de DB
-router.post('/db', requirePermission('configuracion.backups.crear'), async (req, res) => {
+router.post('/db', requireRecentAuthentication, async (req, res) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `manual-db-backup-${timestamp}.sql`;
     const filepath = path.join(DB_BACKUPS_DIR, filename);
     const encryptedFilename = `${filename}.enc`;
     const encryptedPath = path.join(DB_BACKUPS_DIR, encryptedFilename);
 
+    let completed = false;
+    let generationAcquired = false;
     try {
+        beginGeneration();
+        generationAcquired = true;
         if (!fs.existsSync(DB_BACKUPS_DIR)) fs.mkdirSync(DB_BACKUPS_DIR, { recursive: true });
 
         // Extraer credenciales de la URL de la base de datos (o usar variables de entorno)
@@ -102,7 +137,7 @@ router.post('/db', requirePermission('configuracion.backups.crear'), async (req,
         }
 
         await encryptFile(filepath, encryptedPath);
-        fs.unlinkSync(filepath);
+        completed = true;
 
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -118,12 +153,23 @@ router.post('/db', requirePermission('configuracion.backups.crear'), async (req,
         res.status(201).json({ message: 'Backup de base de datos generado y cifrado', filename: encryptedFilename });
     } catch (error: any) {
         console.error('Error generating manual DB backup:', error);
-        res.status(500).json({ message: 'Error al generar backup', details: error.message || String(error) });
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId,
+            accion: 'CREAR_BACKUP_DB_FALLIDO', entidad: 'Backup', resultado: 'FALLIDO',
+            ipAddress: getClientIp(req), userAgent: getUserAgent(req), severidad: 'CRITICAL'
+        });
+        const status = Number(error?.statusCode) || 500;
+        res.status(status).json({ message: status === 500 ? 'Error al generar backup' : error.message });
+    } finally {
+        if (generationAcquired) endGeneration();
+        await fs.promises.unlink(filepath).catch(() => undefined);
+        if (!completed) await fs.promises.unlink(encryptedPath).catch(() => undefined);
     }
 });
 
 // Generar backup manual de Uploads
-router.post('/uploads', requirePermission('configuracion.backups.crear'), async (req, res) => {
+router.post('/uploads', requireRecentAuthentication, async (req, res) => {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const sourceDir = process.env.UPLOAD_DIR || path.join(__dirname, '../../../uploads');
     const sourceName = path.basename(sourceDir);
@@ -133,7 +179,11 @@ router.post('/uploads', requirePermission('configuracion.backups.crear'), async 
     const encryptedFilename = `${filename}.enc`;
     const encryptedPath = path.join(UPLOADS_BACKUPS_DIR, encryptedFilename);
 
+    let completed = false;
+    let generationAcquired = false;
     try {
+        beginGeneration();
+        generationAcquired = true;
         if (!fs.existsSync(sourceDir)) return res.status(404).json({ message: 'Carpeta de uploads no encontrada' });
         if (!fs.existsSync(UPLOADS_BACKUPS_DIR)) fs.mkdirSync(UPLOADS_BACKUPS_DIR, { recursive: true });
 
@@ -141,7 +191,7 @@ router.post('/uploads', requirePermission('configuracion.backups.crear'), async 
             maxBuffer: 1024 * 1024 * 10
         });
         await encryptFile(filepath, encryptedPath);
-        fs.unlinkSync(filepath);
+        completed = true;
 
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -155,44 +205,87 @@ router.post('/uploads', requirePermission('configuracion.backups.crear'), async 
         });
         
         res.status(201).json({ message: 'Backup de archivos generado y cifrado', filename: encryptedFilename });
-    } catch (error) {
+    } catch (error: any) {
         console.error('Error generating manual uploads backup:', error);
-        res.status(500).json({ message: 'Error al generar backup de archivos' });
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId,
+            accion: 'CREAR_BACKUP_UPLOADS_FALLIDO', entidad: 'Backup', resultado: 'FALLIDO',
+            ipAddress: getClientIp(req), userAgent: getUserAgent(req), severidad: 'CRITICAL'
+        });
+        const status = Number(error?.statusCode) || 500;
+        res.status(status).json({ message: status === 500 ? 'Error al generar backup de archivos' : error.message });
+    } finally {
+        if (generationAcquired) endGeneration();
+        await fs.promises.unlink(filepath).catch(() => undefined);
+        if (!completed) await fs.promises.unlink(encryptedPath).catch(() => undefined);
     }
 });
 
 // Descargar un backup
-router.get('/download/:type/:filename', requirePermission('configuracion.backups.descargar'), async (req, res) => {
+router.get('/download/:type/:filename', requireRecentAuthentication, async (req, res, next: NextFunction) => {
     const { type, filename } = req.params as { type: string, filename: string };
     const filepath = resolveBackupPath(type, filename);
+    const authRequest = req as AuthRequest;
 
-    if (!filepath || !fs.existsSync(filepath)) {
-        return res.status(404).json({ message: 'Archivo no encontrado' });
-    }
-
-    try {
-        const data = await decryptFileToBuffer(filepath);
+    const recordDownload = async (resultado: 'EXITO' | 'FALLIDO', error?: unknown) => {
         await auditService.log({
-            usuarioId: (req as AuthRequest).user!.id,
-            inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId,
+            usuarioId: authRequest.user!.id,
+            inmobiliariaId: authRequest.user!.inmobiliariaId,
             accion: 'DESCARGAR_BACKUP',
             entidad: 'Backup',
-            detalle: `${type}/${filename}`,
+            detalle: getDownloadAuditDetail({ type, filename, requestId: authRequest.requestId, error }),
+            resultado,
             ipAddress: getClientIp(req),
             userAgent: getUserAgent(req),
             severidad: 'CRITICAL'
         });
-        const downloadName = filename.replace(/\.enc$/, '');
-        res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.send(data);
+    };
+
+    if (!filepath || !fs.existsSync(filepath)) {
+        await recordDownload('FALLIDO', { code: 'BACKUP_NOT_FOUND' });
+        return res.status(404).json({ message: 'Archivo no encontrado' });
+    }
+
+    const downloadName = filename.replace(/\.enc$/, '');
+    // Express ignora por defecto los archivos cuyo basename comienza con punto.
+    // El temporal conserva además la extensión real para enviar un Content-Type útil.
+    const temporaryPath = path.join(os.tmpdir(), `propcontrol-download-${crypto.randomUUID()}-${downloadName}`);
+
+    try {
+        await decryptFileToFile(filepath, temporaryPath);
+        res.download(temporaryPath, downloadName, error => {
+            void (async () => {
+                await fs.promises.unlink(temporaryPath).catch(() => undefined);
+
+                if (error) {
+                    await recordDownload('FALLIDO', error);
+                    if (!res.headersSent) {
+                        res.status(500).json({
+                            message: 'Error al enviar backup',
+                            requestId: authRequest.requestId
+                        });
+                        return;
+                    }
+                    next(error);
+                    return;
+                }
+
+                await recordDownload('EXITO');
+            })().catch(next);
+        });
     } catch (error) {
-        res.status(500).json({ message: 'Error al descifrar backup' });
+        await fs.promises.unlink(temporaryPath).catch(() => undefined);
+        await recordDownload('FALLIDO', error);
+        res.status(500).json({
+            message: 'Error al preparar backup para la descarga',
+            requestId: authRequest.requestId
+        });
     }
 });
 
 // Eliminar un backup
-router.delete('/:type/:filename', requirePermission('configuracion.backups.eliminar'), (req, res) => {
+router.delete('/:type/:filename', requireRecentAuthentication, (req, res) => {
     const { type, filename } = req.params as { type: string, filename: string };
     const filepath = resolveBackupPath(type, filename);
 

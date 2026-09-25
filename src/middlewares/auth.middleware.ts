@@ -9,15 +9,28 @@ export interface AuthRequest extends Request {
     user?: {
         id: number;
         email: string;
-        role: string;
+        tipo: 'ADMIN' | 'USUARIO';
         inmobiliariaId: number;
         mustChangePassword?: boolean;
     };
 }
 
+const RECENT_AUTH_MS = 15 * 60 * 1000;
+
+export const requireRecentAuthentication = (req: Request, res: Response, next: NextFunction) => {
+    const authenticatedAt = (req as Request & { sessionAuthenticatedAt?: Date }).sessionAuthenticatedAt;
+    if (!authenticatedAt || Date.now() - authenticatedAt.getTime() > RECENT_AUTH_MS) {
+        return res.status(403).json({ message: 'Por seguridad, volvé a confirmar tu contraseña', code: 'REAUTHENTICATION_REQUIRED' });
+    }
+    next();
+};
+
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export const authenticateToken = async (req: Request, res: Response, next: NextFunction) => {
+    const alreadyAuthenticated = req as AuthRequest;
+    if (alreadyAuthenticated.user && alreadyAuthenticated.sessionId) return next();
+
     const sessionToken = req.cookies?.[SESSION_COOKIE];
 
     if (!sessionToken || typeof sessionToken !== 'string') {
@@ -39,7 +52,7 @@ export const authenticateToken = async (req: Request, res: Response, next: NextF
             return res.status(401).json({ message: 'Sesión revocada' });
         }
 
-        if (user.rol !== 'SUPERADMIN' && (!user.inmobiliaria || !user.inmobiliaria.activa)) {
+        if (!user.inmobiliaria || !user.inmobiliaria.activa) {
             return res.status(403).json({ message: 'Cuenta suspendida, contacte al administrador' });
         }
 
@@ -71,11 +84,12 @@ export const authenticateToken = async (req: Request, res: Response, next: NextF
         }).catch(() => undefined);
 
         (req as AuthRequest).sessionId = session.id;
+        (req as Request & { sessionAuthenticatedAt?: Date }).sessionAuthenticatedAt = session.authenticatedAt || session.createdAt;
         (req as AuthRequest).csrfToken = req.cookies?.[CSRF_COOKIE];
         (req as AuthRequest).user = {
             id: user.id,
             email: user.email,
-            role: user.rol,
+            tipo: user.tipo,
             inmobiliariaId: user.inmobiliariaId,
             mustChangePassword: user.mustChangePassword
         };
