@@ -22,7 +22,6 @@ const movimientoCajaSchema = z.object({
     moneda: z.enum(['ARS', 'USD']).optional().default('ARS'),
     fecha: dateOnlyString('La fecha'),
     metodoPago: paymentMethodSchema.optional().default('EFECTIVO'),
-    cuenta: z.enum(['CAJA', 'BANCO']).optional(),
     observaciones: optionalText(1000)
 });
 
@@ -256,16 +255,15 @@ router.post('/cierres/:id/reabrir', authenticateToken, requirePermission('caja_c
 // Crear nuevo movimiento manual
 router.post('/', authenticateToken, requirePermission('caja_chica.crear'), validateBody(movimientoCajaSchema), async (req, res) => {
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
-    const { tipo, concepto, monto, moneda, fecha, metodoPago, cuenta, observaciones } = req.body;
+    const { tipo, concepto, monto, moneda, fecha, metodoPago, observaciones } = req.body;
 
     if (!tipo || !concepto || !monto || !fecha) {
         return res.status(400).json({ message: 'Faltan campos obligatorios' });
     }
 
-    // Auto-asignar cuenta si no se pasa: efectivo => CAJA, resto => BANCO
-    const cuentaFinal: CuentaCaja = cuenta
-        ? (cuenta as CuentaCaja)
-        : (metodoPago === 'EFECTIVO' ? 'CAJA' : 'BANCO');
+    // La cuenta interna no se elige manualmente: efectivo va a caja y los demás
+    // métodos se registran en banco. Así se evita una combinación inconsistente.
+    const cuentaFinal: CuentaCaja = metodoPago === 'EFECTIVO' ? 'CAJA' : 'BANCO';
 
     try {
         // La validación y la creación comparten transacción para que un cierre
