@@ -9,8 +9,139 @@ import { logger } from '../services/logger.service';
 import { validateBody } from '../middlewares/validation.middleware';
 import { agencyProfileSchema, agencyProfileUpdateSchema, type AgencyProfileInput } from '../validation/inmobiliaria.schemas';
 import { parseDateOnly } from '../utils/argentina-date';
+import path from 'path';
+import fs from 'fs';
+import {
+    cleanupFailedUpload,
+    commitUploadedFile,
+    removeUploadedFile,
+    uploadAgencyLogo,
+    validateUploadedFileContent
+} from '../middlewares/upload.middleware';
 
 const router = Router();
+const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, '../../uploads');
+const logoContentTypes: Record<string, string> = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp'
+};
+
+const isSafeAgencyLogoPath = (logoPath: string, inmobiliariaId: number) => {
+    const agencyDirectory = `inmobiliaria-${inmobiliariaId}`;
+    if (!logoPath.startsWith(`${agencyDirectory}/`)) return false;
+    const absolutePath = path.resolve(uploadDir, logoPath);
+    const expectedDirectory = path.resolve(uploadDir, agencyDirectory);
+    return absolutePath.startsWith(`${expectedDirectory}${path.sep}`);
+};
+
+// El logo se entrega únicamente al usuario autenticado de esa inmobiliaria.
+router.get('/me/logo', authenticateToken, async (req: AuthRequest, res: Response) => {
+    const { inmobiliariaId } = req.user!;
+    try {
+        const agency = await prisma.inmobiliaria.findUnique({
+            where: { id: inmobiliariaId },
+            select: { logoArchivo: true }
+        });
+        if (!agency?.logoArchivo || !isSafeAgencyLogoPath(agency.logoArchivo, inmobiliariaId)) {
+            return res.status(404).json({ message: 'Logo no encontrado' });
+        }
+        const logoPath = path.resolve(uploadDir, agency.logoArchivo);
+        const contentType = logoContentTypes[path.extname(logoPath).toLowerCase()];
+        if (!contentType || !fs.existsSync(logoPath)) return res.status(404).json({ message: 'Logo no encontrado' });
+        res.set('Content-Type', contentType);
+        res.set('Content-Disposition', 'inline');
+        res.sendFile(logoPath);
+    } catch {
+        res.status(500).json({ message: 'No se pudo obtener el logo' });
+    }
+});
+
+router.post(
+    '/me/logo',
+    authenticateToken,
+    requirePermission('configuracion.perfil.editar'),
+    uploadAgencyLogo,
+    validateUploadedFileContent,
+    cleanupFailedUpload,
+    async (req: AuthRequest, res: Response) => {
+        const { id: usuarioId, inmobiliariaId } = req.user!;
+        if (!req.file) return res.status(400).json({ message: 'Seleccioná una imagen para el logo', code: 'AGENCY_LOGO_REQUIRED' });
+
+        let newLogoPath: string | null = null;
+        try {
+            const currentAgency = await prisma.inmobiliaria.findUnique({
+                where: { id: inmobiliariaId },
+                select: { logoArchivo: true }
+            });
+            if (!currentAgency) return res.status(404).json({ message: 'Inmobiliaria no encontrada' });
+
+            newLogoPath = await commitUploadedFile(req.file, inmobiliariaId);
+            const updatedAgency = await prisma.inmobiliaria.update({
+                where: { id: inmobiliariaId },
+                data: { logoArchivo: newLogoPath, logoUrl: null }
+            });
+            if (currentAgency.logoArchivo && currentAgency.logoArchivo !== newLogoPath) {
+                await removeUploadedFile(currentAgency.logoArchivo);
+            }
+            await auditService.log({
+                usuarioId,
+                inmobiliariaId,
+                accion: 'CARGAR_LOGO_INMOBILIARIA',
+                entidad: 'Inmobiliaria',
+                entidadId: inmobiliariaId,
+                detalle: JSON.stringify({ formato: path.extname(req.file.originalname).slice(1).toUpperCase(), bytes: req.file.size }),
+                resultado: 'EXITO',
+                ...getAuditRequestMetadata(req)
+            });
+            res.json(updatedAgency);
+        } catch (error) {
+            await removeUploadedFile(newLogoPath);
+            await auditService.log({
+                usuarioId,
+                inmobiliariaId,
+                accion: 'CARGAR_LOGO_INMOBILIARIA',
+                entidad: 'Inmobiliaria',
+                entidadId: inmobiliariaId,
+                detalle: JSON.stringify({ reason: 'PERSISTENCE_ERROR' }),
+                resultado: 'FALLIDO',
+                severidad: 'WARNING',
+                ...getAuditRequestMetadata(req)
+            });
+            res.status(500).json({ message: 'No se pudo guardar el logo' });
+        }
+    }
+);
+
+router.delete('/me/logo', authenticateToken, requirePermission('configuracion.perfil.editar'), async (req: AuthRequest, res: Response) => {
+    const { id: usuarioId, inmobiliariaId } = req.user!;
+    try {
+        const agency = await prisma.inmobiliaria.findUnique({
+            where: { id: inmobiliariaId },
+            select: { logoArchivo: true, logoUrl: true }
+        });
+        if (!agency) return res.status(404).json({ message: 'Inmobiliaria no encontrada' });
+        const updatedAgency = await prisma.inmobiliaria.update({
+            where: { id: inmobiliariaId },
+            data: { logoArchivo: null, logoUrl: null }
+        });
+        await removeUploadedFile(agency.logoArchivo);
+        await auditService.log({
+            usuarioId,
+            inmobiliariaId,
+            accion: 'ELIMINAR_LOGO_INMOBILIARIA',
+            entidad: 'Inmobiliaria',
+            entidadId: inmobiliariaId,
+            detalle: JSON.stringify({ hadUploadedLogo: Boolean(agency.logoArchivo), hadLegacyUrl: Boolean(agency.logoUrl) }),
+            resultado: 'EXITO',
+            ...getAuditRequestMetadata(req)
+        });
+        res.json(updatedAgency);
+    } catch {
+        res.status(500).json({ message: 'No se pudo eliminar el logo' });
+    }
+});
 
 // GET /api/inmobiliaria/me
 router.get('/me', authenticateToken, requirePermission('configuracion.perfil.ver'), async (req: AuthRequest, res: Response) => {

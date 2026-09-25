@@ -17,6 +17,7 @@ model Inmobiliaria {
   direccion                  String?
   email                      String?
   logoUrl                    String?
+  logoArchivo                String?
   slogan                     String?
   telefono                   String?
   razonSocial                String?

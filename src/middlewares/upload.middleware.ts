@@ -3,10 +3,13 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { NextFunction, Request, Response } from 'express';
+import { AppError } from '../errors/app-error';
 
 const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, '../../uploads');
 const MAX_FILE_SIZE_MB = 30;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+export const AGENCY_LOGO_MAX_FILE_SIZE_MB = 7;
+const AGENCY_LOGO_MAX_FILE_SIZE_BYTES = AGENCY_LOGO_MAX_FILE_SIZE_MB * 1024 * 1024;
 const allowedMimeTypesByExtension = new Map<string, Set<string>>([
     ['.pdf', new Set(['application/pdf'])],
     ['.doc', new Set(['application/msword'])],
@@ -18,7 +21,9 @@ const allowedMimeTypesByExtension = new Map<string, Set<string>>([
 ]);
 const allowedExtensions = new Set(['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png', '.webp']);
 const allowedMainContractExtensions = new Set(['.pdf', '.doc', '.docx']);
+const allowedAgencyLogoExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 const allowedFormatsMessage = 'PDF, DOC, DOCX, JPG, PNG o WEBP';
+export const agencyLogoFormatsMessage = 'JPG, PNG o WEBP';
 
 const hasMatchingMimeType = (extension: string, mimetype: string) => {
     return allowedMimeTypesByExtension.get(extension)?.has(mimetype) || false;
@@ -70,6 +75,19 @@ const fileFilter: multer.Options['fileFilter'] = (_req, file, cb) => {
     cb(null, true);
 };
 
+export const isAllowedAgencyLogoFile = (originalname: string, mimetype: string) => {
+    const extension = path.extname(originalname).toLowerCase();
+    return allowedAgencyLogoExtensions.has(extension) && hasMatchingMimeType(extension, mimetype);
+};
+
+const agencyLogoFileFilter: multer.Options['fileFilter'] = (_req, file, cb) => {
+    if (!isAllowedAgencyLogoFile(file.originalname, file.mimetype)) {
+        return cb(new Error(`El logo debe ser una imagen ${agencyLogoFormatsMessage}. No se aceptan PDF, documentos ni SVG.`));
+    }
+    cb(null, true);
+};
+
+
 export const upload = multer({
     storage,
     fileFilter,
@@ -77,6 +95,32 @@ export const upload = multer({
         fileSize: MAX_FILE_SIZE_BYTES
     }
 });
+
+const agencyLogoUpload = multer({
+    storage,
+    fileFilter: agencyLogoFileFilter,
+    limits: { fileSize: AGENCY_LOGO_MAX_FILE_SIZE_BYTES }
+});
+
+/** Convierte errores de Multer en respuestas claras y específicas para logos. */
+export const uploadAgencyLogo = (req: Request, res: Response, next: NextFunction) => {
+    agencyLogoUpload.single('logo')(req, res, error => {
+        if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+            return next(new AppError(`El logo supera el máximo de ${AGENCY_LOGO_MAX_FILE_SIZE_MB} MB`, {
+                statusCode: 413,
+                code: 'AGENCY_LOGO_TOO_LARGE'
+            }));
+        }
+        if (error) {
+            return next(new AppError(error.message || 'No se pudo procesar el logo', {
+                statusCode: 400,
+                code: 'INVALID_AGENCY_LOGO'
+            }));
+        }
+        next();
+    });
+};
+
 
 export const cleanupFailedUpload = (req: Request, res: Response, next: NextFunction) => {
     res.once('finish', () => {
