@@ -124,11 +124,19 @@ export const uploadAgencyLogo = (req: Request, res: Response, next: NextFunction
 
 export const cleanupFailedUpload = (req: Request, res: Response, next: NextFunction) => {
     res.once('finish', () => {
-        if (res.statusCode >= 400 && req.file?.path) {
-            fs.promises.unlink(req.file.path).catch(() => undefined);
+        if (res.statusCode >= 400) {
+            getUploadedFiles(req).forEach(file => {
+                fs.promises.unlink(file.path).catch(() => undefined);
+            });
         }
     });
     next();
+};
+
+const getUploadedFiles = (req: Request): Express.Multer.File[] => {
+    if (Array.isArray(req.files)) return req.files;
+    if (req.files && typeof req.files === 'object') return Object.values(req.files).flat();
+    return req.file ? [req.file] : [];
 };
 
 const matchesFileSignature = async (file: Express.Multer.File) => {
@@ -157,6 +165,25 @@ export const validateUploadedFileContent = async (req: Request, res: Response, n
         next();
     } catch (error) {
         await fs.promises.unlink(file.path).catch(() => undefined);
+        next(error);
+    }
+};
+
+/** Valida cada archivo de una carga múltiple antes de moverlo a su ubicación final. */
+export const validateUploadedFilesContent = async (req: Request, res: Response, next: NextFunction) => {
+    const files = getUploadedFiles(req);
+    if (files.length === 0) return next();
+
+    try {
+        const matches = await Promise.all(files.map(matchesFileSignature));
+        if (matches.every(Boolean)) return next();
+
+        await Promise.all(files.map(file => fs.promises.unlink(file.path).catch(() => undefined)));
+        req.file = undefined;
+        req.files = undefined;
+        return res.status(400).json({ message: 'El contenido real de uno o más archivos no coincide con su formato', code: 'INVALID_FILE_CONTENT' });
+    } catch (error) {
+        await Promise.all(files.map(file => fs.promises.unlink(file.path).catch(() => undefined)));
         next(error);
     }
 };

@@ -100,8 +100,8 @@ function createPermissionsApp() {
   app.use(cookieParser());
   app.use(express.json());
 
-  app.get('/api/sueldos', authenticateToken, requirePermission('sueldos.ver'), (_req, res) => {
-    res.json([{ id: 1, concepto: 'Sueldo de prueba' }]);
+  app.get('/api/contratos', authenticateToken, requirePermission('contratos.ver'), (_req, res) => {
+    res.json([{ id: 1, concepto: 'Contrato de prueba' }]);
   });
 
   app.get('/api/auth/me', authenticateToken, async (req, res) => {
@@ -116,13 +116,13 @@ function createPermissionsApp() {
   return app;
 }
 
-test('HTTP permissions: user without sueldos.ver receives 403', async () => {
+test('HTTP permissions: user without contratos.ver receives 403', async () => {
   installSessionMock();
   const original = permissionsService.userHasPermission;
   permissionsService.userHasPermission = async () => false;
 
   await withServer(createPermissionsApp(), async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/api/sueldos`, {
+    const response = await fetch(`${baseUrl}/api/contratos`, {
       headers: authHeaders(),
     });
 
@@ -133,18 +133,18 @@ test('HTTP permissions: user without sueldos.ver receives 403', async () => {
   permissionsService.userHasPermission = original;
 });
 
-test('HTTP permissions: user with sueldos.ver can access endpoint', async () => {
+test('HTTP permissions: user with contratos.ver can access endpoint', async () => {
   installSessionMock();
   const original = permissionsService.userHasPermission;
-  permissionsService.userHasPermission = async (_userId, _role, permission) => permission === 'sueldos.ver';
+  permissionsService.userHasPermission = async (_userId, _role, permission) => permission === 'contratos.ver';
 
   await withServer(createPermissionsApp(), async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/api/sueldos`, {
+    const response = await fetch(`${baseUrl}/api/contratos`, {
       headers: authHeaders(),
     });
 
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), [{ id: 1, concepto: 'Sueldo de prueba' }]);
+    assert.deepEqual(await response.json(), [{ id: 1, concepto: 'Contrato de prueba' }]);
   });
 
   permissionsService.userHasPermission = original;
@@ -156,7 +156,7 @@ test('HTTP permissions: a role without the permission is denied', async () => {
   permissionsService.userHasPermission = async () => false;
 
   await withServer(createPermissionsApp(), async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/api/sueldos`, {
+    const response = await fetch(`${baseUrl}/api/contratos`, {
       headers: authHeaders(),
     });
 
@@ -179,10 +179,10 @@ test('HTTP auth/me returns refreshed permissions on each request', async () => {
     assert.equal(first.status, 200);
     assert.deepEqual((await first.json()).permissions, ['contratos.ver']);
 
-    permissions = ['contratos.ver', 'sueldos.ver'];
+    permissions = ['contratos.ver', 'personas.ver'];
     const second = await fetch(`${baseUrl}/api/auth/me`, { headers });
     assert.equal(second.status, 200);
-    assert.deepEqual((await second.json()).permissions, ['contratos.ver', 'sueldos.ver']);
+    assert.deepEqual((await second.json()).permissions, ['contratos.ver', 'personas.ver']);
   });
 
   permissionsService.getUserPermissions = original;
@@ -196,7 +196,7 @@ test('HTTP mandatory password change blocks business APIs but keeps account main
   permissionsService.getUserPermissions = async () => [];
 
   await withServer(createPermissionsApp(), async (baseUrl) => {
-    const blocked = await fetch(`${baseUrl}/api/sueldos`, { headers: authHeaders() });
+    const blocked = await fetch(`${baseUrl}/api/contratos`, { headers: authHeaders() });
     assert.equal(blocked.status, 403);
     assert.deepEqual(await blocked.json(), {
       message: 'Debe cambiar la contraseña para continuar',

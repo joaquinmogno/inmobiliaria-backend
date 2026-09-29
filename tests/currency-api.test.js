@@ -6,6 +6,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
 const cookieParser = require('cookie-parser');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const { prisma } = require('../dist/prisma');
 const { auditService } = require('../dist/services/audit.service');
@@ -22,6 +24,7 @@ const createdMovimientos = [];
 const createdPagos = [];
 const createdCaja = [];
 const createdCuotas = [];
+const createdCajaAttachments = [];
 
 const SESSION_TOKEN = 'currency-session-token';
 const CSRF_TOKEN = 'currency-csrf-token';
@@ -42,6 +45,19 @@ async function request(app, path, options = {}) {
     status: response.status,
     body: text ? JSON.parse(text) : null,
   };
+}
+
+async function multipartRequest(app, path, formData) {
+  const response = await fetch(`http://127.0.0.1:${app.address.port}${path}`, {
+    method: 'POST',
+    headers: {
+      Cookie: `${SESSION_COOKIE}=${SESSION_TOKEN}; ${CSRF_COOKIE}=${CSRF_TOKEN}`,
+      'X-CSRF-Token': CSRF_TOKEN,
+    },
+    body: formData,
+  });
+  const text = await response.text();
+  return { status: response.status, body: text ? JSON.parse(text) : null };
 }
 
 async function withServer(run) {
@@ -71,6 +87,7 @@ function resetState() {
   createdPagos.length = 0;
   createdCaja.length = 0;
   createdCuotas.length = 0;
+  createdCajaAttachments.length = 0;
 }
 
 function installPrismaMocks() {
@@ -304,6 +321,9 @@ function installPrismaMocks() {
       createdCaja.push(movimiento);
       return movimiento;
     },
+    findFirst: async ({ where }) => createdCaja.find(item =>
+      item.id === where.id && item.inmobiliariaId === where.inmobiliariaId && (!where.anuladoEn || item.anuladoEn === null)
+    ) || null,
     aggregate: async ({ where }) => {
       const sum = createdCaja
         .filter((item) => {
@@ -316,6 +336,13 @@ function installPrismaMocks() {
       return { _sum: { monto: sum } };
     },
     findMany: async () => createdCaja,
+  };
+  prisma.adjuntoMovimientoCaja = {
+    create: async ({ data }) => {
+      const attachment = { id: createdCajaAttachments.length + 1, ...data };
+      createdCajaAttachments.push(attachment);
+      return attachment;
+    },
   };
   prisma.planCuotas = {
     count: async ({ where }) => createdLiquidaciones.some((item) => item.contratoId === where.contratoId) ? 0 : 0,
@@ -367,6 +394,26 @@ test('API currency: creates USD contracts', async () => {
 
     assert.equal(response.status, 201);
     assert.equal(response.body.moneda, 'USD');
+  });
+});
+
+test('API contracts: registers an initial fee in its own currency', async () => {
+  await withServer(async (app) => {
+    const response = await request(app, '/api/contratos', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...contractPayload('ARS'),
+        honorarioInicial: 1000,
+        monedaHonorarioInicial: 'USD',
+        honorarioInicialMetodoPago: 'EFECTIVO'
+      }),
+    });
+
+    assert.equal(response.status, 201);
+    assert.equal(response.body.moneda, 'ARS');
+    assert.equal(createdCaja.length, 1);
+    assert.equal(createdCaja[0].moneda, 'USD');
+    assert.equal(Number(createdCaja[0].monto), 1000);
   });
 });
 
@@ -553,6 +600,42 @@ test('API currency: cashbox manual movements keep separate currencies', async ()
     assert.equal(createdCaja[0].moneda, 'ARS');
     assert.equal(createdCaja[1].moneda, 'USD');
   });
+});
+
+test('API cash movements: stores supporting documents on creation and afterwards', async () => {
+  const uploadedPaths = [];
+  try {
+    await withServer(async (app) => {
+      const createForm = new FormData();
+      createForm.append('tipo', 'EGRESO');
+      createForm.append('concepto', 'Pinturería');
+      createForm.append('monto', '350000');
+      createForm.append('moneda', 'ARS');
+      createForm.append('fecha', '2026-06-10');
+      createForm.append('metodoPago', 'EFECTIVO');
+      createForm.append('comprobantes', new Blob(['%PDF-1.7\nFactura de prueba'], { type: 'application/pdf' }), 'factura-pintureria.pdf');
+
+      const created = await multipartRequest(app, '/api/caja-chica', createForm);
+      assert.equal(created.status, 201);
+      assert.equal(createdCaja.length, 1);
+      assert.equal(createdCaja[0].adjuntos.create.length, 1);
+      assert.equal(createdCaja[0].adjuntos.create[0].nombreArchivo, 'factura-pintureria.pdf');
+      uploadedPaths.push(createdCaja[0].adjuntos.create[0].rutaArchivo);
+
+      const laterProof = new FormData();
+      laterProof.append('comprobantes', new Blob(['%PDF-1.7\nTransferencia de prueba'], { type: 'application/pdf' }), 'transferencia.pdf');
+      const attached = await multipartRequest(app, '/api/caja-chica/1/comprobantes', laterProof);
+
+      assert.equal(attached.status, 201);
+      assert.equal(attached.body.data.length, 1);
+      assert.equal(createdCajaAttachments[0].nombreArchivo, 'transferencia.pdf');
+      uploadedPaths.push(createdCajaAttachments[0].rutaArchivo);
+    });
+
+    uploadedPaths.forEach(relativePath => assert.equal(fs.existsSync(path.resolve(__dirname, '../uploads', relativePath)), true));
+  } finally {
+    uploadedPaths.forEach(relativePath => fs.rmSync(path.resolve(__dirname, '../uploads', relativePath), { force: true }));
+  }
 });
 
 test('API currency: contract currency change is rejected when financial operations exist', async () => {

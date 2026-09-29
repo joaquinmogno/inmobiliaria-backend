@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
-import { validateBody, requiredText, optionalText, optionalEmail, optionalPhone, optionalDni, optionalCuit, optionalCbu, optionalBankAlias, optionalBooleanFromForm } from '../middlewares/validation.middleware';
+import { validateBody, optionalCuit, optionalDni, optionalEmail, optionalPhone, requiredText } from '../middlewares/validation.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
@@ -23,43 +23,12 @@ import {
 } from '../utils/person-identity';
 import { mergePeople } from '../services/person-merge.service';
 import { normalizeBankAlias, normalizeCbu } from '../utils/bank-account';
+import { parsePersonaUpdate, personaSchema } from '../validation/personas.schemas';
 
 const router = Router();
 
 router.use(authenticateToken);
 
-const personaSchema = z.object({
-    nombreCompleto: requiredText('El nombre completo', 140),
-    dni: optionalDni(),
-    email: optionalEmail(),
-    telefono: optionalPhone(),
-    direccion: optionalText(180),
-    cuit: optionalCuit(),
-    banco: optionalText(100),
-    cbu: optionalCbu(),
-    aliasBancario: optionalBankAlias(),
-    titularCuentaBancaria: optionalText(140),
-    titularidadBancariaVerificada: optionalBooleanFromForm.default(false),
-    contactoAlternativo: optionalText(140), telefonoAlternativo: optionalPhone(),
-    estado: z.enum(['ACTIVO', 'INACTIVO']).optional().default('ACTIVO')
-}).superRefine((data, ctx) => {
-    const hasBankDestination = Boolean(data.cbu || data.aliasBancario);
-    if (hasBankDestination && !data.titularidadBancariaVerificada) {
-        ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['titularidadBancariaVerificada'],
-            message: 'Confirmá que verificaste la titularidad de la cuenta antes de guardar datos bancarios'
-        });
-    }
-    if (!hasBankDestination && data.titularidadBancariaVerificada) {
-        ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['titularidadBancariaVerificada'],
-            message: 'No podés confirmar titularidad sin informar un CBU o alias'
-        });
-    }
-});
-const personaUpdateSchema = personaSchema.extend({ version: optimisticVersionSchema });
 const identityQuerySchema = z.object({
     dni: optionalDni(),
     cuit: optionalCuit(),
@@ -216,10 +185,9 @@ router.post('/', requirePermission('personas.crear'), validateBody(personaSchema
 });
 
 // Update person
-router.put('/:id', requirePermission('personas.editar'), validateBody(personaUpdateSchema), async (req, res) => {
+router.put('/:id', requirePermission('personas.editar'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { nombreCompleto, dni, email, telefono, direccion, estado, version, cuit, banco, cbu, aliasBancario, titularCuentaBancaria, titularidadBancariaVerificada, contactoAlternativo, telefonoAlternativo } = req.body;
 
     try {
         const existing = await prisma.persona.findFirst({
@@ -229,6 +197,18 @@ router.put('/:id', requirePermission('personas.editar'), validateBody(personaUpd
         if (!existing) {
             return res.status(404).json({ message: 'Persona no encontrada' });
         }
+
+        const validation = parsePersonaUpdate(req.body, existing);
+        if (!validation.success) {
+            return res.status(400).json({
+                message: 'Datos de entrada inválidos',
+                errors: validation.error.issues.map(issue => ({
+                    field: issue.path.join('.'),
+                    message: issue.message
+                }))
+            });
+        }
+        const { nombreCompleto, dni, email, telefono, direccion, estado, version, cuit, banco, cbu, aliasBancario, titularCuentaBancaria, titularidadBancariaVerificada, contactoAlternativo, telefonoAlternativo } = validation.data;
 
         if (existing.version !== version) {
             assertOptimisticUpdate(0, version, existing.version);

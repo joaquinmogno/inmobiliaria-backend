@@ -44,6 +44,34 @@ export const requirePermission = (permission: PermissionKey) => {
     };
 };
 
+export const requireAnyPermission = (...permissions: PermissionKey[]) => {
+    return async (req: AuthRequest, res: Response, next: NextFunction) => {
+        const user = req.user;
+        if (!user) return res.status(401).json({ message: 'Sesión no proporcionada' });
+
+        try {
+            const hasAnyPermission = (await Promise.all(
+                permissions.map(permission => userHasPermission(user.id, user.tipo, permission))
+            )).some(Boolean);
+            if (!hasAnyPermission) {
+                await auditDeniedAccess(req, permissions.join(' | '), 'PERMISSION_MISSING');
+                return res.status(403).json({ message: 'No tiene permisos para realizar esta acción' });
+            }
+            next();
+        } catch (error) {
+            logger.error('Permission validation failed', {
+                requestId: req.requestId,
+                userId: user.id,
+                inmobiliariaId: user.inmobiliariaId,
+                permissions,
+                error
+            });
+            await auditDeniedAccess(req, permissions.join(' | '), 'PERMISSION_CHECK_FAILED');
+            res.status(500).json({ message: 'Error validando permisos' });
+        }
+    };
+};
+
 export const requireAdmin = async (req: AuthRequest, res: Response, next: NextFunction) => {
     if (req.user?.tipo !== 'ADMIN') {
         await auditDeniedAccess(req, 'ADMIN', 'ADMIN_REQUIRED');

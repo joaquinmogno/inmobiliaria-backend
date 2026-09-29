@@ -49,6 +49,62 @@ test('el esquema de contratos concentra y valida las reglas de entrada', () => {
   assert.ok(invalid.error.issues.some(issue => issue.path.includes('fechaActualizacion')));
 });
 
+test('los servicios y gastos del contrato admiten conceptos sugeridos y personalizados sin repetirlos', () => {
+  const base = {
+    fechaInicio: '2026-09-01',
+    fechaFin: '2027-08-31',
+    fechaActualizacion: '2026-12-01',
+    propiedadId: 1,
+    propietarioIds: [2],
+    inquilinoIds: [3],
+    montoAlquiler: 500000,
+    requiereActualizacion: true
+  };
+  const parsed = contractCreateSchema.safeParse({
+    ...base,
+    serviciosGastos: JSON.stringify([
+      { concepto: 'LUZ', responsable: 'INQUILINO' },
+      { concepto: 'Mantenimiento de pileta', responsable: 'PROPIETARIO' }
+    ])
+  });
+  assert.equal(parsed.success, true);
+  assert.deepEqual(parsed.data.serviciosGastos, [
+    { concepto: 'LUZ', responsable: 'INQUILINO' },
+    { concepto: 'Mantenimiento de pileta', responsable: 'PROPIETARIO' }
+  ]);
+
+  const duplicate = contractCreateSchema.safeParse({
+    ...base,
+    serviciosGastos: [
+      { concepto: 'Luz', responsable: 'INQUILINO' },
+      { concepto: 'LUZ', responsable: 'PROPIETARIO' }
+    ]
+  });
+  assert.equal(duplicate.success, false);
+  assert.ok(duplicate.error.issues.some(issue => issue.path.includes('serviciosGastos')));
+});
+
+test('el honorario de alta puede usar una moneda distinta a la del alquiler', () => {
+  const parsed = contractCreateSchema.safeParse({
+    fechaInicio: '2026-09-01',
+    fechaFin: '2027-08-31',
+    fechaActualizacion: '2026-12-01',
+    propiedadId: 1,
+    propietarioIds: [2],
+    inquilinoIds: [3],
+    montoAlquiler: 500000,
+    moneda: 'ARS',
+    honorarioInicial: 1000,
+    monedaHonorarioInicial: 'USD',
+    honorarioInicialMetodoPago: 'EFECTIVO',
+    requiereActualizacion: true
+  });
+
+  assert.equal(parsed.success, true);
+  assert.equal(parsed.data.moneda, 'ARS');
+  assert.equal(parsed.data.monedaHonorarioInicial, 'USD');
+});
+
 test('la política de actualización limpia campos cuando no hay ajustes', () => {
   assert.deepEqual(normalizeContractUpdateSettings({
     requiereActualizacion: false,

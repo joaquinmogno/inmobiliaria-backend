@@ -33,18 +33,20 @@ model Inmobiliaria {
   liquidaciones              Liquidacion[]
   pagosPropietario           PagoPropietario[]
   movimientosCaja            MovimientoCaja[]
+  transferenciasInternas     TransferenciaInterna[]
   pagos                      Pago[]
   personas                   Persona[]
   propiedades                Propiedad[]
   usuarios                   Usuario[]
   roles                      Rol[]
   planesCuotas               PlanCuotas[]
-  sueldos                    PagoSueldo[]
   sesiones                   UserSession[]
   decisionesLiquidacion      DecisionLiquidacionMensual[]
   cierresCaja                CierreCaja[]
+  cuentasBancarias           CuentaBancaria[]
   creditosInquilino          CreditoInquilino[]
   gestionesAlertasOperativas GestionAlertaOperativa[]
+  borradoresContrato         BorradorContrato[]
 }
 
 enum CondicionIva {
@@ -55,61 +57,68 @@ enum CondicionIva {
   CONSUMIDOR_FINAL
 }
 
+enum ResponsableServicioGastoContrato {
+  INQUILINO
+  PROPIETARIO
+}
+
 model Usuario {
-  id                         Int                              @id @default(autoincrement())
-  email                      String                           @unique
-  password                   String
-  nombreCompleto             String
-  tipo                       TipoUsuario                      @default(USUARIO)
-  rolId                      Int?
-  activo                     Boolean                          @default(true)
-  sessionVersion             Int                              @default(0)
-  passwordChangedAt          DateTime?
-  mustChangePassword         Boolean                          @default(false)
-  fechaCreacion              DateTime                         @default(now())
-  fechaActualizacion         DateTime                         @updatedAt
-  ultimoAcceso               DateTime?
-  inmobiliariaId             Int
-  auditLogs                  AuditLog[]
-  contratosActualizados      Contrato[]                       @relation("ContratoActualizadoPor")
-  contratosCreados           Contrato[]                       @relation("ContratoCreadoPor")
-  contratosRescindidos       Contrato[]                       @relation("ContratoRescindidoPor")
-  liquidacionesCerradas      Liquidacion[]                    @relation("LiquidacionCerradaPor")
-  liquidacionesCreadas       Liquidacion[]                    @relation("LiquidacionCreadaPor")
-  liquidacionesConfirmadas   Liquidacion[]                    @relation("LiquidacionConfirmadaPor")
-  pagosPropietarioCreados    PagoPropietario[]                @relation("PagoPropietarioCreadoPor")
-  pagosPropietarioAnulados   PagoPropietario[]                @relation("PagoPropietarioAnuladoPor")
-  movimientosCajaCreados     MovimientoCaja[]                 @relation("MovimientoCajaCreadoPor")
-  movimientosCajaAnulados    MovimientoCaja[]                 @relation("MovimientoCajaAnuladoPor")
-  pagosCreados               Pago[]                           @relation("PagoCreadoPor")
-  pagosAnulados              Pago[]                           @relation("PagoAnuladoPor")
-  sesiones                   UserSession[]
-  personasActualizadas       Persona[]                        @relation("PersonaActualizadaPor")
-  personasCreadas            Persona[]                        @relation("PersonaCreadaPor")
-  propiedadesActualizadas    Propiedad[]                      @relation("PropiedadActualizadaPor")
-  propiedadesCreadas         Propiedad[]                      @relation("PropiedadCreadaPor")
-  actualizacionesRealizadas  ActualizacionContrato[]
-  sueldosRecibidos           PagoSueldo[]                     @relation("SueldoParaUsuario")
-  sueldosPagados             PagoSueldo[]                     @relation("SueldoCreadoPor")
-  adjuntosPropiedadCreados   AdjuntoPropiedad[]               @relation("AdjuntoPropiedadCreadoPor")
-  adjuntosPropiedadEliminados AdjuntoPropiedad[]              @relation("AdjuntoPropiedadEliminadoPor")
-  adjuntosContratoCreados    AdjuntoContrato[]                @relation("AdjuntoContratoCreadoPor")
-  notasPropiedadCreadas      NotaPropiedad[]                  @relation("NotaPropiedadCreadaPor")
-  decisionesLiquidacion      DecisionLiquidacionMensual[]
-  ajustesLiquidacion         AjusteLiquidacion[]
-  comprobantesLiquidacion    ComprobanteLiquidacion[]
-  creditosInquilinoCreados   CreditoInquilino[]
-  aplicacionesCreditoCreadas AplicacionCreditoInquilino[]
-  ajustesSueldoCreados       AjustePagoSueldo[]
-  cierresCajaRealizados      CierreCaja[]                     @relation("CierreCajaRealizadoPor")
-  cierresCajaReabiertos      CierreCaja[]                     @relation("CierreCajaReabiertoPor")
-  eventosCierreCaja          EventoCierreCaja[]               @relation("EventoCierreCajaUsuario")
-  planesCuotasCerrados       PlanCuotas[]                     @relation("PlanCuotasCerradoPor")
-  alertasOperativasAsignadas GestionAlertaOperativa[]         @relation("AlertaOperativaResponsable")
-  alertasOperativasCreadas   GestionAlertaOperativa[]         @relation("AlertaOperativaCreadaPor")
-  registrosAlertasOperativas RegistroGestionAlertaOperativa[]
-  inmobiliaria               Inmobiliaria                     @relation(fields: [inmobiliariaId], references: [id])
-  rol                        Rol?                             @relation(fields: [rolId], references: [id], onDelete: Restrict)
+  id                            Int                              @id @default(autoincrement())
+  email                         String                           @unique
+  password                      String
+  nombreCompleto                String
+  tipo                          TipoUsuario                      @default(USUARIO)
+  rolId                         Int?
+  activo                        Boolean                          @default(true)
+  sessionVersion                Int                              @default(0)
+  passwordChangedAt             DateTime?
+  mustChangePassword            Boolean                          @default(false)
+  fechaCreacion                 DateTime                         @default(now())
+  fechaActualizacion            DateTime                         @updatedAt
+  ultimoAcceso                  DateTime?
+  inmobiliariaId                Int
+  auditLogs                     AuditLog[]
+  contratosActualizados         Contrato[]                       @relation("ContratoActualizadoPor")
+  contratosCreados              Contrato[]                       @relation("ContratoCreadoPor")
+  contratosRescindidos          Contrato[]                       @relation("ContratoRescindidoPor")
+  borradoresContratoCreados     BorradorContrato[]               @relation("BorradorContratoCreadoPor")
+  borradoresContratoActualizados BorradorContrato[]              @relation("BorradorContratoActualizadoPor")
+  adjuntosBorradorContratoCreados AdjuntoBorradorContrato[]      @relation("AdjuntoBorradorContratoCreadoPor")
+  liquidacionesCerradas         Liquidacion[]                    @relation("LiquidacionCerradaPor")
+  liquidacionesCreadas          Liquidacion[]                    @relation("LiquidacionCreadaPor")
+  liquidacionesConfirmadas      Liquidacion[]                    @relation("LiquidacionConfirmadaPor")
+  pagosPropietarioCreados       PagoPropietario[]                @relation("PagoPropietarioCreadoPor")
+  pagosPropietarioAnulados      PagoPropietario[]                @relation("PagoPropietarioAnuladoPor")
+  movimientosCajaCreados        MovimientoCaja[]                 @relation("MovimientoCajaCreadoPor")
+  movimientosCajaAnulados       MovimientoCaja[]                 @relation("MovimientoCajaAnuladoPor")
+  adjuntosMovimientoCajaCreados AdjuntoMovimientoCaja[]          @relation("AdjuntoMovimientoCajaCreadoPor")
+  transferenciasInternasCreadas TransferenciaInterna[]
+  pagosCreados                  Pago[]                           @relation("PagoCreadoPor")
+  pagosAnulados                 Pago[]                           @relation("PagoAnuladoPor")
+  sesiones                      UserSession[]
+  personasActualizadas          Persona[]                        @relation("PersonaActualizadaPor")
+  personasCreadas               Persona[]                        @relation("PersonaCreadaPor")
+  propiedadesActualizadas       Propiedad[]                      @relation("PropiedadActualizadaPor")
+  propiedadesCreadas            Propiedad[]                      @relation("PropiedadCreadaPor")
+  actualizacionesRealizadas     ActualizacionContrato[]
+  adjuntosPropiedadCreados      AdjuntoPropiedad[]               @relation("AdjuntoPropiedadCreadoPor")
+  adjuntosPropiedadEliminados   AdjuntoPropiedad[]               @relation("AdjuntoPropiedadEliminadoPor")
+  adjuntosContratoCreados       AdjuntoContrato[]                @relation("AdjuntoContratoCreadoPor")
+  notasPropiedadCreadas         NotaPropiedad[]                  @relation("NotaPropiedadCreadaPor")
+  decisionesLiquidacion         DecisionLiquidacionMensual[]
+  ajustesLiquidacion            AjusteLiquidacion[]
+  comprobantesLiquidacion       ComprobanteLiquidacion[]
+  creditosInquilinoCreados      CreditoInquilino[]
+  aplicacionesCreditoCreadas    AplicacionCreditoInquilino[]
+  cierresCajaRealizados         CierreCaja[]                     @relation("CierreCajaRealizadoPor")
+  cierresCajaReabiertos         CierreCaja[]                     @relation("CierreCajaReabiertoPor")
+  eventosCierreCaja             EventoCierreCaja[]               @relation("EventoCierreCajaUsuario")
+  planesCuotasCerrados          PlanCuotas[]                     @relation("PlanCuotasCerradoPor")
+  alertasOperativasAsignadas    GestionAlertaOperativa[]         @relation("AlertaOperativaResponsable")
+  alertasOperativasCreadas      GestionAlertaOperativa[]         @relation("AlertaOperativaCreadaPor")
+  registrosAlertasOperativas    RegistroGestionAlertaOperativa[]
+  inmobiliaria                  Inmobiliaria                     @relation(fields: [inmobiliariaId], references: [id])
+  rol                           Rol?                             @relation(fields: [rolId], references: [id], onDelete: Restrict)
 
   @@index([rolId])
   @@index([inmobiliariaId, tipo, activo])
@@ -344,6 +353,7 @@ model Contrato {
   pagos                     Pago[]
   actualizaciones           ActualizacionContrato[]
   planesCuotas              PlanCuotas[]
+  serviciosGastos           ServicioGastoContrato[]
   decisionesLiquidacion     DecisionLiquidacionMensual[]
   creditosInquilino         CreditoInquilino[]
 
@@ -383,6 +393,19 @@ model ContratoPropietario {
   @@index([personaId])
 }
 
+// Esta relación documenta el acuerdo contractual sobre cada servicio o gasto.
+// No contiene importes ni participa del cálculo de liquidaciones o caja.
+model ServicioGastoContrato {
+  id          Int                              @id @default(autoincrement())
+  concepto    String                           @db.VarChar(120)
+  responsable ResponsableServicioGastoContrato
+  orden       Int                              @default(0)
+  contratoId  Int
+  contrato    Contrato                         @relation(fields: [contratoId], references: [id], onDelete: Cascade)
+
+  @@index([contratoId, orden])
+}
+
 model AdjuntoContrato {
   id               Int                   @id @default(autoincrement())
   rutaArchivo      String
@@ -400,6 +423,42 @@ model AdjuntoContrato {
 
   @@unique([contratoId, tipo, versionDocumento])
   @@index([contratoId, tipo, esVigente])
+  @@index([creadoPorId])
+}
+
+// Un borrador conserva una carga de contrato incompleta. No participa de la
+// operación contractual ni financiera hasta que se convierte en un Contrato.
+model BorradorContrato {
+  id                  Int                       @id @default(autoincrement())
+  version             Int                       @default(1)
+  datos               Json
+  fechaCreacion       DateTime                  @default(now())
+  fechaActualizacion  DateTime                  @updatedAt
+  inmobiliariaId      Int
+  creadoPorId         Int
+  actualizadoPorId    Int?
+  inmobiliaria        Inmobiliaria              @relation(fields: [inmobiliariaId], references: [id])
+  creadoPor           Usuario                   @relation("BorradorContratoCreadoPor", fields: [creadoPorId], references: [id])
+  actualizadoPor      Usuario?                  @relation("BorradorContratoActualizadoPor", fields: [actualizadoPorId], references: [id], onDelete: SetNull)
+  adjuntos            AdjuntoBorradorContrato[]
+
+  @@index([inmobiliariaId, fechaActualizacion])
+  @@index([creadoPorId, fechaActualizacion])
+  @@index([actualizadoPorId])
+}
+
+model AdjuntoBorradorContrato {
+  id             Int                   @id @default(autoincrement())
+  rutaArchivo    String
+  nombreArchivo  String
+  tipo           TipoDocumentoContrato @default(ADJUNTO)
+  fechaCreacion  DateTime              @default(now())
+  borradorId     Int
+  creadoPorId    Int?
+  borrador       BorradorContrato      @relation(fields: [borradorId], references: [id], onDelete: Cascade)
+  creadoPor      Usuario?              @relation("AdjuntoBorradorContratoCreadoPor", fields: [creadoPorId], references: [id], onDelete: SetNull)
+
+  @@index([borradorId, tipo])
   @@index([creadoPorId])
 }
 
@@ -653,49 +712,106 @@ enum AuditSeverity {
 }
 
 model MovimientoCaja {
-  id                         Int               @id @default(autoincrement())
+  id                         Int                     @id @default(autoincrement())
   tipo                       TipoMovimiento
-  concepto                   String            @db.VarChar(255)
-  monto                      Decimal           @db.Decimal(10, 2)
-  moneda                     Moneda            @default(ARS)
-  fecha                      DateTime          @db.Date
-  metodoPago                 MetodoPago        @default(EFECTIVO)
-  cuenta                     CuentaCaja        @default(CAJA)
-  comprobante                String?           @db.VarChar(120)
+  concepto                   String                  @db.VarChar(255)
+  monto                      Decimal                 @db.Decimal(10, 2)
+  moneda                     Moneda                  @default(ARS)
+  fecha                      DateTime                @db.Date
+  metodoPago                 MetodoPago              @default(EFECTIVO)
+  cuenta                     CuentaCaja              @default(CAJA)
+  cuentaBancariaId           Int?
+  transferenciaInternaId     Int?
+  comprobante                String?                 @db.VarChar(120)
   observaciones              String?
-  fechaCreacion              DateTime          @default(now())
+  fechaCreacion              DateTime                @default(now())
   anuladoEn                  DateTime?
-  motivoAnulacion            String?           @db.Text
+  motivoAnulacion            String?                 @db.Text
   inmobiliariaId             Int
   creadoPorId                Int?
   anuladoPorId               Int?
   contratoId                 Int?
   liquidacionId              Int?
-  pagoId                     Int?              @unique
-  pagoSueldoId               Int?              @unique
-  reversionDeId              Int?              @unique
-  esPagoPropietario          Boolean           @default(false)
-  contrato                   Contrato?         @relation(fields: [contratoId], references: [id])
-  creadoPor                  Usuario?          @relation("MovimientoCajaCreadoPor", fields: [creadoPorId], references: [id])
-  anuladoPor                 Usuario?          @relation("MovimientoCajaAnuladoPor", fields: [anuladoPorId], references: [id], onDelete: SetNull)
-  inmobiliaria               Inmobiliaria      @relation(fields: [inmobiliariaId], references: [id])
-  liquidacion                Liquidacion?      @relation("LiquidacionMovimientosCaja", fields: [liquidacionId], references: [id])
-  pagoPropietarioDe          Liquidacion?      @relation("LiquidacionPagoPropietario")
-  pago                       Pago?             @relation(fields: [pagoId], references: [id], onDelete: SetNull)
-  pagoSueldo                 PagoSueldo?       @relation(fields: [pagoSueldoId], references: [id], onDelete: Cascade)
-  reversionDe                MovimientoCaja?   @relation("MovimientoCajaReversion", fields: [reversionDeId], references: [id], onDelete: Restrict)
-  reversion                  MovimientoCaja?   @relation("MovimientoCajaReversion")
-  creditoInquilinoDevolucion CreditoInquilino? @relation("CreditoInquilinoDevolucion")
-  ajustePagoSueldoDe         AjustePagoSueldo? @relation("AjustePagoSueldoMovimiento")
-  pagoPropietario            PagoPropietario?  @relation("PagoPropietarioMovimiento")
+  pagoId                     Int?                    @unique
+  reversionDeId              Int?                    @unique
+  esPagoPropietario          Boolean                 @default(false)
+  contrato                   Contrato?               @relation(fields: [contratoId], references: [id])
+  creadoPor                  Usuario?                @relation("MovimientoCajaCreadoPor", fields: [creadoPorId], references: [id])
+  anuladoPor                 Usuario?                @relation("MovimientoCajaAnuladoPor", fields: [anuladoPorId], references: [id], onDelete: SetNull)
+  inmobiliaria               Inmobiliaria            @relation(fields: [inmobiliariaId], references: [id])
+  cuentaBancaria             CuentaBancaria?         @relation(fields: [cuentaBancariaId], references: [id], onDelete: Restrict)
+  transferenciaInterna       TransferenciaInterna?   @relation(fields: [transferenciaInternaId], references: [id], onDelete: Restrict)
+  liquidacion                Liquidacion?            @relation("LiquidacionMovimientosCaja", fields: [liquidacionId], references: [id])
+  pagoPropietarioDe          Liquidacion?            @relation("LiquidacionPagoPropietario")
+  pago                       Pago?                   @relation(fields: [pagoId], references: [id], onDelete: SetNull)
+  reversionDe                MovimientoCaja?         @relation("MovimientoCajaReversion", fields: [reversionDeId], references: [id], onDelete: Restrict)
+  reversion                  MovimientoCaja?         @relation("MovimientoCajaReversion")
+  creditoInquilinoDevolucion CreditoInquilino?       @relation("CreditoInquilinoDevolucion")
+  pagoPropietario            PagoPropietario?        @relation("PagoPropietarioMovimiento")
+  adjuntos                   AdjuntoMovimientoCaja[]
 
   @@index([inmobiliariaId])
   @@index([fecha])
   @@index([tipo])
   @@index([cuenta])
+  @@index([cuentaBancariaId])
+  @@index([transferenciaInternaId])
   @@index([inmobiliariaId, fecha])
   @@index([inmobiliariaId, moneda, tipo, fecha])
   @@index([inmobiliariaId, anuladoEn])
+}
+
+model AdjuntoMovimientoCaja {
+  id               Int            @id @default(autoincrement())
+  rutaArchivo      String
+  nombreArchivo    String         @db.VarChar(255)
+  fechaCreacion    DateTime       @default(now())
+  movimientoCajaId Int
+  creadoPorId      Int?
+  movimientoCaja   MovimientoCaja @relation(fields: [movimientoCajaId], references: [id], onDelete: Cascade)
+  creadoPor        Usuario?       @relation("AdjuntoMovimientoCajaCreadoPor", fields: [creadoPorId], references: [id], onDelete: SetNull)
+
+  @@index([movimientoCajaId, fechaCreacion])
+  @@index([creadoPorId])
+}
+
+// Cuentas de titularidad de la inmobiliaria. Una cuenta puede desactivarse
+// para conservar su historial sin permitir nuevos movimientos sobre ella.
+model CuentaBancaria {
+  id              Int              @id @default(autoincrement())
+  nombre          String           @db.VarChar(100)
+  banco           String           @db.VarChar(100)
+  moneda          Moneda           @default(ARS)
+  activa          Boolean          @default(true)
+  esHistorica     Boolean          @default(false)
+  fechaCreacion   DateTime         @default(now())
+  inmobiliariaId  Int
+  inmobiliaria    Inmobiliaria     @relation(fields: [inmobiliariaId], references: [id], onDelete: Cascade)
+  movimientosCaja MovimientoCaja[]
+  cierresCaja     CierreCaja[]
+
+  @@unique([inmobiliariaId, nombre])
+  @@index([inmobiliariaId, activa, moneda])
+}
+
+// Operación interna que vincula los dos asientos que trasladan fondos entre
+// cuentas de la misma inmobiliaria. No representa un ingreso ni un egreso
+// consolidado: los movimientos son la fuente de verdad del saldo de cada cuenta.
+model TransferenciaInterna {
+  id             Int              @id @default(autoincrement())
+  fecha          DateTime         @db.Date
+  monto          Decimal          @db.Decimal(10, 2)
+  moneda         Moneda
+  concepto       String           @db.VarChar(255)
+  observaciones  String?
+  fechaCreacion  DateTime         @default(now())
+  inmobiliariaId Int
+  creadoPorId    Int?
+  inmobiliaria   Inmobiliaria     @relation(fields: [inmobiliariaId], references: [id], onDelete: Cascade)
+  creadoPor      Usuario?         @relation(fields: [creadoPorId], references: [id], onDelete: SetNull)
+  movimientos    MovimientoCaja[]
+
+  @@index([inmobiliariaId, fecha])
 }
 
 model CierreCaja {
@@ -703,6 +819,7 @@ model CierreCaja {
   version          Int                @default(1)
   periodo          DateTime           @db.Date
   cuenta           CuentaCaja
+  cuentaBancariaId Int?
   moneda           Moneda
   saldoSistema     Decimal            @db.Decimal(10, 2)
   saldoDeclarado   Decimal            @db.Decimal(10, 2)
@@ -716,11 +833,13 @@ model CierreCaja {
   motivoReapertura String?            @db.Text
   inmobiliariaId   Int
   inmobiliaria     Inmobiliaria       @relation(fields: [inmobiliariaId], references: [id], onDelete: Cascade)
+  cuentaBancaria   CuentaBancaria?    @relation(fields: [cuentaBancariaId], references: [id], onDelete: Restrict)
   cerradoPor       Usuario            @relation("CierreCajaRealizadoPor", fields: [cerradoPorId], references: [id])
   reabiertoPor     Usuario?           @relation("CierreCajaReabiertoPor", fields: [reabiertoPorId], references: [id])
   eventos          EventoCierreCaja[]
 
-  @@unique([inmobiliariaId, periodo, cuenta, moneda])
+  @@index([inmobiliariaId, periodo, cuenta, moneda, cuentaBancariaId])
+  @@index([cuentaBancariaId])
   @@index([inmobiliariaId, periodo, estado])
 }
 
@@ -940,11 +1059,6 @@ enum TipoAjusteLiquidacion {
 }
 
 // Un ajuste de sueldo corrige el flujo actual sin reescribir el pago original.
-enum TipoAjusteSueldo {
-  PAGO_ADICIONAL
-  RECUPERO
-}
-
 enum DestinoCreditoInquilino {
   DEVOLUCION
   SALDO_A_FAVOR
@@ -1048,53 +1162,4 @@ enum TipoDocumentoContrato {
   CONTRATO_PRINCIPAL
   ADENDA
   ADJUNTO
-}
-
-model PagoSueldo {
-  id            Int        @id @default(autoincrement())
-  version       Int        @default(1)
-  monto         Decimal    @db.Decimal(10, 2)
-  moneda        Moneda     @default(ARS)
-  fecha         DateTime   @db.Date
-  periodo       String // Formato "YYYY-MM"
-  metodoPago    MetodoPago @default(EFECTIVO)
-  observaciones String?    @db.Text
-  fechaCreacion DateTime   @default(now())
-
-  usuarioId Int
-  usuario   Usuario @relation("SueldoParaUsuario", fields: [usuarioId], references: [id])
-
-  inmobiliariaId Int
-  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
-
-  creadoPorId Int
-  creadoPor   Usuario @relation("SueldoCreadoPor", fields: [creadoPorId], references: [id])
-
-  movimientoCaja MovimientoCaja?
-  ajustes        AjustePagoSueldo[]
-
-  @@unique([inmobiliariaId, usuarioId, periodo, moneda])
-  @@index([usuarioId])
-  @@index([inmobiliariaId])
-  @@index([periodo])
-}
-
-model AjustePagoSueldo {
-  id               Int              @id @default(autoincrement())
-  pagoSueldoId     Int
-  tipo             TipoAjusteSueldo
-  monto            Decimal          @db.Decimal(10, 2)
-  moneda           Moneda
-  fecha            DateTime         @db.Date
-  metodoPago       MetodoPago
-  motivo           String           @db.Text
-  fechaCreacion    DateTime         @default(now())
-  creadoPorId      Int
-  movimientoCajaId Int              @unique
-  pagoSueldo       PagoSueldo       @relation(fields: [pagoSueldoId], references: [id], onDelete: Restrict)
-  creadoPor        Usuario          @relation(fields: [creadoPorId], references: [id], onDelete: Restrict)
-  movimientoCaja   MovimientoCaja   @relation("AjustePagoSueldoMovimiento", fields: [movimientoCajaId], references: [id], onDelete: Restrict)
-
-  @@index([pagoSueldoId, fecha])
-  @@index([creadoPorId])
 }

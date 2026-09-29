@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { validateBody, requiredText, optionalText } from '../middlewares/validation.middleware';
-import { requirePermission } from '../middlewares/permissions.middleware';
+import { requireAnyPermission, requirePermission } from '../middlewares/permissions.middleware';
 import { requireAdmin } from '../middlewares/permissions.middleware';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
@@ -41,7 +41,10 @@ const notaPropiedadSchema = z.object({
 });
 
 // Get all properties
-router.get('/', requirePermission('propiedades.ver'), withPagination(25), async (req, res) => {
+// Este listado alimenta el selector de una propiedad ya existente al crear o
+// renovar un contrato. La ficha y toda administración interna siguen
+// restringidas al permiso específico de propiedades.
+router.get('/', requireAnyPermission('propiedades.ver', 'contratos.ver'), withPagination(25), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { search, tipo, estado } = req.query;
     const pagination = res.locals.pagination;

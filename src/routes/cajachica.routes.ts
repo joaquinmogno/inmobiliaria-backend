@@ -12,6 +12,7 @@ import { argentinaTodayAsDate, argentinaYearMonth, assertOperationalDateIsNotFut
 import { withPagination } from '../middlewares/pagination.middleware';
 import { assertCashPeriodOpen, closeCashPeriod, monthStart, prepareCashCorrection, reopenCashPeriod } from '../services/cash-closing.service';
 import { getCashLedgerReport, getMonthlyReportPeriod } from '../services/financial-reporting.service';
+import { cleanupFailedUpload, commitUploadedFile, removeUploadedFile, upload, validateUploadedFilesContent } from '../middlewares/upload.middleware';
 
 const router = Router();
 
@@ -22,7 +23,21 @@ const movimientoCajaSchema = z.object({
     moneda: z.enum(['ARS', 'USD']).optional().default('ARS'),
     fecha: dateOnlyString('La fecha'),
     metodoPago: paymentMethodSchema.optional().default('EFECTIVO'),
+    cuentaBancariaId: z.coerce.number().int().positive().optional(),
     observaciones: optionalText(1000)
+});
+
+const transferenciaInternaSchema = z.object({
+    fecha: dateOnlyString('La fecha'),
+    moneda: z.enum(['ARS', 'USD']),
+    monto: positiveDecimal('El monto'),
+    cuentaOrigenId: z.coerce.number().int().positive('La cuenta de origen es inválida'),
+    cuentaDestinoId: z.coerce.number().int().positive('La cuenta de destino es inválida'),
+    concepto: requiredText('El concepto', 255),
+    observaciones: optionalText(1000)
+}).refine(data => data.cuentaOrigenId !== data.cuentaDestinoId, {
+    path: ['cuentaDestinoId'],
+    message: 'La cuenta de destino debe ser distinta de la cuenta de origen'
 });
 
 const anulacionSchema = z.object({
@@ -32,23 +47,46 @@ const anulacionSchema = z.object({
 // Obtener movimientos de caja con filtros y paginación
 router.get('/', authenticateToken, requirePermission('caja_chica.ver'), withPagination(50), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
-    const { tipo, cuenta, search, mes, anio } = req.query;
+    const { tipo, cuenta, cuentaBancariaId, search, mes, anio, estado } = req.query;
 
     const { page: pageNum, limit: limitNum, skip } = res.locals.pagination;
 
     try {
-        const whereClause: any = {
-            inmobiliariaId
-        };
+        if (estado !== undefined && estado !== 'REVERSIONES') {
+            return res.status(400).json({ message: 'Estado de movimiento inválido.', code: 'INVALID_CASH_MOVEMENT_STATUS_FILTER' });
+        }
+
+        const isReversalsFilter = estado === 'REVERSIONES';
+        const whereClause: Prisma.MovimientoCajaWhereInput = { inmobiliariaId };
+        const conditions: Prisma.MovimientoCajaWhereInput[] = [];
 
         if (tipo) whereClause.tipo = tipo as TipoMovimiento;
-        if (cuenta) whereClause.cuenta = cuenta as CuentaCaja;
+        if (cuenta === 'CAJA' || cuenta === 'BANCO') whereClause.cuenta = cuenta as CuentaCaja;
+        if (cuentaBancariaId !== undefined) {
+            const accountId = Number(cuentaBancariaId);
+            if (!Number.isInteger(accountId) || accountId <= 0) {
+                return res.status(400).json({ message: 'Cuenta bancaria inválida.', code: 'INVALID_BANK_ACCOUNT_FILTER' });
+            }
+            whereClause.cuenta = CuentaCaja.BANCO;
+            whereClause.cuentaBancariaId = accountId;
+        }
         
         if (search) {
-            whereClause.OR = [
+            conditions.push({ OR: [
                 { concepto: { contains: String(search), mode: 'insensitive' } },
                 { observaciones: { contains: String(search), mode: 'insensitive' } }
-            ];
+            ] });
+        }
+
+        if (isReversalsFilter) {
+            // Incluye tanto el asiento inverso como el movimiento original. Algunos
+            // movimientos de períodos cerrados no tienen anuladoEn, pero siempre
+            // conservan el vínculo con su reversión.
+            conditions.push({ OR: [
+                { reversionDeId: { not: null } },
+                { reversion: { isNot: null } },
+                { anuladoEn: { not: null } }
+            ] });
         }
 
         if (mes && anio) {
@@ -57,7 +95,80 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), withPagi
             const start = parseDateOnly(`${a}-${String(m).padStart(2, '0')}-01`);
             const nextMonth = m === 12 ? `${a + 1}-01-01` : `${a}-${String(m + 1).padStart(2, '0')}-01`;
             const end = parseDateOnly(nextMonth);
-            whereClause.fecha = { gte: start, lt: end };
+            const periodCondition = { fecha: { gte: start, lt: end } };
+            if (isReversalsFilter) {
+                // Si uno de los dos asientos está en el período elegido, se trae el
+                // par completo para que la corrección se pueda revisar en contexto.
+                conditions.push({ OR: [
+                    periodCondition,
+                    { reversion: { is: periodCondition } },
+                    { reversionDe: { is: periodCondition } }
+                ] });
+            } else {
+                whereClause.fecha = periodCondition.fecha;
+            }
+        }
+
+        if (conditions.length) {
+            whereClause.AND = conditions;
+        }
+
+        const includeRelations = {
+            cuentaBancaria: { select: { id: true, banco: true, nombre: true, moneda: true } },
+            transferenciaInterna: { select: { id: true, concepto: true } },
+            adjuntos: { select: { id: true, rutaArchivo: true, nombreArchivo: true, fechaCreacion: true } },
+            contrato: { include: { propiedad: true } },
+            creadoPor: { select: { id: true, nombreCompleto: true } },
+            anuladoPor: { select: { id: true, nombreCompleto: true } },
+            reversion: { select: { id: true, fechaCreacion: true } }
+        } satisfies Prisma.MovimientoCajaInclude;
+
+        if (isReversalsFilter) {
+            // Se pagina por corrección, en lugar de por asiento: un resultado puede
+            // contener el original anulado y su reversión, siempre consecutivos.
+            const matchingMovements = await prisma.movimientoCaja.findMany({
+                where: whereClause,
+                orderBy: [{ fecha: 'desc' }, { id: 'desc' }],
+                include: includeRelations
+            });
+
+            const relatedIds = new Set<number>();
+            matchingMovements.forEach(movimiento => {
+                relatedIds.add(movimiento.id);
+                if (movimiento.reversionDeId) relatedIds.add(movimiento.reversionDeId);
+                if (movimiento.reversion) relatedIds.add(movimiento.reversion.id);
+            });
+
+            const pairMovements = relatedIds.size
+                ? await prisma.movimientoCaja.findMany({
+                    where: { inmobiliariaId, id: { in: [...relatedIds] } },
+                    include: includeRelations
+                })
+                : [];
+            const groups = new Map<number, typeof pairMovements>();
+            pairMovements.forEach(movimiento => {
+                const groupId = movimiento.reversionDeId || movimiento.id;
+                const group = groups.get(groupId) || [];
+                group.push(movimiento);
+                groups.set(groupId, group);
+            });
+
+            const orderedGroups = [...groups.values()].sort((left, right) => {
+                const latestLeft = Math.max(...left.map(movimiento => movimiento.fecha.getTime()));
+                const latestRight = Math.max(...right.map(movimiento => movimiento.fecha.getTime()));
+                return latestRight - latestLeft || Math.max(...right.map(movimiento => movimiento.id)) - Math.max(...left.map(movimiento => movimiento.id));
+            });
+            const movimientos = orderedGroups
+                .slice(skip, skip + limitNum)
+                .flatMap(group => group.sort((left, right) => {
+                    if (Boolean(left.reversionDeId) !== Boolean(right.reversionDeId)) {
+                        return left.reversionDeId ? -1 : 1;
+                    }
+                    return right.id - left.id;
+                }));
+            const total = orderedGroups.length;
+
+            return res.json({ data: movimientos, meta: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) } });
         }
 
         const [total, movimientos] = await Promise.all([
@@ -65,13 +176,7 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), withPagi
             prisma.movimientoCaja.findMany({
                 where: whereClause,
                 orderBy: [{ fecha: 'desc' }, { id: 'desc' }],
-                include: {
-                    contrato: { include: { propiedad: true } },
-                    creadoPor: { select: { id: true, nombreCompleto: true } },
-                    anuladoPor: { select: { id: true, nombreCompleto: true } },
-                    reversion: { select: { id: true, fechaCreacion: true } },
-                    ajustePagoSueldoDe: { select: { id: true } }
-                },
+                include: includeRelations,
                 skip,
                 take: limitNum
             })
@@ -95,11 +200,12 @@ router.get('/resumen', authenticateToken, requirePermission('caja_chica.ver'), a
 
     try {
       const summary = await cached(`inmobiliaria:${inmobiliariaId}:caja:${anio}-${mes}`, 20_000, async () => {
-        const ledger = await getCashLedgerReport(prisma, inmobiliariaId, getMonthlyReportPeriod(anio, mes));
+      const ledger = await getCashLedgerReport(prisma, inmobiliariaId, getMonthlyReportPeriod(anio, mes));
+      const cuentasBancarias = await prisma.cuentaBancaria.findMany({ where: { inmobiliariaId }, select: { id: true, banco: true, nombre: true, moneda: true, activa: true } });
         const totalsFor = (moneda: 'ARS' | 'USD') => {
           const delPeriodo = ledger.movimientosDelPeriodo[moneda];
           const alCierre = ledger.saldoAlCierre[moneda];
-          const gastosOperativos = delPeriodo.otrosEgresos + delPeriodo.pagosSueldos;
+          const gastosOperativos = delPeriodo.otrosEgresos;
           return {
             // Los movimientos son del mes; el balance corresponde al último día
             // del mes y por eso puede utilizarse para cerrar períodos históricos.
@@ -114,7 +220,6 @@ router.get('/resumen', authenticateToken, requirePermission('caja_chica.ver'), a
             gananciaBruta: delPeriodo.otrosIngresos,
             resultadoNeto: delPeriodo.otrosIngresos - gastosOperativos,
             fondosEnCustodia: Math.max(0, delPeriodo.cobrosInquilinos - delPeriodo.pagosPropietarios),
-            pagosSueldos: delPeriodo.pagosSueldos,
             otrosIngresos: delPeriodo.otrosIngresos,
             otrosEgresos: delPeriodo.otrosEgresos
           };
@@ -134,6 +239,12 @@ router.get('/resumen', authenticateToken, requirePermission('caja_chica.ver'), a
           totalEgresosUSD: totalesPorMoneda.USD.totalEgresos,
           balanceUSD: totalesPorMoneda.USD.balance,
           totalesPorMoneda,
+          saldosBancarios: Object.fromEntries(cuentasBancarias.map(cuenta => [cuenta.id, {
+            ...cuenta,
+            ingresos: ledger.movimientosDelPeriodo[cuenta.moneda as 'ARS' | 'USD'].cuentasBancarias[String(cuenta.id)]?.ingresos || 0,
+            egresos: ledger.movimientosDelPeriodo[cuenta.moneda as 'ARS' | 'USD'].cuentasBancarias[String(cuenta.id)]?.egresos || 0,
+            saldo: ledger.saldoAlCierre[cuenta.moneda as 'ARS' | 'USD'].cuentasBancarias[String(cuenta.id)]?.saldo || 0
+          }])),
           balanceCaja: ars.balanceCaja,
           balanceBanco: ars.balanceBanco,
           totalCobrado: ars.totalCobrado,
@@ -156,6 +267,7 @@ router.get('/cierres', authenticateToken, requirePermission('caja_chica.ver'), a
   res.json(await prisma.cierreCaja.findMany({
     where: { inmobiliariaId },
     include: {
+      cuentaBancaria: { select: { id: true, banco: true, nombre: true, moneda: true, activa: true, esHistorica: true } },
       cerradoPor: { select: { nombreCompleto: true } },
       reabiertoPor: { select: { nombreCompleto: true } },
       eventos: {
@@ -167,7 +279,21 @@ router.get('/cierres', authenticateToken, requirePermission('caja_chica.ver'), a
   }));
 });
 
-const cierreSchema = z.object({ periodo: dateOnlyString('El período').refine(value => value.endsWith('-01')), cuenta: z.enum(['CAJA', 'BANCO']), moneda: z.enum(['ARS', 'USD']), saldoDeclarado: z.coerce.number().finite(), motivoDiferencia: optionalText(1000) });
+const cierreSchema = z.object({
+  periodo: dateOnlyString('El período').refine(value => value.endsWith('-01')),
+  cuenta: z.enum(['CAJA', 'BANCO']),
+  cuentaBancariaId: z.coerce.number().int().positive().optional(),
+  moneda: z.enum(['ARS', 'USD']),
+  saldoDeclarado: z.coerce.number().finite(),
+  motivoDiferencia: optionalText(1000)
+}).superRefine((data, ctx) => {
+  if (data.cuenta === 'BANCO' && !data.cuentaBancariaId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['cuentaBancariaId'], message: 'Seleccioná la cuenta bancaria a conciliar.' });
+  }
+  if (data.cuenta === 'CAJA' && data.cuentaBancariaId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['cuentaBancariaId'], message: 'Caja no lleva cuenta bancaria.' });
+  }
+});
 router.post('/cierres', authenticateToken, requirePermission('caja_chica.cerrar'), requireRecentAuthentication, validateBody(cierreSchema), async (req, res) => {
   const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
   const body = req.body;
@@ -179,10 +305,22 @@ router.post('/cierres', authenticateToken, requirePermission('caja_chica.cerrar'
 
   try {
     const { cierre, transition } = await prisma.$transaction(async tx => {
+      const cuentaBancariaId = body.cuenta === CuentaCaja.BANCO ? Number(body.cuentaBancariaId) : null;
+      if (cuentaBancariaId) {
+        const cuentaBancaria = await tx.cuentaBancaria.findFirst({
+          where: { id: cuentaBancariaId, inmobiliariaId, moneda: body.moneda },
+          select: { id: true }
+        });
+        if (!cuentaBancaria) {
+          throw Object.assign(new Error('La cuenta bancaria no pertenece a la inmobiliaria o no coincide con la moneda.'), { statusCode: 400, code: 'INVALID_BANK_ACCOUNT' });
+        }
+      }
       // La conciliación y el cambio de estado comparten transacción serializable
       // con los movimientos de caja para que no se intercale un asiento nuevo.
       const ledger = await getCashLedgerReport(tx, inmobiliariaId, getMonthlyReportPeriod(periodo.getUTCFullYear(), periodo.getUTCMonth() + 1));
-      const saldoSistema = new Decimal(ledger.saldoAlCierre[body.moneda as 'ARS' | 'USD'].cuentas[body.cuenta as CuentaCaja].saldo);
+      const saldoSistema = new Decimal(body.cuenta === CuentaCaja.BANCO
+        ? ledger.saldoAlCierre[body.moneda as 'ARS' | 'USD'].cuentasBancarias[String(cuentaBancariaId)]?.saldo || 0
+        : ledger.saldoAlCierre[body.moneda as 'ARS' | 'USD'].cuentas.CAJA.saldo);
       const declarado = new Decimal(body.saldoDeclarado);
       const diferencia = declarado.minus(saldoSistema);
       if (!diferencia.isZero() && !body.motivoDiferencia) {
@@ -193,6 +331,7 @@ router.post('/cierres', authenticateToken, requirePermission('caja_chica.cerrar'
         inmobiliariaId,
         periodo,
         cuenta: body.cuenta as CuentaCaja,
+        cuentaBancariaId,
         moneda: body.moneda,
         saldoSistema,
         saldoDeclarado: declarado,
@@ -207,7 +346,7 @@ router.post('/cierres', authenticateToken, requirePermission('caja_chica.cerrar'
       accion: 'CERRAR_CAJA',
       entidad: 'CierreCaja',
       entidadId: cierre.id,
-      detalle: JSON.stringify({ periodo: body.periodo, cuenta: body.cuenta, moneda: body.moneda, saldoSistema: cierre.saldoSistema, declarado: cierre.saldoDeclarado, version: cierre.version, transition, criterio: 'CAJA_AL_ULTIMO_DIA_DEL_PERIODO' })
+      detalle: JSON.stringify({ periodo: body.periodo, cuenta: body.cuenta, cuentaBancariaId: cierre.cuentaBancariaId, moneda: body.moneda, saldoSistema: cierre.saldoSistema, declarado: cierre.saldoDeclarado, version: cierre.version, transition, criterio: 'CUENTA_AL_ULTIMO_DIA_DEL_PERIODO' })
     });
     invalidatePerformanceCache(inmobiliariaId);
     res.status(201).json(cierre);
@@ -252,10 +391,12 @@ router.post('/cierres/:id/reabrir', authenticateToken, requirePermission('caja_c
   }
 });
 
-// Crear nuevo movimiento manual
-router.post('/', authenticateToken, requirePermission('caja_chica.crear'), validateBody(movimientoCajaSchema), async (req, res) => {
+// Crear nuevo movimiento manual. Los comprobantes son documentación de respaldo
+// y no alteran el importe ni el impacto contable del asiento.
+router.post('/', authenticateToken, requirePermission('caja_chica.crear'), upload.array('comprobantes', 10), validateUploadedFilesContent, cleanupFailedUpload, validateBody(movimientoCajaSchema), async (req, res) => {
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
-    const { tipo, concepto, monto, moneda, fecha, metodoPago, observaciones } = req.body;
+    const { tipo, concepto, monto, moneda, fecha, metodoPago, cuentaBancariaId, observaciones } = req.body;
+    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
 
     if (!tipo || !concepto || !monto || !fecha) {
         return res.status(400).json({ message: 'Faltan campos obligatorios' });
@@ -265,13 +406,39 @@ router.post('/', authenticateToken, requirePermission('caja_chica.crear'), valid
     // métodos se registran en banco. Así se evita una combinación inconsistente.
     const cuentaFinal: CuentaCaja = metodoPago === 'EFECTIVO' ? 'CAJA' : 'BANCO';
 
+    const persistedAttachments: Array<{ rutaArchivo: string; nombreArchivo: string }> = [];
+    let movimiento;
     try {
+        for (const file of uploadedFiles) {
+            const rutaArchivo = await commitUploadedFile(file, inmobiliariaId);
+            if (rutaArchivo) persistedAttachments.push({ rutaArchivo, nombreArchivo: file.originalname.slice(0, 255) });
+        }
         // La validación y la creación comparten transacción para que un cierre
         // concurrente no pueda intercalarse entre ambas operaciones.
-        const movimiento = await prisma.$transaction(async tx => {
+        movimiento = await prisma.$transaction(async tx => {
             const fechaMovimiento = parseDateOnly(fecha);
             assertOperationalDateIsNotFuture(fechaMovimiento, 'La fecha del movimiento de caja');
-            await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: fechaMovimiento, cuenta: cuentaFinal, moneda: moneda || 'ARS' });
+            let cuentaBancariaFinal: number | null = null;
+            if (cuentaFinal === 'BANCO') {
+                if (!cuentaBancariaId) {
+                    throw Object.assign(new Error('Seleccioná la cuenta bancaria donde se registró la operación.'), { statusCode: 400, code: 'BANK_ACCOUNT_REQUIRED' });
+                }
+                const cuentaBancaria = await tx.cuentaBancaria.findFirst({
+                    where: { id: cuentaBancariaId, inmobiliariaId, activa: true, moneda: moneda || 'ARS' },
+                    select: { id: true }
+                });
+                if (!cuentaBancaria) {
+                    throw Object.assign(new Error('La cuenta bancaria elegida no está activa o no corresponde a la moneda del movimiento.'), { statusCode: 400, code: 'INVALID_BANK_ACCOUNT' });
+                }
+                cuentaBancariaFinal = cuentaBancaria.id;
+            }
+            await assertCashPeriodOpen(tx, {
+                inmobiliariaId,
+                fecha: fechaMovimiento,
+                cuenta: cuentaFinal,
+                moneda: moneda || 'ARS',
+                cuentaBancariaId: cuentaBancariaFinal
+            });
             return tx.movimientoCaja.create({
                 data: {
                     inmobiliariaId,
@@ -282,33 +449,181 @@ router.post('/', authenticateToken, requirePermission('caja_chica.crear'), valid
                     fecha: fechaMovimiento,
                     metodoPago: (metodoPago as MetodoPago) || 'EFECTIVO',
                     cuenta: cuentaFinal,
+                    cuentaBancariaId: cuentaBancariaFinal,
                     observaciones,
-                    creadoPorId: usuarioId
+                    creadoPorId: usuarioId,
+                    adjuntos: persistedAttachments.length > 0 ? {
+                        create: persistedAttachments.map(attachment => ({ ...attachment, creadoPorId: usuarioId }))
+                    } : undefined
+                },
+                include: {
+                    adjuntos: { select: { id: true, rutaArchivo: true, nombreArchivo: true, fechaCreacion: true } }
                 }
             });
         });
+    } catch (error: any) {
+        await Promise.all(persistedAttachments.map(attachment => removeUploadedFile(attachment.rutaArchivo)));
+        console.error('Error al crear movimiento de caja:', error);
+        return res.status(error.statusCode || 500).json({ message: error.message || 'Error interno del servidor', code: error.code });
+    }
+
+    await auditService.log({
+        usuarioId,
+        inmobiliariaId,
+        accion: 'CREAR_MOVIMIENTO_CAJA',
+        entidad: 'MovimientoCaja',
+        entidadId: movimiento!.id,
+        detalle: `${movimiento!.tipo}: ${movimiento!.concepto} por ${movimiento!.moneda === 'USD' ? 'US$' : '$'}${movimiento!.monto}${persistedAttachments.length ? ` · ${persistedAttachments.length} comprobante(s)` : ''}`
+    });
+
+    invalidatePerformanceCache(inmobiliariaId);
+
+    res.status(201).json(movimiento);
+});
+
+// Permite completar el respaldo documental luego de registrar el movimiento,
+// por ejemplo cuando el comprobante de transferencia llega más tarde.
+router.post('/:id/comprobantes', authenticateToken, requirePermission('caja_chica.crear'), upload.array('comprobantes', 10), validateUploadedFilesContent, cleanupFailedUpload, async (req, res) => {
+    const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
+    const movimientoId = Number(req.params.id);
+    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+
+    if (!Number.isInteger(movimientoId) || movimientoId <= 0) {
+        return res.status(400).json({ message: 'Movimiento inválido.', code: 'INVALID_CASH_MOVEMENT' });
+    }
+    if (uploadedFiles.length === 0) {
+        return res.status(400).json({ message: 'Seleccioná al menos un comprobante.', code: 'ATTACHMENT_REQUIRED' });
+    }
+
+    const movimiento = await prisma.movimientoCaja.findFirst({
+        where: { id: movimientoId, inmobiliariaId, anuladoEn: null },
+        select: { id: true, concepto: true }
+    });
+    if (!movimiento) {
+        return res.status(404).json({ message: 'Movimiento no encontrado o anulado.', code: 'CASH_MOVEMENT_NOT_FOUND' });
+    }
+
+    const persistedAttachments: Array<{ rutaArchivo: string; nombreArchivo: string }> = [];
+    try {
+        for (const file of uploadedFiles) {
+            const rutaArchivo = await commitUploadedFile(file, inmobiliariaId);
+            if (rutaArchivo) persistedAttachments.push({ rutaArchivo, nombreArchivo: file.originalname.slice(0, 255) });
+        }
+        const adjuntos = await prisma.$transaction(tx => Promise.all(
+            persistedAttachments.map(attachment => tx.adjuntoMovimientoCaja.create({
+                data: { ...attachment, movimientoCajaId: movimiento.id, creadoPorId: usuarioId }
+            }))
+        ));
 
         await auditService.log({
             usuarioId,
             inmobiliariaId,
-            accion: 'CREAR_MOVIMIENTO_CAJA',
+            accion: 'ADJUNTAR_COMPROBANTES_MOVIMIENTO_CAJA',
             entidad: 'MovimientoCaja',
             entidadId: movimiento.id,
-            detalle: `${movimiento.tipo}: ${movimiento.concepto} por ${movimiento.moneda === 'USD' ? 'US$' : '$'}${movimiento.monto}`
+            detalle: `${adjuntos.length} comprobante(s) adjuntado(s) a: ${movimiento.concepto}`
         });
-
-        invalidatePerformanceCache(inmobiliariaId);
-
-        res.status(201).json(movimiento);
+        res.status(201).json({ data: adjuntos });
     } catch (error: any) {
-        console.error('Error al crear movimiento de caja:', error);
-        res.status(error.statusCode || 500).json({ message: error.message || 'Error interno del servidor', code: error.code });
+        await Promise.all(persistedAttachments.map(attachment => removeUploadedFile(attachment.rutaArchivo)));
+        console.error('Error al adjuntar comprobantes del movimiento de caja:', error);
+        res.status(error.statusCode || 500).json({ message: error.message || 'No se pudieron adjuntar los comprobantes.', code: error.code });
+    }
+});
+
+/**
+ * Traslada fondos entre dos cuentas propias. Los dos asientos usan el mismo
+ * identificador de transferencia, de modo que el historial conserva origen y
+ * destino sin alterar el saldo consolidado de bancos ni el total general.
+ */
+router.post('/transferencias', authenticateToken, requirePermission('caja_chica.crear'), requireRecentAuthentication, validateBody(transferenciaInternaSchema), async (req: AuthRequest, res) => {
+    const { inmobiliariaId, id: usuarioId } = req.user!;
+    const { fecha, moneda, monto, cuentaOrigenId, cuentaDestinoId, concepto, observaciones } = req.body as z.infer<typeof transferenciaInternaSchema>;
+
+    try {
+        const result = await prisma.$transaction(async tx => {
+            const fechaTransferencia = parseDateOnly(fecha);
+            assertOperationalDateIsNotFuture(fechaTransferencia, 'La fecha de la transferencia interna');
+            const cuentas = await tx.cuentaBancaria.findMany({
+                where: {
+                    id: { in: [cuentaOrigenId, cuentaDestinoId] },
+                    inmobiliariaId,
+                    activa: true,
+                    moneda
+                },
+                select: { id: true, banco: true, nombre: true, moneda: true }
+            });
+            const origen = cuentas.find(cuenta => cuenta.id === cuentaOrigenId);
+            const destino = cuentas.find(cuenta => cuenta.id === cuentaDestinoId);
+            if (!origen || !destino) {
+                throw Object.assign(new Error('Origen y destino deben ser cuentas activas de la inmobiliaria y de la misma moneda.'), { statusCode: 400, code: 'INVALID_INTERNAL_TRANSFER_ACCOUNT' });
+            }
+
+            // Ambos bloqueos se verifican antes de crear nada: una transferencia
+            // nunca puede quedar a medias porque una de las dos cuentas cerró.
+            await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: fechaTransferencia, cuenta: CuentaCaja.BANCO, moneda, cuentaBancariaId: origen.id });
+            await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: fechaTransferencia, cuenta: CuentaCaja.BANCO, moneda, cuentaBancariaId: destino.id });
+
+            const transferencia = await tx.transferenciaInterna.create({
+                data: { inmobiliariaId, creadoPorId: usuarioId, fecha: fechaTransferencia, moneda, monto: new Decimal(monto), concepto, observaciones }
+            });
+            const prefijo = `Transferencia interna #${transferencia.id}`;
+            const [egreso, ingreso] = await Promise.all([
+                tx.movimientoCaja.create({
+                    data: {
+                        inmobiliariaId,
+                        creadoPorId: usuarioId,
+                        transferenciaInternaId: transferencia.id,
+                        tipo: TipoMovimiento.EGRESO,
+                        concepto: `${prefijo}: ${origen.banco} — ${origen.nombre} → ${destino.banco} — ${destino.nombre}`.slice(0, 255),
+                        monto: new Decimal(monto),
+                        moneda,
+                        fecha: fechaTransferencia,
+                        metodoPago: MetodoPago.TRANSFERENCIA,
+                        cuenta: CuentaCaja.BANCO,
+                        cuentaBancariaId: origen.id,
+                        observaciones
+                    }
+                }),
+                tx.movimientoCaja.create({
+                    data: {
+                        inmobiliariaId,
+                        creadoPorId: usuarioId,
+                        transferenciaInternaId: transferencia.id,
+                        tipo: TipoMovimiento.INGRESO,
+                        concepto: `${prefijo}: ${origen.banco} — ${origen.nombre} → ${destino.banco} — ${destino.nombre}`.slice(0, 255),
+                        monto: new Decimal(monto),
+                        moneda,
+                        fecha: fechaTransferencia,
+                        metodoPago: MetodoPago.TRANSFERENCIA,
+                        cuenta: CuentaCaja.BANCO,
+                        cuentaBancariaId: destino.id,
+                        observaciones
+                    }
+                })
+            ]);
+            return { transferencia, egreso, ingreso, origen, destino };
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+        await auditService.log({
+            usuarioId,
+            inmobiliariaId,
+            accion: 'TRANSFERIR_ENTRE_CUENTAS',
+            entidad: 'TransferenciaInterna',
+            entidadId: result.transferencia.id,
+            detalle: `${result.transferencia.moneda} ${result.transferencia.monto} desde ${result.origen.banco} — ${result.origen.nombre} hacia ${result.destino.banco} — ${result.destino.nombre}`
+        });
+        invalidatePerformanceCache(inmobiliariaId);
+        res.status(201).json(result);
+    } catch (error: any) {
+        console.error('Error al transferir entre cuentas:', error);
+        res.status(error.statusCode || 400).json({ message: error.message || 'No se pudo registrar la transferencia interna', code: error.code });
     }
 });
 
 /**
  * Anula un asiento manual mediante contrapartida. Los asientos generados por
- * pagos, sueldos o liquidaciones se corrigen desde su operación de origen.
+ * pagos o liquidaciones se corrigen desde su operación de origen.
  */
 router.post('/:id/anular', authenticateToken, requirePermission('caja_chica.eliminar'), requireRecentAuthentication, validateBody(anulacionSchema), async (req, res) => {
     const movimientoId = Number(req.params.id);
@@ -323,7 +638,7 @@ router.post('/:id/anular', authenticateToken, requirePermission('caja_chica.elim
         const result = await prisma.$transaction(async (tx) => {
             const movimiento = await tx.movimientoCaja.findFirst({
                 where: { id: movimientoId, inmobiliariaId },
-                include: { reversion: true, ajustePagoSueldoDe: true }
+                include: { reversion: true }
             });
 
             if (!movimiento) {
@@ -335,7 +650,7 @@ router.post('/:id/anular', authenticateToken, requirePermission('caja_chica.elim
             if (movimiento.reversionDeId) {
                 throw Object.assign(new Error('Un asiento de reversión no puede volver a anularse'), { statusCode: 409, code: 'REVERSAL_CANNOT_BE_VOIDED' });
             }
-            if (movimiento.pagoId || movimiento.pagoSueldoId || movimiento.liquidacionId || movimiento.contratoId || movimiento.ajustePagoSueldoDe) {
+            if (movimiento.pagoId || movimiento.liquidacionId || movimiento.contratoId || movimiento.transferenciaInternaId) {
                 throw Object.assign(
                     new Error('Este movimiento fue generado por otra operación y debe corregirse desde su módulo de origen'),
                     { statusCode: 409, code: 'SYSTEM_CASH_MOVEMENT' }
@@ -373,6 +688,7 @@ router.post('/:id/anular', authenticateToken, requirePermission('caja_chica.elim
                     fecha: fechaCorreccion,
                     metodoPago: movimiento.metodoPago,
                     cuenta: movimiento.cuenta,
+                    cuentaBancariaId: movimiento.cuentaBancariaId,
                     observaciones: motivo,
                     creadoPorId: usuarioId,
                     reversionDeId: movimiento.id

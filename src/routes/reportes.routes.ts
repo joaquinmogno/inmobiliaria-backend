@@ -21,13 +21,11 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
     try {
         await syncContractLifecycle(inmobiliariaId);
         const permissions = new Set(await getUserPermissions(userId));
-        const canViewSalaries = permissions.has('sueldos.ver');
         const canViewFinancialReports = permissions.has('reportes.financieros.ver');
         const canViewContractReports = permissions.has('reportes.contratos.ver');
         const canViewDelinquencyReports = permissions.has('reportes.morosidad.ver');
         const canViewLiquidations = permissions.has('liquidaciones.ver');
         const permissionScope = getDashboardPermissionScope({
-            canViewSalaries,
             canViewFinancialReports,
             canViewContractReports,
             canViewDelinquencyReports,
@@ -87,7 +85,7 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
             }
             const accrued = devengado.porMoneda[moneda];
             const cash = caja.movimientosDelPeriodo[moneda];
-            const gastosAgencia = cash.otrosEgresos + (canViewSalaries ? cash.pagosSueldos : 0);
+            const gastosAgencia = cash.otrosEgresos;
             result[moneda] = {
                 // Campos conservados para los clientes existentes; su origen ya
                 // no se mezcla: cobrado es caja y honorarios es devengado.

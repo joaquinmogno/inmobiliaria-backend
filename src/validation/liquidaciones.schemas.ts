@@ -39,6 +39,7 @@ export const pagoPropietarioSchema = z.object({
     monto: positiveDecimal('El monto a pagar'),
     fechaPago: optionalDateOnlyString('La fecha de pago'),
     metodoPago: paymentMethodSchema.optional().default('EFECTIVO'),
+    cuentaBancariaId: z.coerce.number().int().positive().optional(),
     propietarioId: z.coerce.number().int().positive('Propietario inválido'),
     comprobante: optionalText(120),
     observaciones: optionalText(1000),
@@ -58,6 +59,7 @@ export const ajusteLiquidacionSchema = z.object({
     liquidacionDestinoId: z.coerce.number().int().positive('Liquidación destino inválida').optional(),
     fechaDevolucion: optionalDateOnlyString('La fecha de devolución'),
     metodoDevolucion: paymentMethodSchema.optional().default('EFECTIVO'),
+    cuentaBancariaIdDevolucion: z.coerce.number().int().positive().optional(),
     observacionesDevolucion: optionalText(1000)
 }).refine(data => data.montoInquilino > 0 || data.montoPropietario > 0, {
     message: 'El ajuste debe afectar al inquilino o al propietario'
@@ -70,6 +72,9 @@ export const ajusteLiquidacionSchema = z.object({
     }
     if (data.destinoCredito !== 'COMPENSACION' && data.liquidacionDestinoId) {
         ctx.addIssue({ code: 'custom', path: ['liquidacionDestinoId'], message: 'Sólo indicá una liquidación destino al compensar un crédito' });
+    }
+    if (data.destinoCredito === 'DEVOLUCION' && data.metodoDevolucion !== 'EFECTIVO' && !data.cuentaBancariaIdDevolucion) {
+        ctx.addIssue({ code: 'custom', path: ['cuentaBancariaIdDevolucion'], message: 'Seleccioná una cuenta bancaria para la devolución.' });
     }
 });
 

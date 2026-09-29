@@ -28,15 +28,13 @@ type CashMovementRow = {
   monto: Prisma.Decimal | Decimal | number | string;
   moneda: Moneda;
   cuenta: 'CAJA' | 'BANCO';
+  cuentaBancariaId?: number | null;
   fecha: Date;
   pagoId: number | null;
-  pagoSueldoId: number | null;
   esPagoPropietario: boolean;
   anuladoEn?: Date | null;
-  ajustePagoSueldoDe?: { id: number } | null;
   reversionDe?: {
     pagoId: number | null;
-    pagoSueldoId: number | null;
     esPagoPropietario: boolean;
     anuladoEn?: Date | null;
   } | null;
@@ -48,10 +46,10 @@ type CashTotals = {
   saldo: Decimal;
   cobrosInquilinos: Decimal;
   pagosPropietarios: Decimal;
-  pagosSueldos: Decimal;
   otrosIngresos: Decimal;
   otrosEgresos: Decimal;
   cuentas: Record<'CAJA' | 'BANCO', { ingresos: Decimal; egresos: Decimal; saldo: Decimal }>;
+  cuentasBancarias: Record<string, { ingresos: Decimal; egresos: Decimal; saldo: Decimal }>;
 };
 
 const zeroTotals = (): CashTotals => ({
@@ -60,13 +58,13 @@ const zeroTotals = (): CashTotals => ({
   saldo: new Decimal(0),
   cobrosInquilinos: new Decimal(0),
   pagosPropietarios: new Decimal(0),
-  pagosSueldos: new Decimal(0),
   otrosIngresos: new Decimal(0),
   otrosEgresos: new Decimal(0),
   cuentas: {
     CAJA: { ingresos: new Decimal(0), egresos: new Decimal(0), saldo: new Decimal(0) },
     BANCO: { ingresos: new Decimal(0), egresos: new Decimal(0), saldo: new Decimal(0) }
-  }
+  },
+  cuentasBancarias: {}
 });
 
 const serializeCashTotals = (totals: CashTotals) => ({
@@ -75,16 +73,14 @@ const serializeCashTotals = (totals: CashTotals) => ({
   saldo: totals.saldo.toNumber(),
   cobrosInquilinos: totals.cobrosInquilinos.toNumber(),
   pagosPropietarios: totals.pagosPropietarios.toNumber(),
-  pagosSueldos: totals.pagosSueldos.toNumber(),
   otrosIngresos: totals.otrosIngresos.toNumber(),
   otrosEgresos: totals.otrosEgresos.toNumber(),
   cuentas: {
     CAJA: Object.fromEntries(Object.entries(totals.cuentas.CAJA).map(([key, value]) => [key, value.toNumber()])),
     BANCO: Object.fromEntries(Object.entries(totals.cuentas.BANCO).map(([key, value]) => [key, value.toNumber()]))
-  }
+  },
+  cuentasBancarias: Object.fromEntries(Object.entries(totals.cuentasBancarias).map(([id, total]) => [id, Object.fromEntries(Object.entries(total).map(([key, value]) => [key, value.toNumber()]))]))
 });
-
-const isSalaryMovement = (movement: CashMovementRow) => Boolean(movement.pagoSueldoId || movement.reversionDe?.pagoSueldoId || movement.ajustePagoSueldoDe);
 
 /**
  * Reglas únicas de caja:
@@ -102,6 +98,9 @@ const accumulateCashMovement = (totals: CashTotals, movement: CashMovementRow) =
 
   const monto = new Decimal(movement.monto.toString());
   const cuenta = totals.cuentas[movement.cuenta];
+  const cuentaBancaria = movement.cuenta === 'BANCO' && movement.cuentaBancariaId
+    ? (totals.cuentasBancarias[String(movement.cuentaBancariaId)] ||= { ingresos: new Decimal(0), egresos: new Decimal(0), saldo: new Decimal(0) })
+    : null;
   const ingreso = movement.tipo === TipoMovimiento.INGRESO;
 
   if (ingreso) {
@@ -109,18 +108,19 @@ const accumulateCashMovement = (totals: CashTotals, movement: CashMovementRow) =
     totals.saldo = totals.saldo.plus(monto);
     cuenta.ingresos = cuenta.ingresos.plus(monto);
     cuenta.saldo = cuenta.saldo.plus(monto);
+    if (cuentaBancaria) { cuentaBancaria.ingresos = cuentaBancaria.ingresos.plus(monto); cuentaBancaria.saldo = cuentaBancaria.saldo.plus(monto); }
   } else {
     totals.egresos = totals.egresos.plus(monto);
     totals.saldo = totals.saldo.minus(monto);
     cuenta.egresos = cuenta.egresos.plus(monto);
     cuenta.saldo = cuenta.saldo.minus(monto);
+    if (cuentaBancaria) { cuentaBancaria.egresos = cuentaBancaria.egresos.plus(monto); cuentaBancaria.saldo = cuentaBancaria.saldo.minus(monto); }
   }
 
   const isTenantPayment = Boolean(movement.pagoId || movement.reversionDe?.pagoId);
   const isOwnerPayment = movement.esPagoPropietario || Boolean(movement.reversionDe?.esPagoPropietario);
   if (isTenantPayment) totals.cobrosInquilinos = totals.cobrosInquilinos.plus(ingreso ? monto : monto.negated());
   else if (isOwnerPayment) totals.pagosPropietarios = totals.pagosPropietarios.plus(ingreso ? monto.negated() : monto);
-  else if (isSalaryMovement(movement)) totals.pagosSueldos = totals.pagosSueldos.plus(ingreso ? monto.negated() : monto);
   else if (ingreso) totals.otrosIngresos = totals.otrosIngresos.plus(monto);
   else totals.otrosEgresos = totals.otrosEgresos.plus(monto);
 };
@@ -166,14 +166,13 @@ export async function getCashLedgerReport(
       monto: true,
       moneda: true,
       cuenta: true,
+      cuentaBancariaId: true,
       fecha: true,
       pagoId: true,
-      pagoSueldoId: true,
       esPagoPropietario: true,
       anuladoEn: true,
-      ajustePagoSueldoDe: { select: { id: true } },
       reversionDe: {
-        select: { pagoId: true, pagoSueldoId: true, esPagoPropietario: true, anuladoEn: true }
+        select: { pagoId: true, esPagoPropietario: true, anuladoEn: true }
       }
     }
   });

@@ -844,7 +844,7 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
     const {
         tipo, concepto, motivo, montoInquilino, montoPropietario,
-        destinoCredito, liquidacionDestinoId, fechaDevolucion, metodoDevolucion, observacionesDevolucion
+        destinoCredito, liquidacionDestinoId, fechaDevolucion, metodoDevolucion, cuentaBancariaIdDevolucion, observacionesDevolucion
     } = req.body;
     try {
         const result = await prisma.$transaction(async tx => {
@@ -938,7 +938,14 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
                     const refundDate = fechaDevolucion ? parseDateOnly(fechaDevolucion) : argentinaTodayAsDate();
                     assertOperationalDateIsNotFuture(refundDate, 'La fecha de devolución');
                     const refundAccount = metodoDevolucion === 'EFECTIVO' ? 'CAJA' : 'BANCO';
-                    await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: refundDate, cuenta: refundAccount, moneda: liquidation.moneda });
+                    const cuentaBancariaDevolucion = refundAccount === 'CAJA' ? null : await tx.cuentaBancaria.findFirst({
+                        where: { id: cuentaBancariaIdDevolucion, inmobiliariaId, activa: true, moneda: liquidation.moneda },
+                        select: { id: true }
+                    });
+                    if (refundAccount === 'BANCO' && !cuentaBancariaDevolucion) {
+                        throw Object.assign(new Error('Seleccioná una cuenta bancaria activa de la misma moneda para la devolución.'), { statusCode: 400, code: 'BANK_ACCOUNT_REQUIRED' });
+                    }
+                    await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: refundDate, cuenta: refundAccount, moneda: liquidation.moneda, cuentaBancariaId: cuentaBancariaDevolucion?.id });
                     const refundMovement = await tx.movimientoCaja.create({
                         data: {
                             inmobiliariaId,
@@ -949,6 +956,7 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
                             fecha: refundDate,
                             metodoPago: metodoDevolucion,
                             cuenta: refundAccount,
+                            cuentaBancariaId: cuentaBancariaDevolucion?.id,
                             observaciones: observacionesDevolucion || `Nota de crédito #${adjustment.id}: ${concepto}`,
                             creadoPorId: usuarioId,
                             contratoId: liquidation.contratoId,
@@ -1034,10 +1042,10 @@ router.post('/creditos-inquilino/:id/aplicar', requirePermission('liquidaciones.
 
 // Registra entregas parciales al propietario. Sólo se permite adelantar fondos
 // antes de cobrar al inquilino a quien tenga la capacidad explícita.
-router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_propietario'), requireRecentAuthentication, validateBody(pagoPropietarioSchema), async (req, res) => {
+router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_propietario'), validateBody(pagoPropietarioSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { fechaPago, metodoPago, comprobante, observaciones, motivoAdelanto, propietarioId, monto, expectedVersion } = req.body;
+    const { fechaPago, metodoPago, cuentaBancariaId, comprobante, observaciones, motivoAdelanto, propietarioId, monto, expectedVersion } = req.body;
 
     try {
         const paymentDate = fechaPago ? parseDateOnly(fechaPago) : argentinaTodayAsDate();
@@ -1122,7 +1130,9 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
                 ? maskedBankDestination(validCbu ? principalOwner.cbu : null, validAlias ? principalOwner.aliasBancario : null)
                 : null;
             const cuentaPago = (metodoPago === 'EFECTIVO') ? 'CAJA' : 'BANCO';
-            await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: paymentDate, cuenta: cuentaPago, moneda: liquidacion.moneda });
+            const cuentaBancaria = cuentaPago === 'CAJA' ? null : await tx.cuentaBancaria.findFirst({ where: { id: cuentaBancariaId, inmobiliariaId, activa: true, moneda: liquidacion.moneda }, select: { id: true } });
+            if (cuentaPago === 'BANCO' && !cuentaBancaria) throw Object.assign(new Error('Seleccioná una cuenta bancaria activa para la transferencia o cheque.'), { statusCode: 400, code: 'BANK_ACCOUNT_REQUIRED' });
+            await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: paymentDate, cuenta: cuentaPago, moneda: liquidacion.moneda, cuentaBancariaId: cuentaBancaria?.id });
 
             const cashMovement = await tx.movimientoCaja.create({
                 data: {
@@ -1134,6 +1144,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
                     fecha: paymentDate,
                     metodoPago: metodoPago || 'EFECTIVO',
                     cuenta: cuentaPago,
+                    cuentaBancariaId: cuentaBancaria?.id,
                     comprobante: comprobante || undefined,
                     observaciones: observaciones || undefined,
                     creadoPorId: (req as AuthRequest).user!.id,
@@ -1298,6 +1309,7 @@ router.post(
                         fecha: fechaCorreccion,
                         metodoPago: original.metodoPago,
                         cuenta: original.cuenta,
+                        cuentaBancariaId: original.cuentaBancariaId,
                         observaciones: motivo,
                         creadoPorId: usuarioId,
                         contratoId: liquidacion.contratoId,
@@ -1407,6 +1419,7 @@ router.post(
                         fecha: fechaCorreccion,
                         metodoPago: pago.metodoPago,
                         cuenta: pago.cuenta,
+                        cuentaBancariaId: pago.movimientoCaja.cuentaBancariaId,
                         observaciones: motivo,
                         creadoPorId: usuarioId,
                         contratoId: pago.liquidacion.contratoId,

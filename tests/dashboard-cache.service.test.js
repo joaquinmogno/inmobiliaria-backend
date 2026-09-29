@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 const { getDashboardPermissionScope } = require('../dist/services/dashboard-cache.service');
 
 const basePermissions = {
-  canViewSalaries: false,
   canViewFinancialReports: false,
   canViewContractReports: true,
   canViewDelinquencyReports: true,

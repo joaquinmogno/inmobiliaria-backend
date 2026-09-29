@@ -4,7 +4,6 @@
  * de caché generada con un alcance distinto.
  */
 export type DashboardResultPermissions = {
-  canViewSalaries: boolean;
   canViewFinancialReports: boolean;
   canViewContractReports: boolean;
   canViewDelinquencyReports: boolean;
@@ -12,7 +11,6 @@ export type DashboardResultPermissions = {
 };
 
 export const getDashboardPermissionScope = (permissions: DashboardResultPermissions) => [
-  `salaries:${Number(permissions.canViewSalaries)}`,
   `financial:${Number(permissions.canViewFinancialReports)}`,
   `contracts:${Number(permissions.canViewContractReports)}`,
   `delinquency:${Number(permissions.canViewDelinquencyReports)}`,

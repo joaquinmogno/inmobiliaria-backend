@@ -45,7 +45,7 @@ test.after(async () => {
 
 test('all growing lists validate pagination and enforce the same maximum page size', async () => {
   const session = await adminSession();
-  const endpoints = ['/liquidaciones', '/pagos', '/cajachica', '/personas', '/propiedades', '/contratos', '/sueldos', '/usuarios', '/inmobiliaria/logs'];
+  const endpoints = ['/liquidaciones', '/pagos', '/cajachica', '/personas', '/propiedades', '/contratos', '/usuarios', '/inmobiliaria/logs'];
 
   for (const endpoint of endpoints) {
     const invalid = await get(`${endpoint}?page=1.5&limit=25`, session);

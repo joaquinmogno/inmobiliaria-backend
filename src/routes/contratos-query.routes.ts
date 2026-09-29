@@ -54,6 +54,7 @@ router.get('/', requirePermission('contratos.ver'), withPagination(10), async (r
                     propiedad: true,
                     inquilinos: { where: { esPrincipal: true }, include: { persona: true } },
                     propietarios: { where: { esPrincipal: true }, include: { persona: true } },
+                    serviciosGastos: { orderBy: { orden: 'asc' } },
                     adjuntos: {
                         include: { creadoPor: { select: { id: true, nombreCompleto: true } } },
                         orderBy: [{ tipo: 'asc' }, { versionDocumento: 'desc' }, { id: 'desc' }]
@@ -108,7 +109,8 @@ router.get('/alertas', requirePermission('contratos.ver'), async (req, res) => {
             include: {
                 propiedad: true,
                 inquilinos: { where: { esPrincipal: true }, include: { persona: true } },
-                propietarios: { where: { esPrincipal: true }, include: { persona: true } }
+                propietarios: { where: { esPrincipal: true }, include: { persona: true } },
+                serviciosGastos: { orderBy: { orden: 'asc' } }
             },
             orderBy: { fechaFin: 'asc' }
         });
@@ -132,6 +134,7 @@ router.get('/:id', requirePermission('contratos.ver'), withPagination(10, {
                 propiedad: true,
                 inquilinos: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } },
                 propietarios: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } },
+                serviciosGastos: { orderBy: { orden: 'asc' } },
                 adjuntos: {
                     include: { creadoPor: { select: { id: true, nombreCompleto: true } } },
                     orderBy: [{ tipo: 'asc' }, { versionDocumento: 'desc' }, { id: 'desc' }]

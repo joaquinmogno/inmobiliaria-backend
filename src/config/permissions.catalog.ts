@@ -35,14 +35,14 @@ export const PERMISSION_CAPABILITIES = [
     { key: 'liquidaciones.anular_pago_propietario', label: 'Anular pagos a propietarios', group: 'Liquidaciones', assignable: true, requires: ['liquidaciones.ver'], route: '/liquidaciones/:id', control: 'Anular pago al propietario', api: ['POST /api/liquidaciones/:id/anular-pago-propietario'] },
     { key: 'liquidaciones.eliminar', label: 'Eliminar liquidaciones borrador', group: 'Liquidaciones', assignable: true, requires: ['liquidaciones.ver'], route: '/liquidaciones', control: 'Eliminar liquidación', api: ['DELETE /api/liquidaciones/:id'] },
 
-    { key: 'pagos.ver', label: 'Ver pagos', group: 'Pagos', assignable: true, requires: [], route: '/pagos', control: 'Historial de pagos', api: ['GET /api/pagos'] },
-    { key: 'pagos.crear', label: 'Registrar pagos', group: 'Pagos', assignable: true, requires: ['pagos.ver', 'liquidaciones.ver'], route: '/liquidaciones/:id', control: 'Registrar pago', api: ['POST /api/pagos'] },
-    { key: 'pagos.eliminar', label: 'Anular pagos', group: 'Pagos', assignable: true, requires: ['pagos.ver'], route: '/pagos', control: 'Anular pago', api: ['POST /api/pagos/:id/anular'] },
+    { key: 'pagos.ver', label: 'Ver cobros de inquilinos', group: 'Cobros de inquilinos', assignable: true, requires: [], route: '/pagos', control: 'Listado de cobros de inquilinos', api: ['GET /api/pagos'] },
+    { key: 'pagos.crear', label: 'Registrar cobros de inquilinos', group: 'Cobros de inquilinos', assignable: true, requires: ['pagos.ver', 'liquidaciones.ver'], route: '/liquidaciones/:id', control: 'Registrar cobro', api: ['POST /api/pagos'] },
+    { key: 'pagos.eliminar', label: 'Anular cobros de inquilinos', group: 'Cobros de inquilinos', assignable: true, requires: ['pagos.ver'], route: '/pagos', control: 'Anular cobro', api: ['POST /api/pagos/:id/anular'] },
 
-    { key: 'propiedades.ver', label: 'Ver propiedades', group: 'Propiedades', assignable: true, requires: [], route: '/propiedades', control: 'Listado, dossier y archivos de propiedades', api: ['GET /api/propiedades', 'GET /api/propiedades/:id', 'GET /api/files/:agencyDir/:filename'] },
-    { key: 'propiedades.crear', label: 'Crear propiedades', group: 'Propiedades', assignable: true, requires: ['propiedades.ver'], route: '/propiedades', control: 'Nueva propiedad', api: ['POST /api/propiedades'] },
-    { key: 'propiedades.editar', label: 'Editar propiedades', group: 'Propiedades', assignable: true, requires: ['propiedades.ver'], route: '/propiedades', control: 'Editar dossier, agregar notas y administrar archivos', api: ['PUT /api/propiedades/:id', 'POST /api/propiedades/:id/notas', 'POST /api/propiedades/:id/adjuntos', 'DELETE /api/propiedades/:id/adjuntos/:attachmentId'] },
-    { key: 'propiedades.eliminar', label: 'Eliminar propiedades', group: 'Propiedades', assignable: true, requires: ['propiedades.ver'], route: '/propiedades', control: 'Eliminar propiedad', api: ['DELETE /api/propiedades/:id'] },
+    { key: 'propiedades.ver', label: 'Ver propiedades', group: 'Propiedades', assignable: false, requires: [], route: '/contratos', control: 'Selector interno de propiedades de contratos', api: ['GET /api/propiedades'] },
+    { key: 'propiedades.crear', label: 'Crear propiedades', group: 'Propiedades', assignable: false, requires: ['propiedades.ver'], route: '/contratos', control: 'Alta asociada a un contrato', api: ['POST /api/contratos'] },
+    { key: 'propiedades.editar', label: 'Editar propiedades', group: 'Propiedades', assignable: false, requires: ['propiedades.ver'], route: '/contratos', control: 'Administración interna de datos de propiedades', api: ['PUT /api/propiedades/:id', 'POST /api/propiedades/:id/notas', 'POST /api/propiedades/:id/adjuntos', 'DELETE /api/propiedades/:id/adjuntos/:attachmentId'] },
+    { key: 'propiedades.eliminar', label: 'Eliminar propiedades', group: 'Propiedades', assignable: false, requires: ['propiedades.ver'], route: '/contratos', control: 'Administración interna de propiedades', api: ['DELETE /api/propiedades/:id'] },
 
     { key: 'personas.ver', label: 'Ver personas', group: 'Personas', assignable: true, requires: [], route: '/personas', control: 'Listado de personas', api: ['GET /api/personas'] },
     { key: 'personas.crear', label: 'Crear personas', group: 'Personas', assignable: true, requires: ['personas.ver'], route: '/personas', control: 'Nueva persona', api: ['POST /api/personas'] },
@@ -53,11 +53,6 @@ export const PERMISSION_CAPABILITIES = [
     { key: 'reportes.contratos.ver', label: 'Ver métricas de contratos', group: 'Reportes', assignable: true, requires: ['reportes.dashboard.ver'], route: '/home', control: 'Indicadores de contratos', api: ['GET /api/reportes/dashboard'] },
     { key: 'reportes.morosidad.ver', label: 'Ver indicador de morosidad', group: 'Reportes', assignable: true, requires: ['reportes.dashboard.ver'], route: '/home', control: 'Indicador de morosidad', api: ['GET /api/reportes/dashboard'] },
     { key: 'reportes.financieros.ver', label: 'Ver métricas financieras', group: 'Reportes', assignable: true, requires: ['reportes.dashboard.ver'], route: '/home', control: 'Indicadores financieros por moneda', api: ['GET /api/reportes/dashboard'] },
-
-    { key: 'sueldos.ver', label: 'Ver sueldos', group: 'Sueldos', assignable: true, requires: [], route: '/sueldos', control: 'Listado de sueldos', api: ['GET /api/sueldos'] },
-    { key: 'sueldos.crear', label: 'Registrar sueldos', group: 'Sueldos', assignable: true, requires: ['sueldos.ver'], route: '/sueldos', control: 'Registrar sueldo', api: ['POST /api/sueldos'] },
-    { key: 'sueldos.editar', label: 'Editar sueldos', group: 'Sueldos', assignable: true, requires: ['sueldos.ver'], route: '/sueldos', control: 'Editar sueldo', api: ['PUT /api/sueldos/:id'] },
-    { key: 'sueldos.eliminar', label: 'Eliminar sueldos', group: 'Sueldos', assignable: true, requires: ['sueldos.ver'], route: '/sueldos', control: 'Eliminar sueldo', api: ['DELETE /api/sueldos/:id'] },
 
     { key: 'usuarios.ver', label: 'Ver usuarios', group: 'Usuarios', assignable: false, requires: [], route: '/usuarios', control: 'Listado de usuarios', api: ['GET /api/usuarios'] },
     { key: 'usuarios.crear', label: 'Crear usuarios', group: 'Usuarios', assignable: false, requires: ['usuarios.ver'], route: '/usuarios', control: 'Crear usuario', api: ['POST /api/usuarios'] },
@@ -83,10 +78,6 @@ export const ROLE_ASSIGNABLE_PERMISSIONS = ROLE_PERMISSION_CAPABILITIES.map(capa
 export const PERMISSION_CAPABILITY_BY_KEY = new Map<string, PermissionCapability>(
     PERMISSION_CAPABILITIES.map(capability => [capability.key, capability])
 );
-
-export const SUELDOS_PERMISSIONS = PERMISSION_CAPABILITIES
-    .filter(capability => capability.group === 'Sueldos')
-    .map(capability => capability.key);
 
 export function getMissingPermissionDependencies(keys: readonly string[]) {
     const selected = new Set(keys);

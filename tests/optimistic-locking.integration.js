@@ -4,7 +4,7 @@ const { prisma } = require('../dist/prisma');
 
 const apiBase = process.env.INTEGRATION_API_URL || 'http://127.0.0.1:3100/api';
 const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-const created = { personas: [], propiedades: [], contratos: [], sueldos: [], roles: [] };
+const created = { personas: [], propiedades: [], contratos: [], roles: [] };
 
 async function adminSession() {
   const response = await fetch(`${apiBase}/auth/login`, {
@@ -52,17 +52,13 @@ function assertConflict(result, submittedVersion, currentVersion) {
 
 test.after(async () => {
   if (created.contratos.length) await prisma.contrato.deleteMany({ where: { id: { in: created.contratos } } });
-  if (created.sueldos.length) {
-    await prisma.movimientoCaja.deleteMany({ where: { pagoSueldoId: { in: created.sueldos } } });
-    await prisma.pagoSueldo.deleteMany({ where: { id: { in: created.sueldos } } });
-  }
   if (created.propiedades.length) await prisma.propiedad.deleteMany({ where: { id: { in: created.propiedades } } });
   if (created.personas.length) await prisma.persona.deleteMany({ where: { id: { in: created.personas } } });
   if (created.roles.length) await prisma.rol.deleteMany({ where: { id: { in: created.roles } } });
   await prisma.$disconnect();
 });
 
-test('two sessions cannot overwrite stale personas, properties, contracts, salaries or roles', async () => {
+test('two sessions cannot overwrite stale personas, properties, contracts or roles', async () => {
   const [sessionA, sessionB] = await Promise.all([adminSession(), adminSession()]);
   const agency = await prisma.inmobiliaria.findFirstOrThrow();
 
@@ -137,44 +133,6 @@ test('two sessions cannot overwrite stale personas, properties, contracts, salar
   }, sessionB);
   assertConflict(contractStale, contract.version, contract.version + 1);
   assert.equal((await prisma.contrato.findUniqueOrThrow({ where: { id: contract.id } })).observaciones, `PC030 Contrato guardado A ${runId}`);
-
-  let salaryPeriod;
-  for (let year = 2099; year >= 2090 && !salaryPeriod; year -= 1) {
-    for (let month = 12; month >= 1; month -= 1) {
-      const candidate = `${year}-${String(month).padStart(2, '0')}`;
-      const exists = await prisma.pagoSueldo.findFirst({
-        where: { inmobiliariaId: agency.id, usuarioId: sessionA.userId, periodo: candidate, moneda: 'ARS' }
-      });
-      if (!exists) {
-        salaryPeriod = candidate;
-        break;
-      }
-    }
-  }
-  assert.ok(salaryPeriod);
-  const salaryCreation = await request('POST', '/sueldos', {
-    usuarioId: sessionA.userId,
-    monto: 1000,
-    moneda: 'ARS',
-    fecha: '2026-09-02',
-    periodo: salaryPeriod,
-    metodoPago: 'EFECTIVO',
-    observaciones: `PC030 ${runId}`
-  }, sessionA);
-  assert.equal(salaryCreation.response.status, 201);
-  const salary = salaryCreation.payload;
-  created.sueldos.push(salary.id);
-  const salaryFirst = await request('PUT', `/sueldos/${salary.id}`, {
-    observaciones: `PC030 Sueldo guardado A ${runId}`,
-    version: salary.version
-  }, sessionA);
-  assert.equal(salaryFirst.response.status, 200);
-  const salaryStale = await request('PUT', `/sueldos/${salary.id}`, {
-    observaciones: `PC030 Sueldo pisado B ${runId}`,
-    version: salary.version
-  }, sessionB);
-  assertConflict(salaryStale, salary.version, salary.version + 1);
-  assert.equal((await prisma.pagoSueldo.findUniqueOrThrow({ where: { id: salary.id } })).observaciones, `PC030 Sueldo guardado A ${runId}`);
 
   const roleCreation = await request('POST', '/roles', {
     nombre: `PC030 Rol ${runId}`,

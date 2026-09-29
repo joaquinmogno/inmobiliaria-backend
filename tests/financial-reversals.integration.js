@@ -48,6 +48,14 @@ async function post(path, body, session) {
   return { response, payload };
 }
 
+async function get(path, session) {
+  const response = await fetch(`${apiBase}${path}`, {
+    headers: { cookie: session.cookie }
+  });
+  const payload = await response.json();
+  return { response, payload };
+}
+
 test('payment reversal preserves history, restores debt and balances cash', async () => {
   const session = await adminSession();
   const agency = await prisma.inmobiliaria.findFirstOrThrow();
@@ -162,6 +170,12 @@ test('manual cash reversal creates one audited inverse entry and cannot repeat',
   assert.equal(reversal.response.status, 200);
   assert.equal(reversal.payload.reversion.tipo, 'INGRESO');
   assert.equal(reversal.payload.reversion.reversionDeId, creation.payload.id);
+
+  const corrections = await get('/cajachica?estado=REVERSIONES&mes=9&anio=2026', session);
+  assert.equal(corrections.response.status, 200);
+  const pairFromFilter = corrections.payload.data.filter(item => item.id === creation.payload.id || item.id === reversal.payload.reversion.id);
+  assert.deepEqual(pairFromFilter.map(item => item.id), [reversal.payload.reversion.id, creation.payload.id]);
+  assert.ok(corrections.payload.meta.total >= 1);
 
   const pair = await prisma.movimientoCaja.findMany({
     where: { OR: [{ id: creation.payload.id }, { reversionDeId: creation.payload.id }] },

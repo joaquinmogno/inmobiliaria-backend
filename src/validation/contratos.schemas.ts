@@ -34,6 +34,36 @@ const idListFromForm = z.preprocess(value => {
     return value;
 }, z.array(z.coerce.number().int().positive()).min(1, 'Debe seleccionar al menos una persona'));
 
+const contractServiceExpenseSchema = z.object({
+    concepto: z.string()
+        .trim()
+        .min(2, 'El concepto debe tener al menos 2 caracteres')
+        .max(120, 'El concepto no puede superar los 120 caracteres')
+        .transform(value => value.replace(/\s+/g, ' ')),
+    responsable: z.enum(['INQUILINO', 'PROPIETARIO'])
+});
+
+const contractServiceExpensesSchema = parseJsonField(
+    z.array(contractServiceExpenseSchema).max(30, 'Podés registrar hasta 30 servicios o gastos').optional()
+).superRefine((items, ctx) => {
+    if (!items) return;
+    const seen = new Set<string>();
+    items.forEach((item, index) => {
+        const normalized = item.concepto
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLocaleUpperCase('es-AR');
+        if (seen.has(normalized)) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: [index, 'concepto'],
+                message: 'No se puede repetir un servicio o gasto en el mismo contrato'
+            });
+        }
+        seen.add(normalized);
+    });
+});
+
 export const personCandidateSchema = z.object({
     id: z.coerce.number().int().positive().optional(),
     nombreCompleto: optionalText(140),
@@ -67,9 +97,11 @@ const contractCreateSchemaBase = z.object({
     fechaFin: dateOnlyString('La fecha de fin'),
     fechaActualizacion: optionalDateOnlyString('La fecha de actualización'),
     observaciones: optionalText(2000),
+    serviciosGastos: contractServiceExpensesSchema,
     observacionDocumento: optionalText(1000),
     propiedadId: z.coerce.number().int().positive('Propiedad inválida').optional(),
     contratoAnteriorId: z.preprocess(value => value === '' || value === null ? undefined : value, z.coerce.number().int().positive('Contrato anterior inválido').optional()),
+    borradorId: z.preprocess(value => value === '' || value === null ? undefined : value, z.coerce.number().int().positive('Borrador inválido').optional()),
     propiedad: parseJsonField(propertyCandidateSchema).optional(),
     propietarioIds: idListFromForm.optional(),
     inquilinoIds: idListFromForm.optional(),
@@ -86,7 +118,11 @@ const contractCreateSchemaBase = z.object({
     administrado: optionalBooleanFromForm.default(true),
     requiereActualizacion: optionalBooleanFromForm.default(true),
     honorarioInicial: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El honorario inicial').optional()),
-    honorarioInicialMetodoPago: paymentMethodSchema.optional()
+    // Se mantiene opcional para que las integraciones existentes conserven la
+    // moneda del contrato cuando todavía no envían esta nueva selección.
+    monedaHonorarioInicial: z.enum(['ARS', 'USD']).optional(),
+    honorarioInicialMetodoPago: paymentMethodSchema.optional(),
+    honorarioInicialCuentaBancariaId: z.preprocess(value => value === '' || value === null ? undefined : value, z.coerce.number().int().positive('Cuenta bancaria inválida').optional())
 });
 
 export const contractCreateSchema = contractCreateSchemaBase.superRefine((value, ctx) => {
@@ -123,10 +159,13 @@ export const contractCreateSchema = contractCreateSchemaBase.superRefine((value,
     if (value.requiereActualizacion && !value.fechaActualizacion) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['fechaActualizacion'], message: 'La próxima actualización es obligatoria si el contrato tiene actualización programada' });
     }
+    if (value.honorarioInicial && Number(value.honorarioInicial) > 0 && value.honorarioInicialMetodoPago !== 'EFECTIVO' && !value.honorarioInicialCuentaBancariaId) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['honorarioInicialCuentaBancariaId'], message: 'Seleccioná la cuenta bancaria donde ingresó el honorario inicial.' });
+    }
 });
 
 export const contractUpdateSchema = contractCreateSchemaBase
-    .omit({ propiedadId: true, contratoAnteriorId: true, propietarioIds: true, inquilinoIds: true, honorarioInicial: true, honorarioInicialMetodoPago: true })
+    .omit({ propiedadId: true, contratoAnteriorId: true, borradorId: true, propietarioIds: true, inquilinoIds: true, honorarioInicial: true, monedaHonorarioInicial: true, honorarioInicialMetodoPago: true, honorarioInicialCuentaBancariaId: true })
     .partial()
     .extend({
         administrado: optionalBooleanFromForm,

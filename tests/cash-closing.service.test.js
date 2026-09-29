@@ -44,6 +44,27 @@ test('an edit or deletion of a closed cash entry is rejected in favor of an adju
   );
 });
 
+test('a closure for one bank account does not block another account in the same currency and month', async () => {
+  const calls = [];
+  const db = {
+    cierreCaja: {
+      findFirst: async ({ where }) => {
+        calls.push(where);
+        return where.cuentaBancariaId === 101 ? { estado: 'CERRADO' } : null;
+      },
+    },
+  };
+  const base = { inmobiliariaId: 1, fecha: new Date('2026-08-15T00:00:00.000Z'), cuenta: 'BANCO', moneda: 'ARS' };
+
+  await assert.rejects(
+    () => assertCashEntryCanBeRewritten(db, { ...base, cuentaBancariaId: 101 }),
+    error => error.code === 'CASH_PERIOD_CLOSED_CORRECTION_REQUIRED',
+  );
+  await assert.doesNotReject(() => assertCashEntryCanBeRewritten(db, { ...base, cuentaBancariaId: 202 }));
+  assert.equal(calls[0].cuentaBancariaId, 101);
+  assert.equal(calls[1].cuentaBancariaId, 202);
+});
+
 function closureDb(initialClosure = null) {
   let closure = initialClosure ? { ...initialClosure } : null;
   const events = [];
@@ -68,9 +89,17 @@ function closureDb(initialClosure = null) {
         if (!closure || closure.id !== where.id) throw new Error('not found');
         return { ...closure };
       },
-      findFirst: async ({ where }) => (
-        closure && closure.id === where.id && closure.inmobiliariaId === where.inmobiliariaId ? { ...closure } : null
-      ),
+      findFirst: async ({ where }) => {
+        if (!closure) return null;
+        if (where.id) return closure.id === where.id && closure.inmobiliariaId === where.inmobiliariaId ? { ...closure } : null;
+        return closure.inmobiliariaId === where.inmobiliariaId
+          && closure.periodo.getTime() === where.periodo.getTime()
+          && closure.cuenta === where.cuenta
+          && closure.moneda === where.moneda
+          && (closure.cuentaBancariaId || null) === (where.cuentaBancariaId || null)
+          ? { ...closure }
+          : null;
+      },
       create: async ({ data }) => {
         closure = {
           id: nextId++,

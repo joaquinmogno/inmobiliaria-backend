@@ -109,7 +109,7 @@ test('permission denials are attributable and correlated', async t => {
   t.after(() => { permissionsService.userHasPermission = originalHasPermission; });
 
   const router = express.Router();
-  router.get('/protected', authenticateToken, requirePermission('sueldos.ver'), (_req, res) => res.sendStatus(204));
+  router.get('/protected', authenticateToken, requirePermission('contratos.ver'), (_req, res) => res.sendStatus(204));
 
   await withServer(createApp('/api', router), async baseUrl => {
     const response = await fetch(`${baseUrl}/api/protected`, { headers: authHeaders('pc036-permission-denied') });
@@ -122,7 +122,7 @@ test('permission denials are attributable and correlated', async t => {
   assert.equal(events[0].requestId, 'pc036-permission-denied');
   assert.match(events[0].ipAddress, /127\.0\.0\.1/);
   assert.deepEqual(JSON.parse(events[0].detalle), {
-    permission: 'sueldos.ver',
+    permission: 'contratos.ver',
     reason: 'PERMISSION_MISSING',
     method: 'GET',
     path: '/api/protected'
@@ -203,13 +203,19 @@ test('successful file consultation is audited after transfer completion', async 
   const originalHasPermission = permissionsService.userHasPermission;
   const originalContractFind = prisma.contrato.findFirst;
   const originalPropertyFind = prisma.adjuntoPropiedad.findFirst;
+  const originalMovementAttachmentFind = prisma.adjuntoMovimientoCaja.findFirst;
+  const originalDraftAttachmentFind = prisma.adjuntoBorradorContrato.findFirst;
   permissionsService.userHasPermission = async (_userId, _role, permission) => permission === 'contratos.archivos.ver';
   prisma.contrato.findFirst = async () => ({ id: 501 });
   prisma.adjuntoPropiedad.findFirst = async () => null;
+  prisma.adjuntoMovimientoCaja.findFirst = async () => null;
+  prisma.adjuntoBorradorContrato.findFirst = async () => null;
   t.after(() => {
     permissionsService.userHasPermission = originalHasPermission;
     prisma.contrato.findFirst = originalContractFind;
     prisma.adjuntoPropiedad.findFirst = originalPropertyFind;
+    prisma.adjuntoMovimientoCaja.findFirst = originalMovementAttachmentFind;
+    prisma.adjuntoBorradorContrato.findFirst = originalDraftAttachmentFind;
     fs.rmSync(uploadRoot, { recursive: true, force: true });
   });
 

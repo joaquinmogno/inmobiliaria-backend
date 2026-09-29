@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const { getPersonIdentity } = require('../dist/utils/person-identity.js');
 const { contractCreateSchema } = require('../dist/validation/contratos.schemas.js');
+const { parsePersonaUpdate } = require('../dist/validation/personas.schemas.js');
 const { isValidBankAlias, isValidCbu, isValidCuit, normalizeBankAlias, normalizeCbu } = require('../dist/utils/bank-account.js');
 
 const contractBase = {
@@ -30,6 +31,29 @@ test('person identity comparison normalizes CUIT, email and phone independently 
       telefonoNormalizado: '5491155551234'
     }
   );
+});
+
+test('editing a person preserves an unchanged legacy phone but still validates a changed one', () => {
+  const existing = { telefono: 'interno 42', telefonoAlternativo: null };
+  const unchanged = parsePersonaUpdate({
+    nombreCompleto: 'Persona de prueba',
+    telefono: 'interno 42',
+    estado: 'ACTIVO',
+    version: 1
+  }, existing);
+
+  assert.equal(unchanged.success, true);
+  assert.equal(unchanged.data.telefono, 'interno 42');
+
+  const changed = parsePersonaUpdate({
+    nombreCompleto: 'Persona de prueba',
+    telefono: 'teléfono nuevo sin formato válido',
+    estado: 'ACTIVO',
+    version: 1
+  }, existing);
+
+  assert.equal(changed.success, false);
+  assert.match(changed.error.issues.map(issue => issue.message).join(' '), /Teléfono inválido/);
 });
 
 test('a contract cannot repeat an existing person or assign it both roles', () => {

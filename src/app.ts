@@ -14,8 +14,8 @@ import backupsRoutes from './routes/backups.routes';
 import inmobiliariaRoutes from './routes/inmobiliaria.routes';
 import reportesRoutes from './routes/reportes.routes';
 import cajachicaRoutes from './routes/cajachica.routes';
+import cuentasBancariasRoutes from './routes/cuentas-bancarias.routes';
 import planesCuotasRoutes from './routes/planes-cuotas.routes';
-import sueldosRoutes from './routes/sueldos.routes';
 import alertasOperativasRoutes from './routes/alertas-operativas.routes';
 import filesRoutes from './routes/files.routes';
 import { apiLimiter, expensiveApiLimiter } from './middlewares/rateLimiter.middleware';
@@ -93,8 +93,8 @@ app.use('/api/backups', ...sessionRateLimit, expensiveApiLimiter, backupsRoutes)
 app.use('/api/inmobiliaria', ...sessionRateLimit, inmobiliariaRoutes);
 app.use('/api/reportes', ...sessionRateLimit, expensiveApiLimiter, reportesRoutes);
 app.use('/api/cajachica', ...sessionRateLimit, cajachicaRoutes);
+app.use('/api/cuentas-bancarias', ...sessionRateLimit, cuentasBancariasRoutes);
 app.use('/api/planes-cuotas', ...sessionRateLimit, planesCuotasRoutes);
-app.use('/api/sueldos', ...sessionRateLimit, sueldosRoutes);
 app.use('/api/alertas-operativas', ...sessionRateLimit, alertasOperativasRoutes);
 app.use('/api/files', ...sessionRateLimit, expensiveApiLimiter, filesRoutes);
 

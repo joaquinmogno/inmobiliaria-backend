@@ -46,10 +46,12 @@ import {
 import { createPrincipalContractDocument } from '../services/contract-document-version.service';
 import { assertValidContractRenewal } from '../services/contract-renewal.service';
 import contractQueryRouter from './contratos-query.routes';
+import contractDraftRouter from './contratos-drafts.routes';
 
 const router = Router();
 
 router.use(authenticateToken);
+router.use('/borradores', contractDraftRouter);
 router.use(contractQueryRouter);
 
 
@@ -74,6 +76,19 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
 
     try {
         const contract = await prisma.$transaction(async (tx) => {
+            const draft = payload.borradorId ? await tx.borradorContrato.findFirst({
+                where: {
+                    id: payload.borradorId,
+                    inmobiliariaId,
+                    ...(authReq.user!.tipo === 'ADMIN' ? {} : { creadoPorId: userId })
+                },
+                include: { adjuntos: { orderBy: { id: 'asc' } } }
+            }) : null;
+            if (payload.borradorId && !draft) {
+                throw Object.assign(new Error('El borrador no existe o ya fue utilizado.'), { statusCode: 404, code: 'DRAFT_NOT_FOUND' });
+            }
+            const draftPrincipal = draft?.adjuntos.find(attachment => attachment.tipo === TipoDocumentoContrato.CONTRATO_PRINCIPAL);
+            const principalFilePath = contractFilePath || draftPrincipal?.rutaArchivo || null;
             const propiedad = await createPropertyIfNeeded(tx, payload, inmobiliariaId, userId);
             await assertPropertyAvailableForPeriod(
                 tx,
@@ -115,7 +130,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                     ),
                     fechaProximaActualizacion: updateSettings.fechaProximaActualizacion,
                     observaciones: payload.observaciones,
-                    rutaArchivoContrato: contractFilePath,
+                    rutaArchivoContrato: principalFilePath,
                     propiedadId: propiedad.id,
                     inmobiliariaId,
                     montoAlquiler: new Decimal(payload.montoAlquiler || 0),
@@ -130,6 +145,15 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                     requiereActualizacion: updateSettings.requiereActualizacion,
                     creadoPorId: userId,
                     contratoAnteriorId: contratoAnterior?.id,
+                    ...(payload.serviciosGastos?.length ? {
+                        serviciosGastos: {
+                            create: payload.serviciosGastos.map((servicioGasto, index) => ({
+                                concepto: servicioGasto.concepto,
+                                responsable: servicioGasto.responsable,
+                                orden: index
+                            }))
+                        }
+                    } : {}),
                     propietarios: {
                         create: propietariosIds.map((id, index) => ({
                             personaId: id,
@@ -153,6 +177,35 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                     observacion: payload.observacionDocumento,
                     creadoPorId: userId
                 });
+            } else if (draftPrincipal) {
+                await createPrincipalContractDocument(tx, {
+                    contratoId: newContract.id,
+                    rutaArchivo: draftPrincipal.rutaArchivo,
+                    nombreArchivo: draftPrincipal.nombreArchivo,
+                    creadoPorId: draftPrincipal.creadoPorId || userId
+                });
+            }
+
+            if (draft) {
+                const attachmentsToCarry = draft.adjuntos.filter(attachment =>
+                    attachment.tipo !== TipoDocumentoContrato.CONTRATO_PRINCIPAL || Boolean(contractFilePath)
+                );
+                if (attachmentsToCarry.length) {
+                    await tx.adjuntoContrato.createMany({
+                        data: attachmentsToCarry.map(attachment => ({
+                            contratoId: newContract.id,
+                            rutaArchivo: attachment.rutaArchivo,
+                            nombreArchivo: attachment.nombreArchivo,
+                            tipo: attachment.tipo === TipoDocumentoContrato.CONTRATO_PRINCIPAL
+                                ? TipoDocumentoContrato.ADJUNTO
+                                : attachment.tipo,
+                            fechaDocumento: argentinaTodayAsDate(),
+                            esVigente: false,
+                            creadoPorId: attachment.creadoPorId || userId
+                        }))
+                    });
+                }
+                await tx.borradorContrato.delete({ where: { id: draft.id } });
             }
 
             await syncPropertyOccupancy(tx, [propiedad.id]);
@@ -161,12 +214,22 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                 const initialFeePaymentMethod = payload.honorarioInicialMetodoPago || 'EFECTIVO';
                 const initialFeeDate = argentinaTodayAsDate();
                 const initialFeeAccount = initialFeePaymentMethod === 'EFECTIVO' ? 'CAJA' : 'BANCO';
-                const initialFeeCurrency = resolveMoneda(payload.moneda);
+                // El honorario de alta es un cobro puntual: puede estar en una
+                // moneda distinta al alquiler mensual del contrato.
+                const initialFeeCurrency = resolveMoneda(payload.monedaHonorarioInicial ?? payload.moneda);
+                const initialFeeBankAccount = initialFeeAccount === 'CAJA' ? null : await tx.cuentaBancaria.findFirst({
+                    where: { id: payload.honorarioInicialCuentaBancariaId, inmobiliariaId, activa: true, moneda: initialFeeCurrency },
+                    select: { id: true }
+                });
+                if (initialFeeAccount === 'BANCO' && !initialFeeBankAccount) {
+                    throw Object.assign(new Error('Seleccioná una cuenta bancaria activa y de la misma moneda para el honorario inicial.'), { statusCode: 400, code: 'BANK_ACCOUNT_REQUIRED' });
+                }
                 await assertCashPeriodOpen(tx, {
                     inmobiliariaId,
                     fecha: initialFeeDate,
                     cuenta: initialFeeAccount,
-                    moneda: initialFeeCurrency
+                    moneda: initialFeeCurrency,
+                    cuentaBancariaId: initialFeeBankAccount?.id
                 });
                 await tx.movimientoCaja.create({
                     data: {
@@ -179,7 +242,8 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                         creadoPorId: userId,
                         contratoId: newContract.id,
                         metodoPago: initialFeePaymentMethod,
-                        cuenta: initialFeeAccount
+                        cuenta: initialFeeAccount,
+                        cuentaBancariaId: initialFeeBankAccount?.id
                     }
                 });
             }
@@ -195,7 +259,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
             entidadId: contract.newContract.id,
             detalle: contract.contratoAnterior
                 ? `Contrato creado como renovación del contrato #${contract.contratoAnterior.id} para propiedad: ${contract.propiedad.direccion}`
-                : `Contrato creado para propiedad: ${contract.propiedad.direccion}`
+                : `Contrato creado${payload.borradorId ? ` desde borrador #${payload.borradorId}` : ''} para propiedad: ${contract.propiedad.direccion}`
         });
 
         res.status(201).json(contract.newContract);
@@ -493,6 +557,7 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         administrado,
         requiereActualizacion,
         moneda,
+        serviciosGastos,
         observacionDocumento,
         version
     } = req.body;
@@ -501,7 +566,8 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
 
     try {
         const contract = await prisma.contrato.findFirst({
-            where: { id: Number(id), inmobiliariaId }
+            where: { id: Number(id), inmobiliariaId },
+            include: { serviciosGastos: { orderBy: { orden: 'asc' } } }
         });
 
         if (!contract) {
@@ -562,6 +628,9 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         if (observaciones !== undefined) {
             updateData.observaciones = observaciones;
             changes.observaciones = { anterior: contract.observaciones, nuevo: observaciones };
+        }
+        if (serviciosGastos !== undefined) {
+            changes.serviciosGastos = { anterior: contract.serviciosGastos, nuevo: serviciosGastos };
         }
         if (montoAlquiler) {
             updateData.montoAlquiler = new Decimal(montoAlquiler);
@@ -673,12 +742,26 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
                     creadoPorId: (req as AuthRequest).user!.id
                 });
             }
+            if (serviciosGastos !== undefined) {
+                await tx.servicioGastoContrato.deleteMany({ where: { contratoId: contract.id } });
+                if (serviciosGastos.length) {
+                    await tx.servicioGastoContrato.createMany({
+                        data: serviciosGastos.map((servicioGasto: { concepto: string; responsable: 'INQUILINO' | 'PROPIETARIO' }, index: number) => ({
+                            contratoId: contract.id,
+                            concepto: servicioGasto.concepto,
+                            responsable: servicioGasto.responsable,
+                            orden: index
+                        }))
+                    });
+                }
+            }
             const result = await tx.contrato.findUniqueOrThrow({
                 where: { id: Number(id) },
                 include: {
                     propiedad: true,
                     inquilinos: { include: { persona: true } },
                     propietarios: { include: { persona: true } },
+                    serviciosGastos: { orderBy: { orden: 'asc' } },
                     adjuntos: {
                         include: { creadoPor: { select: { id: true, nombreCompleto: true } } },
                         orderBy: [{ tipo: 'asc' }, { versionDocumento: 'desc' }, { id: 'desc' }]

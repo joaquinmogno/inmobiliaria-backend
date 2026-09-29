@@ -58,7 +58,7 @@ router.get('/:agencyDir/:filename', async (req, res, next) => {
     }
 
     const relativePath = `${agencyDir}/${filename}`;
-    const [contractOwner, propertyOwner] = await Promise.all([
+    const [contractOwner, propertyOwner, movementOwner, draftOwner] = await Promise.all([
         prisma.contrato.findFirst({
             where: {
                 inmobiliariaId,
@@ -72,19 +72,35 @@ router.get('/:agencyDir/:filename', async (req, res, next) => {
         prisma.adjuntoPropiedad.findFirst({
             where: { rutaArchivo: relativePath, propiedad: { inmobiliariaId } },
             select: { id: true }
+        }),
+        prisma.adjuntoMovimientoCaja.findFirst({
+            where: { rutaArchivo: relativePath, movimientoCaja: { inmobiliariaId } },
+            select: { id: true, movimientoCajaId: true }
+        }),
+        prisma.adjuntoBorradorContrato.findFirst({
+            where: {
+                rutaArchivo: relativePath,
+                borrador: {
+                    inmobiliariaId,
+                    ...(tipo === 'ADMIN' ? {} : { creadoPorId: userId })
+                }
+            },
+            select: { id: true, borradorId: true }
         })
     ]);
 
-    if (!contractOwner && !propertyOwner) {
+    if (!contractOwner && !propertyOwner && !movementOwner && !draftOwner) {
         await auditFailure('UNREGISTERED_FILE');
         return res.status(404).json({ message: 'Archivo no encontrado' });
     }
 
-    const [canViewContractFile, canViewPropertyFile] = await Promise.all([
+    const [canViewContractFile, canViewPropertyFile, canViewMovementAttachment, canViewDraftAttachment] = await Promise.all([
         contractOwner ? userHasPermission(userId, tipo, 'contratos.archivos.ver') : false,
-        propertyOwner ? userHasPermission(userId, tipo, 'propiedades.ver') : false
+        propertyOwner ? userHasPermission(userId, tipo, 'propiedades.ver') : false,
+        movementOwner ? userHasPermission(userId, tipo, 'caja_chica.ver') : false,
+        draftOwner ? userHasPermission(userId, tipo, 'contratos.crear') : false
     ]);
-    if (!canViewContractFile && !canViewPropertyFile) {
+    if (!canViewContractFile && !canViewPropertyFile && !canViewMovementAttachment && !canViewDraftAttachment) {
         await auditFailure('PERMISSION_MISSING', 'ACCESO_ARCHIVO_DENEGADO');
         return res.status(403).json({ message: 'No tenés permiso para ver este archivo' });
     }
@@ -95,8 +111,8 @@ router.get('/:agencyDir/:filename', async (req, res, next) => {
 
     res.set('Content-Type', contentType);
     res.set('Content-Disposition', `${disposition}; filename="${sanitizeHeaderFilename(filename)}"`);
-    const entity = contractOwner ? 'Contrato' : 'AdjuntoPropiedad';
-    const entityId = contractOwner?.id || propertyOwner?.id;
+    const entity = contractOwner ? 'Contrato' : propertyOwner ? 'AdjuntoPropiedad' : movementOwner ? 'MovimientoCaja' : 'BorradorContrato';
+    const entityId = contractOwner?.id || propertyOwner?.id || movementOwner?.movimientoCajaId || draftOwner?.borradorId;
     const action = disposition === 'attachment' ? 'DESCARGAR_ARCHIVO' : 'CONSULTAR_ARCHIVO';
 
     res.sendFile(filepath, error => {

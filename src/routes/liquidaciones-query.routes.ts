@@ -227,7 +227,8 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
                     include: {
                         propiedad: true,
                         inquilinos: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } },
-                        propietarios: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } }
+                        propietarios: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } },
+                        serviciosGastos: { orderBy: { orden: 'asc' } }
                     }
                 },
                 pagos: { where: { anuladoEn: null }, include: { creadoPor: { select: { id: true, nombreCompleto: true, email: true } } } },

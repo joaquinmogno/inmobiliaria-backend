@@ -8,20 +8,56 @@ export type CashPeriodInput = {
   fecha: Date;
   cuenta: CuentaCaja;
   moneda: Moneda;
+  /** Obligatoria para banco en operaciones nuevas; nula para Caja. */
+  cuentaBancariaId?: number | null;
 };
 
-export type CashMovementPeriod = Pick<CashPeriodInput, 'fecha' | 'cuenta' | 'moneda'>;
+export type CashMovementPeriod = Pick<CashPeriodInput, 'fecha' | 'cuenta' | 'moneda' | 'cuentaBancariaId'>;
 
 type CashClosingSnapshot = {
   inmobiliariaId: number;
   periodo: Date;
   cuenta: CuentaCaja;
   moneda: Moneda;
+  cuentaBancariaId?: number | null;
   saldoSistema: unknown;
   saldoDeclarado: unknown;
   diferencia: unknown;
   motivoDiferencia?: string | null;
   usuarioId: number;
+};
+
+const closingScope = (input: Pick<CashPeriodInput, 'inmobiliariaId' | 'fecha' | 'cuenta' | 'moneda' | 'cuentaBancariaId'>) => ({
+  inmobiliariaId: input.inmobiliariaId,
+  periodo: monthStart(input.fecha),
+  cuenta: input.cuenta,
+  moneda: input.moneda,
+  cuentaBancariaId: input.cuenta === CuentaCaja.BANCO ? input.cuentaBancariaId || null : null
+});
+
+const closingScopeForPeriod = (input: Pick<CashClosingSnapshot, 'inmobiliariaId' | 'periodo' | 'cuenta' | 'moneda' | 'cuentaBancariaId'>) => ({
+  inmobiliariaId: input.inmobiliariaId,
+  periodo: input.periodo,
+  cuenta: input.cuenta,
+  moneda: input.moneda,
+  cuentaBancariaId: input.cuenta === CuentaCaja.BANCO ? input.cuentaBancariaId || null : null
+});
+
+// `findFirst` permite distinguir Caja (sin cuenta) de cada cuenta bancaria.
+// El fallback sólo sostiene adaptadores/test doubles de versiones anteriores
+// mientras se despliega la migración que elimina la clave genérica.
+const findClosing = async (db: Prisma.TransactionClient | any, where: Record<string, unknown>) => {
+  if (typeof db.cierreCaja.findFirst === 'function') return db.cierreCaja.findFirst({ where });
+  return db.cierreCaja.findUnique({
+    where: {
+      inmobiliariaId_periodo_cuenta_moneda: {
+        inmobiliariaId: where.inmobiliariaId,
+        periodo: where.periodo,
+        cuenta: where.cuenta,
+        moneda: where.moneda
+      }
+    }
+  });
 };
 
 /**
@@ -33,15 +69,8 @@ type CashClosingSnapshot = {
  * conciliaciones del período.
  */
 export async function closeCashPeriod(db: Prisma.TransactionClient | any, input: CashClosingSnapshot) {
-  const uniqueKey = {
-    inmobiliariaId_periodo_cuenta_moneda: {
-      inmobiliariaId: input.inmobiliariaId,
-      periodo: input.periodo,
-      cuenta: input.cuenta,
-      moneda: input.moneda
-    }
-  };
-  const existing = await db.cierreCaja.findUnique({ where: uniqueKey });
+  const scope = closingScopeForPeriod(input);
+  const existing = await findClosing(db, scope);
 
   if (existing?.estado === 'CERRADO') {
     throw new AppError('El período de caja ya está cerrado. Reabrilo con autorización antes de volver a cerrarlo.', {
@@ -60,6 +89,7 @@ export async function closeCashPeriod(db: Prisma.TransactionClient | any, input:
         periodo: input.periodo,
         cuenta: input.cuenta,
         moneda: input.moneda,
+        cuentaBancariaId: scope.cuentaBancariaId,
         saldoSistema: input.saldoSistema,
         saldoDeclarado: input.saldoDeclarado,
         diferencia: input.diferencia,
@@ -162,7 +192,14 @@ export async function reopenCashPeriod(
 }
 
 export async function isCashPeriodClosed(db: Prisma.TransactionClient | any, input: CashPeriodInput) {
-  const cierre = await db.cierreCaja.findUnique({ where: { inmobiliariaId_periodo_cuenta_moneda: { inmobiliariaId: input.inmobiliariaId, periodo: monthStart(input.fecha), cuenta: input.cuenta, moneda: input.moneda } } });
+  const scope = closingScope(input);
+  // Un cierre bancario legado no tenía cuenta concreta. Se conserva como
+  // bloqueo consolidado de ese mes hasta que sea reabierto, sin hacer que los
+  // cierres nuevos de una cuenta afecten a las demás.
+  const where = input.cuenta === CuentaCaja.BANCO && input.cuentaBancariaId
+    ? { ...scope, OR: [{ cuentaBancariaId: input.cuentaBancariaId }, { cuentaBancariaId: null }] }
+    : scope;
+  const cierre = await findClosing(db, where);
   return cierre?.estado === 'CERRADO';
 }
 
@@ -193,7 +230,8 @@ export async function prepareCashCorrection(
     inmobiliariaId: input.inmobiliariaId,
     fecha: input.fechaCorreccion,
     cuenta: input.movimientoOriginal.cuenta,
-    moneda: input.movimientoOriginal.moneda
+    moneda: input.movimientoOriginal.moneda,
+    cuentaBancariaId: input.movimientoOriginal.cuentaBancariaId
   });
 
   return { originalPeriodClosed, fechaCorreccion: input.fechaCorreccion };

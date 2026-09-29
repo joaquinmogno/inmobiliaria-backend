@@ -3,7 +3,6 @@ export {
     MODULE_PERMISSIONS,
     ROLE_ASSIGNABLE_PERMISSIONS,
     ROLE_PERMISSION_CAPABILITIES,
-    SUELDOS_PERMISSIONS,
     getMissingPermissionDependencies
 } from '../config/permissions.catalog';
 export type { PermissionKey } from '../config/permissions.catalog';

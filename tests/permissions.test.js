@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 
 const {
   MODULE_PERMISSIONS,
-  SUELDOS_PERMISSIONS,
   ROLE_ASSIGNABLE_PERMISSIONS,
   ROLE_PERMISSION_CAPABILITIES,
   getMissingPermissionDependencies,
@@ -48,12 +47,6 @@ test('cross-module and navigation dependencies are explicit', () => {
   ]);
 });
 
-test('salary permissions are present in the module catalog', () => {
-  for (const permission of SUELDOS_PERMISSIONS) {
-    assert.ok(MODULE_PERMISSIONS.includes(permission), `${permission} should be in MODULE_PERMISSIONS`);
-  }
-});
-
 test('module catalog contains requested access domains', () => {
   const requiredPrefixes = [
     'contratos',
@@ -64,7 +57,6 @@ test('module catalog contains requested access domains', () => {
     'personas',
     'configuracion',
     'reportes',
-    'sueldos',
   ];
 
   for (const prefix of requiredPrefixes) {

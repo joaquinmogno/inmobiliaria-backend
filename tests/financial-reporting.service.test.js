@@ -14,21 +14,21 @@ test('cash ledger excludes future movements from a historical closing and record
   const movements = [
     {
       tipo: 'INGRESO', monto: 100, moneda: 'ARS', cuenta: 'CAJA', fecha: new Date('2026-08-15T00:00:00.000Z'),
-      pagoId: 1, pagoSueldoId: null, esPagoPropietario: false,
+      pagoId: 1, esPagoPropietario: false,
     },
     // Corrección de un asiento de agosto cerrado: es una salida real de septiembre.
     {
       tipo: 'EGRESO', monto: 100, moneda: 'ARS', cuenta: 'CAJA', fecha: new Date('2026-09-02T00:00:00.000Z'),
-      pagoId: null, pagoSueldoId: null, esPagoPropietario: false,
-      reversionDe: { pagoId: 1, pagoSueldoId: null, esPagoPropietario: false },
+      pagoId: null, esPagoPropietario: false,
+      reversionDe: { pagoId: 1, esPagoPropietario: false },
     },
     {
       tipo: 'INGRESO', monto: 50, moneda: 'ARS', cuenta: 'BANCO', fecha: new Date('2026-09-10T00:00:00.000Z'),
-      pagoId: null, pagoSueldoId: null, esPagoPropietario: false,
+      pagoId: null, esPagoPropietario: false,
     },
     {
       tipo: 'INGRESO', monto: 999, moneda: 'ARS', cuenta: 'CAJA', fecha: new Date('2026-10-01T00:00:00.000Z'),
-      pagoId: null, pagoSueldoId: null, esPagoPropietario: false,
+      pagoId: null, esPagoPropietario: false,
     },
   ];
 
@@ -44,24 +44,44 @@ test('cash ledger excludes future movements from a historical closing and record
   assert.equal(septemberLedger.saldoAlCierre.ARS.saldo, 50);
 });
 
+test('an internal bank transfer changes each account but not consolidated bank or total balance', () => {
+  const september = getMonthlyReportPeriod(2026, 9);
+  const report = calculateCashLedger([
+    {
+      tipo: 'EGRESO', monto: 1250, moneda: 'ARS', cuenta: 'BANCO', cuentaBancariaId: 101,
+      fecha: new Date('2026-09-10T00:00:00.000Z'), pagoId: null, esPagoPropietario: false,
+    },
+    {
+      tipo: 'INGRESO', monto: 1250, moneda: 'ARS', cuenta: 'BANCO', cuentaBancariaId: 202,
+      fecha: new Date('2026-09-10T00:00:00.000Z'), pagoId: null, esPagoPropietario: false,
+    },
+  ], september);
+
+  const balances = report.saldoAlCierre.ARS;
+  assert.equal(balances.cuentasBancarias['101'].saldo, -1250);
+  assert.equal(balances.cuentasBancarias['202'].saldo, 1250);
+  assert.equal(balances.cuentas.BANCO.saldo, 0);
+  assert.equal(balances.saldo, 0);
+});
+
 test('cash ledger excludes an annulled owner payment together with its same-month reversal', () => {
   const september = getMonthlyReportPeriod(2026, 9);
   const annulledAt = new Date('2026-09-24T12:00:00.000Z');
   const report = calculateCashLedger([
     {
       tipo: 'EGRESO', monto: 100, moneda: 'ARS', cuenta: 'CAJA', fecha: new Date('2026-09-05T00:00:00.000Z'),
-      pagoId: null, pagoSueldoId: null, esPagoPropietario: true,
+      pagoId: null, esPagoPropietario: true,
     },
     {
       // Segunda entrega anulada: no puede quedar restada si su reversión ya
       // repuso los fondos. Es la regresión del caso de pagos parciales.
       tipo: 'EGRESO', monto: 25, moneda: 'ARS', cuenta: 'CAJA', fecha: new Date('2026-09-08T00:00:00.000Z'),
-      pagoId: null, pagoSueldoId: null, esPagoPropietario: true, anuladoEn: annulledAt,
+      pagoId: null, esPagoPropietario: true, anuladoEn: annulledAt,
     },
     {
       tipo: 'INGRESO', monto: 25, moneda: 'ARS', cuenta: 'CAJA', fecha: new Date('2026-09-24T00:00:00.000Z'),
-      pagoId: null, pagoSueldoId: null, esPagoPropietario: true,
-      reversionDe: { pagoId: null, pagoSueldoId: null, esPagoPropietario: true, anuladoEn: annulledAt },
+      pagoId: null, esPagoPropietario: true,
+      reversionDe: { pagoId: null, esPagoPropietario: true, anuladoEn: annulledAt },
     },
   ], september);
 
@@ -77,12 +97,12 @@ test('cash ledger excludes the whole pair when a total owner payout is annulled 
   const report = calculateCashLedger([
     {
       tipo: 'EGRESO', monto: 125, moneda: 'ARS', cuenta: 'BANCO', fecha: new Date('2026-09-08T00:00:00.000Z'),
-      pagoId: null, pagoSueldoId: null, esPagoPropietario: true, anuladoEn: annulledAt,
+      pagoId: null, esPagoPropietario: true, anuladoEn: annulledAt,
     },
     {
       tipo: 'INGRESO', monto: 125, moneda: 'ARS', cuenta: 'BANCO', fecha: new Date('2026-09-24T00:00:00.000Z'),
-      pagoId: null, pagoSueldoId: null, esPagoPropietario: true,
-      reversionDe: { pagoId: null, pagoSueldoId: null, esPagoPropietario: true, anuladoEn: annulledAt },
+      pagoId: null, esPagoPropietario: true,
+      reversionDe: { pagoId: null, esPagoPropietario: true, anuladoEn: annulledAt },
     },
   ], september);
 
@@ -99,12 +119,12 @@ test('cash ledger preserves a closed-period payout and records its correction in
     {
       // El original no se anula porque agosto ya fue conciliado y cerrado.
       tipo: 'EGRESO', monto: 125, moneda: 'ARS', cuenta: 'CAJA', fecha: new Date('2026-08-15T00:00:00.000Z'),
-      pagoId: null, pagoSueldoId: null, esPagoPropietario: true,
+      pagoId: null, esPagoPropietario: true,
     },
     {
       tipo: 'INGRESO', monto: 25, moneda: 'ARS', cuenta: 'CAJA', fecha: new Date('2026-09-24T00:00:00.000Z'),
-      pagoId: null, pagoSueldoId: null, esPagoPropietario: true,
-      reversionDe: { pagoId: null, pagoSueldoId: null, esPagoPropietario: true, anuladoEn: null },
+      pagoId: null, esPagoPropietario: true,
+      reversionDe: { pagoId: null, esPagoPropietario: true, anuladoEn: null },
     },
   ];
 

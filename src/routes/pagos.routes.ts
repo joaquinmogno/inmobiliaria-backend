@@ -26,6 +26,7 @@ const pagoSchema = z.object({
     monto: positiveDecimal('El monto'),
     fechaPago: optionalDateOnlyString('La fecha de pago'),
     metodoPago: paymentMethodSchema.optional().default('EFECTIVO'),
+    cuentaBancariaId: z.coerce.number().int().positive().optional(),
     moneda: z.enum(['ARS', 'USD']).optional(),
     observaciones: optionalText(1000),
     expectedLiquidationVersion: z.coerce.number().int().positive().optional()
@@ -72,7 +73,7 @@ const optionalPaymentDateFilter = (value: unknown, field: 'desde' | 'hasta') => 
  */
 router.get('/', authenticateToken, requirePermission('pagos.ver'), withPagination(50), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
-    const { search, moneda, metodoPago, estado, desde, hasta, propietarioId, inquilinoId, cuenta } = req.query;
+    const { search, moneda, metodoPago, estado, desde, hasta, propietarioId, inquilinoId, cuenta, cuentaBancariaId } = req.query;
 
     const { page: pageNum, limit: limitNum, skip } = res.locals.pagination;
 
@@ -103,6 +104,13 @@ router.get('/', authenticateToken, requirePermission('pagos.ver'), withPaginatio
         if (estado === 'ANULADO') whereClause.anuladoEn = { not: null };
         if (estado === 'VIGENTE') whereClause.anuladoEn = null;
         if (cuenta === 'CAJA' || cuenta === 'BANCO') whereClause.movimientoCaja = { is: { cuenta } };
+        if (cuentaBancariaId !== undefined) {
+            const accountId = Number(cuentaBancariaId);
+            if (!Number.isInteger(accountId) || accountId <= 0) {
+                throw Object.assign(new Error('La cuenta bancaria del filtro no es válida'), { statusCode: 400, code: 'INVALID_BANK_ACCOUNT_FILTER' });
+            }
+            whereClause.movimientoCaja = { is: { cuenta: 'BANCO', cuentaBancariaId: accountId } };
+        }
         if (desdeDate || hastaDate) whereClause.fechaPago = {
             ...(desdeDate ? { gte: desdeDate } : {}),
             ...(hastaDate ? { lte: hastaDate } : {})
@@ -123,7 +131,7 @@ router.get('/', authenticateToken, requirePermission('pagos.ver'), withPaginatio
                 anuladoPor: {
                     select: { id: true, nombreCompleto: true, email: true }
                 },
-                movimientoCaja: { select: { cuenta: true } },
+                movimientoCaja: { select: { cuenta: true, cuentaBancariaId: true, cuentaBancaria: { select: { id: true, banco: true, nombre: true, moneda: true } } } },
                 liquidacion: {
                     include: {
                         contrato: {
@@ -178,7 +186,7 @@ router.get('/', authenticateToken, requirePermission('pagos.ver'), withPaginatio
             });
         }
         console.error('Error fetching pagos globales:', error);
-        res.status(500).json({ message: 'Error al obtener historial de pagos' });
+        res.status(500).json({ message: 'Error al obtener los cobros de inquilinos' });
     }
 });
 
@@ -188,7 +196,7 @@ router.get('/', authenticateToken, requirePermission('pagos.ver'), withPaginatio
  * conserva el flujo global que distribuye sobre las deudas más antiguas.
  */
 router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBody(pagoSchema), async (req, res) => {
-    const { contratoId, liquidacionId, monto, fechaPago, metodoPago, moneda, observaciones, expectedLiquidationVersion } = req.body;
+    const { contratoId, liquidacionId, monto, fechaPago, metodoPago, moneda, cuentaBancariaId, observaciones, expectedLiquidationVersion } = req.body;
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
 
     try {
@@ -204,6 +212,8 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
 
         // Ejecutamos todo en una transacción para asegurar integridad
         const result = await prisma.$transaction(async (tx) => {
+            const cuentaBancaria = metodoPago === 'EFECTIVO' ? null : await tx.cuentaBancaria.findFirst({ where: { id: cuentaBancariaId, inmobiliariaId, activa: true, moneda: moneda || contrato.moneda }, select: { id: true } });
+            if (metodoPago !== 'EFECTIVO' && !cuentaBancaria) throw Object.assign(new Error('Seleccioná una cuenta bancaria activa para la transferencia o cheque.'), { statusCode: 400, code: 'BANK_ACCOUNT_REQUIRED' });
             // 1. Buscar liquidaciones del contrato que no sean borrador y no estén pagadas del todo
             // Traemos también sus pagos para calcular la deuda actual de cada una
             const liquidaciones = await tx.liquidacion.findMany({
@@ -292,7 +302,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                 const dir = (liq as any).contrato?.propiedad?.direccion || 'Sin dirección';
                 const periodoStr = new Date(liq.periodo).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 
-                await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: paymentDate, cuenta: cuentaCobro, moneda: liq.moneda });
+                await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: paymentDate, cuenta: cuentaCobro, moneda: liq.moneda, cuentaBancariaId: cuentaBancaria?.id });
                 await tx.movimientoCaja.create({
                     data: {
                         inmobiliariaId,
@@ -307,6 +317,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                         pagoId: nuevoPago.id,
                         metodoPago: metodoPago || MetodoPago.EFECTIVO,
                         cuenta: cuentaCobro
+                        , cuentaBancariaId: cuentaBancaria?.id
                     }
                 });
 
@@ -520,6 +531,7 @@ router.post('/:id/anular', authenticateToken, requirePermission('pagos.eliminar'
                     fecha: fechaCorreccion,
                     metodoPago: movimientoOriginal.metodoPago,
                     cuenta: movimientoOriginal.cuenta,
+                    cuentaBancariaId: movimientoOriginal.cuentaBancariaId,
                     observaciones: motivo,
                     creadoPorId: usuarioId,
                     contratoId: pago.contratoId,
@@ -571,7 +583,7 @@ router.post('/:id/anular', authenticateToken, requirePermission('pagos.eliminar'
 });
 
 /**
- * Obtener historial de pagos de un contrato
+ * Obtener cobros de inquilinos de un contrato
  */
 router.get('/contrato/:id', authenticateToken, requirePermission('pagos.ver'), withPagination(50), async (req, res) => {
     const { id } = req.params;
