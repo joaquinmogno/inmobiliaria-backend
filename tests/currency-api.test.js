@@ -24,6 +24,7 @@ const createdMovimientos = [];
 const createdPagos = [];
 const createdCaja = [];
 const createdCuotas = [];
+const createdComprobantes = [];
 const createdCajaAttachments = [];
 
 const SESSION_TOKEN = 'currency-session-token';
@@ -87,6 +88,7 @@ function resetState() {
   createdPagos.length = 0;
   createdCaja.length = 0;
   createdCuotas.length = 0;
+  createdComprobantes.length = 0;
   createdCajaAttachments.length = 0;
 }
 
@@ -201,8 +203,32 @@ function installPrismaMocks() {
   };
   prisma.liquidacion = {
     count: async ({ where }) => createdLiquidaciones.filter((item) => item.contratoId === where.contratoId).length,
-    findFirst: async ({ where }) => {
-      if (where.id) return createdLiquidaciones.find((item) => item.id === where.id && item.inmobiliariaId === where.inmobiliariaId) || null;
+    findFirst: async ({ where, include }) => {
+      if (where.id) {
+        const item = createdLiquidaciones.find((candidate) => candidate.id === where.id && candidate.inmobiliariaId === where.inmobiliariaId);
+        if (!item || !include) return item || null;
+        const source = createdContracts.find(contract => contract.id === item.contratoId) || {};
+        return {
+          ...item,
+          fechaCreacion: item.fechaCreacion || new Date('2026-06-01T00:00:00.000Z'),
+          fechaConfirmacion: item.fechaConfirmacion || new Date('2026-06-01T00:00:00.000Z'),
+          fechaVencimiento: item.fechaVencimiento || new Date('2026-06-10T00:00:00.000Z'),
+          montoAlquilerBase: item.montoAlquilerBase || item.netoACobrar,
+          montoHonorarios: item.montoHonorarios || 0,
+          movimientos: createdMovimientos.filter(movement => movement.liquidacionId === item.id),
+          pagos: createdPagos.filter(pago => pago.liquidacionId === item.id && !pago.anuladoEn).map(pago => ({ ...pago, movimientoCaja: createdCaja.find(cash => cash.pagoId === pago.id) || null, imputacionesCuotas: [] })),
+          pagosPropietario: [], aplicacionesCredito: [], ajustes: [],
+          contrato: {
+            id: item.contratoId, fechaInicio: source.fechaInicio || new Date('2026-01-01T00:00:00.000Z'),
+            fechaFin: source.fechaFin || new Date('2027-01-01T00:00:00.000Z'), fechaProximaActualizacion: null,
+            requiereActualizacion: false, tipoAjuste: null, porcentajeActualizacion: null, pagaHonorarios: item.pagaHonorarios || 'INQUILINO',
+            modalidadCobroInquilino: null, modalidadPagoPropietario: null,
+            propiedad: { id: 10, direccion: 'Av. Test 123' },
+            inquilinos: [{ personaId: 101, esPrincipal: true, persona: { id: 101, nombreCompleto: 'Inquilino Test' } }],
+            propietarios: [{ personaId: 102, esPrincipal: true, persona: { id: 102, nombreCompleto: 'Propietario Test' } }]
+          }
+        };
+      }
       if (where.contratoId && where.periodo) return createdLiquidaciones.find((item) => item.contratoId === where.contratoId) || null;
       return null;
     },
@@ -347,6 +373,10 @@ function installPrismaMocks() {
   prisma.planCuotas = {
     count: async ({ where }) => createdLiquidaciones.some((item) => item.contratoId === where.contratoId) ? 0 : 0,
     findMany: async () => [],
+  };
+  prisma.comprobanteLiquidacion = {
+    findFirst: async ({ where }) => createdComprobantes.filter(item => item.liquidacionId === where.liquidacionId).at(-1) || null,
+    create: async ({ data }) => { const item = { id: createdComprobantes.length + 1, ...data }; createdComprobantes.push(item); return item; }
   };
 
   auditService.log = async () => ({ id: 1 });

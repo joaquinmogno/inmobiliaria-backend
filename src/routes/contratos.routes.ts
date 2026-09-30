@@ -63,6 +63,12 @@ function compactChanges(changes: Record<string, { anterior: unknown; nuevo: unkn
     });
 }
 
+async function assertAgreedCollectionAccount(tx: Prisma.TransactionClient, accountId: number | null | undefined, inmobiliariaId: number, moneda: 'ARS' | 'USD') {
+    if (!accountId) return;
+    const account = await tx.cuentaBancaria.findFirst({ where: { id: accountId, inmobiliariaId, moneda, activa: true }, select: { id: true } });
+    if (!account) throw new AppError('La cuenta de cobro acordada debe estar activa y usar la moneda del contrato', { statusCode: 400, code: 'INVALID_AGREED_COLLECTION_ACCOUNT' });
+}
+
 // Create contract
 router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), validateUploadedFileContent, cleanupFailedUpload, validateBody(contractCreateSchema), async (req, res) => {
     const authReq = req as AuthRequest;
@@ -119,6 +125,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                 'inquilino'
             );
             assertUniqueContractParties(propietariosIds, inquilinosIds);
+            await assertAgreedCollectionAccount(tx, payload.cuentaCobroAcordadaId, inmobiliariaId, resolveMoneda(payload.moneda));
 
             const newContract = await tx.contrato.create({
                 data: {
@@ -139,6 +146,9 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                     porcentajeHonorarios: payload.porcentajeHonorarios ? new Decimal(payload.porcentajeHonorarios) : null,
                     pagaHonorarios: payload.pagaHonorarios || 'INQUILINO',
                     diaVencimiento: payload.diaVencimiento ? Number(payload.diaVencimiento) : 10,
+                    modalidadCobroInquilino: payload.modalidadCobroInquilino || null,
+                    modalidadPagoPropietario: payload.modalidadPagoPropietario || null,
+                    cuentaCobroAcordadaId: payload.modalidadCobroInquilino === 'TRANSFERENCIA' ? payload.cuentaCobroAcordadaId || null : null,
                     porcentajeActualizacion: updateSettings.porcentajeActualizacion,
                     tipoAjuste: updateSettings.tipoAjuste,
                     administrado: Boolean(payload.administrado),
@@ -552,6 +562,9 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         porcentajeHonorarios,
         pagaHonorarios,
         diaVencimiento,
+        modalidadCobroInquilino,
+        modalidadPagoPropietario,
+        cuentaCobroAcordadaId,
         porcentajeActualizacion,
         tipoAjuste,
         administrado,
@@ -669,6 +682,18 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
             updateData.diaVencimiento = Number(diaVencimiento);
             changes.diaVencimiento = { anterior: contract.diaVencimiento, nuevo: updateData.diaVencimiento };
         }
+        if (modalidadCobroInquilino !== undefined) {
+            updateData.modalidadCobroInquilino = modalidadCobroInquilino || null;
+            changes.modalidadCobroInquilino = { anterior: contract.modalidadCobroInquilino, nuevo: updateData.modalidadCobroInquilino };
+        }
+        if (cuentaCobroAcordadaId !== undefined || (modalidadCobroInquilino !== undefined && modalidadCobroInquilino !== 'TRANSFERENCIA')) {
+            updateData.cuentaCobroAcordadaId = (modalidadCobroInquilino ?? contract.modalidadCobroInquilino) === 'TRANSFERENCIA' ? cuentaCobroAcordadaId || null : null;
+            changes.cuentaCobroAcordadaId = { anterior: contract.cuentaCobroAcordadaId, nuevo: updateData.cuentaCobroAcordadaId };
+        }
+        if (modalidadPagoPropietario !== undefined) {
+            updateData.modalidadPagoPropietario = modalidadPagoPropietario || null;
+            changes.modalidadPagoPropietario = { anterior: contract.modalidadPagoPropietario, nuevo: updateData.modalidadPagoPropietario };
+        }
         if (!updatesScheduling && porcentajeActualizacion !== undefined) {
             updateData.porcentajeActualizacion = porcentajeActualizacion ? new Decimal(porcentajeActualizacion) : null;
             changes.porcentajeActualizacion = { anterior: contract.porcentajeActualizacion, nuevo: updateData.porcentajeActualizacion };
@@ -706,6 +731,10 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
             && !new Decimal(updateData.montoAlquiler).equals(contract.montoAlquiler);
 
         const updated = await prisma.$transaction(async tx => {
+            const agreedMethod = updateData.modalidadCobroInquilino !== undefined ? updateData.modalidadCobroInquilino : contract.modalidadCobroInquilino;
+            const agreedAccountId = updateData.cuentaCobroAcordadaId !== undefined ? updateData.cuentaCobroAcordadaId : contract.cuentaCobroAcordadaId;
+            if (agreedMethod === 'TRANSFERENCIA' && !agreedAccountId) throw new AppError('Seleccioná la cuenta acordada para cobrar las transferencias del inquilino', { statusCode: 400, code: 'AGREED_COLLECTION_ACCOUNT_REQUIRED' });
+            await assertAgreedCollectionAccount(tx, agreedAccountId, inmobiliariaId, updateData.moneda || contract.moneda);
             if (updateData.estado === 'ACTIVO' || updateData.estado === 'PROGRAMADO') {
                 await assertPropertyAvailableForPeriod(tx, contract.propiedadId, nextStartDate, nextEndDate, contract.id);
             }

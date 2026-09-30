@@ -414,15 +414,9 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
                 assertSameCurrency(cuota.moneda, contrato.moneda, 'No se pueden liquidar cuotas con una moneda distinta a la del contrato');
                 assertSameCurrency(cuota.plan.moneda, contrato.moneda, 'No se pueden liquidar planes con una moneda distinta a la del contrato');
 
-                const liquidationPeriodEnd = new Date(Date.UTC(
-                    liquidationPeriod.getUTCFullYear(), liquidationPeriod.getUTCMonth() + 1, 0
-                ));
-                if (cuota.fechaVencimiento > liquidationPeriodEnd) {
-                    throw Object.assign(new Error('La cuota seleccionada todavía no corresponde al período de esta liquidación'), {
-                        statusCode: 409,
-                        code: 'INSTALLMENT_NOT_DUE'
-                    });
-                }
+                // Los acuerdos pueden recuperarse en un período elegido por las
+                // partes. Una cuota futura sólo se incorpora por selección
+                // explícita del operador; la preparación automática no la usa.
 
                 const claimed = await tx.cuotaPlan.updateMany({
                     where: {
@@ -496,7 +490,7 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
 router.post('/:id/movimientos', requirePermission('liquidaciones.editar'), validateBody(movimientoSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { tipo, concepto, monto, observaciones, expectedVersion } = req.body;
+    const { tipo, concepto, monto, observaciones, esParaInmobiliaria, expectedVersion } = req.body;
 
     try {
         const liquidacion = await prisma.liquidacion.findFirst({
@@ -534,6 +528,7 @@ router.post('/:id/movimientos', requirePermission('liquidaciones.editar'), valid
                     monto: monto ? monto.toString() : 0,
                     moneda: liquidacion.moneda,
                     observaciones,
+                    esParaInmobiliaria,
                     liquidacionId: Number(id)
                 }
             });
@@ -998,7 +993,7 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
                 }
             });
             await syncInstallmentsForLiquidationSettlement({ tx, liquidacionId, usuarioId });
-            const comprobante = await createLiquidationVoucherSnapshot({ tx, liquidacionId, inmobiliariaId, usuarioId });
+            const comprobante = await createLiquidationVoucherSnapshot({ tx, liquidacionId, inmobiliariaId, usuarioId, evento: 'AJUSTE' });
             return { adjustment, creditoInquilino, compensacion, liquidacion: updated, comprobante };
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
         await auditService.log({
@@ -1199,6 +1194,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
                 throw Object.assign(new Error('La liquidación cambió mientras registrabas la entrega. Actualizá la pantalla e intentá nuevamente'), { statusCode: 409, code: 'LIQUIDATION_CHANGED' });
             }
             const actualizada = await tx.liquidacion.findUniqueOrThrow({ where: { id: liquidacion.id } });
+            await createLiquidationVoucherSnapshot({ tx, liquidacionId: liquidacion.id, inmobiliariaId, usuarioId: (req as AuthRequest).user!.id, evento: 'PAGO_PROPIETARIO' });
 
             return {
                 ...actualizada,
@@ -1441,6 +1437,7 @@ router.post(
                         version: { increment: 1 }
                     }
                 });
+                await createLiquidationVoucherSnapshot({ tx, liquidacionId, inmobiliariaId, usuarioId, evento: 'ANULACION_PAGO_PROPIETARIO' });
                 return {
                     liquidacion: updated,
                     pagoPropietarioId: pago.id,
@@ -1474,6 +1471,7 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
                 contrato: { 
                     include: { 
                         propiedad: true, 
+                        cuentaCobroAcordada: { select: { banco: true, nombre: true } },
                         inquilinos: { include: { persona: true } }, 
                         propietarios: { include: { persona: true } } 
                     } 
@@ -1552,7 +1550,23 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
             col1,
             y
         );
-        y += 50;
+        field('Fin de contrato', formatDatePdf(liqAny.contrato?.fechaFin), col2, y);
+        y += 40;
+        field('Vencimiento de pago', formatDatePdf(liqAny.fechaVencimiento), col1, y);
+        field('Cobro acordado', liqAny.contrato?.modalidadCobroInquilino || 'Sin acordar', col2, y);
+        y += 40;
+        field('Pago al propietario acordado', liqAny.contrato?.modalidadPagoPropietario || 'Sin acordar', col1, y);
+        if (liqAny.contrato?.modalidadCobroInquilino === 'TRANSFERENCIA') {
+            const account = liqAny.contrato?.cuentaCobroAcordada;
+            field('Cuenta de cobro acordada', account ? `${account.banco} · ${account.nombre}` : 'No definida', col2, y);
+        }
+        y += 40;
+        if (liqAny.contrato?.modalidadPagoPropietario === 'TRANSFERENCIA') {
+            const ownerAlias = liqAny.contrato?.propietarios?.find((item: any) => item.esPrincipal)?.persona?.aliasBancario;
+            field('Alias del propietario', ownerAlias || 'No definido', col1, y);
+            y += 40;
+        }
+        y += 10;
 
         // Ingresos
         doc.fillColor(INDIGO).fontSize(11).font('Helvetica-Bold').text('INGRESOS', 50, y);
@@ -1701,12 +1715,14 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
                 contrato: {
                     include: {
                         propiedad: true,
+                        cuentaCobroAcordada: { select: { banco: true, nombre: true } },
                         inquilinos: { include: { persona: true } },
                         propietarios: { include: { persona: true } }
                     }
                 },
                 propietarioPago: true,
-                pagos: { where: { anuladoEn: null } }
+                pagos: { where: { anuladoEn: null } },
+                pagosPropietario: { where: { anuladoEn: null }, include: { movimientoCaja: { include: { cuentaBancaria: true } } } }
             }
         });
 
@@ -1779,6 +1795,19 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
             y
         );
         y += 40;
+
+        field('Vencimiento de pago', formatDatePdf(liquidacion.fechaVencimiento), col1, y);
+        field('Cobro acordado', contrato?.modalidadCobroInquilino || 'Sin acordar', col2, y);
+        y += 40;
+        field('Pago al propietario acordado', contrato?.modalidadPagoPropietario || 'Sin acordar', col1, y);
+        y += 40;
+        if (contrato?.modalidadCobroInquilino === 'TRANSFERENCIA' || contrato?.modalidadPagoPropietario === 'TRANSFERENCIA') {
+            const account = contrato?.cuentaCobroAcordada;
+            const ownerAlias = contrato?.propietarios?.find((item: any) => item.esPrincipal)?.persona?.aliasBancario;
+            if (contrato?.modalidadCobroInquilino === 'TRANSFERENCIA') field('Cuenta de cobro acordada', account ? `${account.banco} · ${account.nombre}` : 'No definida', col1, y);
+            if (contrato?.modalidadPagoPropietario === 'TRANSFERENCIA') field('Alias del propietario', ownerAlias || 'No definido', col2, y);
+            y += 40;
+        }
 
         // Tipo de ajuste y porcentaje
         const partsAjuste = [
@@ -1880,6 +1909,14 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
             y += 22;
 
             y = drawPaymentRowsPdf(doc, y, pageWidth, liquidacion.pagos, moneyPdf);
+        }
+
+        const ownerPayments = (liquidacion as any).pagosPropietario || [];
+        if (ownerPayments.length > 0) {
+            y = ensurePdfSpace(doc, y + 16, 55);
+            doc.fillColor(TEAL).fontSize(11).font('Helvetica-Bold').text('ENTREGAS AL PROPIETARIO', 50, y);
+            doc.moveTo(50, y + 14).lineTo(50 + pageWidth, y + 14).strokeColor(TEAL).lineWidth(1).stroke();
+            y = drawPaymentRowsPdf(doc, y + 22, pageWidth, ownerPayments, moneyPdf);
         }
 
         if (deudaAnterior.totalDeuda > 0) {

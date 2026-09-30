@@ -119,7 +119,10 @@ test('property dossier exposes relationships, notes, services, keys and protecte
 
   const deletion = await jsonRequest('DELETE', `/propiedades/${propertyId}/adjuntos/${uploaded.id}`, undefined, session);
   assert.equal(deletion.response.status, 200);
-  assert.equal((await fetch(`${apiBase}/files/${uploaded.rutaArchivo}`, { headers: { cookie: session.cookie } })).status, 404);
+  assert.equal((await fetch(`${apiBase}/files/${uploaded.rutaArchivo}`, { headers: { cookie: session.cookie } })).status, 200);
+  const trashed = await jsonRequest('GET', `/propiedades/${propertyId}/adjuntos/papelera`, undefined, session);
+  assert.equal(trashed.response.status, 200);
+  assert.ok(trashed.payload.data.some(item => item.id === uploaded.id));
 
   const auditActions = await prisma.auditLog.findMany({
     where: { entidad: 'Propiedad', entidadId: propertyId },
@@ -127,5 +130,5 @@ test('property dossier exposes relationships, notes, services, keys and protecte
   });
   assert.ok(auditActions.some(item => item.accion === 'AGREGAR_NOTA_PROPIEDAD'));
   assert.ok(auditActions.some(item => item.accion === 'AGREGAR_ADJUNTO_PROPIEDAD'));
-  assert.ok(auditActions.some(item => item.accion === 'ELIMINAR_ADJUNTO_PROPIEDAD'));
+  assert.ok(auditActions.some(item => item.accion === 'ENVIAR_ADJUNTO_PROPIEDAD_A_PAPELERA'));
 });

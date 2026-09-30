@@ -16,9 +16,10 @@ const router = Router();
 
 router.get('/', requirePermission('liquidaciones.ver'), withPagination(50), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
-    const { contratoId, search, estado, estadoCobro, estadoPagoPropietario, periodo, propietarioId, inquilinoId, propiedadId, moneda, soloDeuda, vencidas, pendientePropietario, adelantos } = req.query;
+    const { contratoId, search, estado, estadoCobro, estadoPagoPropietario, periodo, propietarioId, inquilinoId, propiedadId, moneda, soloDeuda, vencidas, pendientePropietario, adelantos, conCuotas } = req.query;
     const { page, limit, skip } = res.locals.pagination;
-    if (estado && !Object.values(EstadoLiquidacion).includes(String(estado) as EstadoLiquidacion)) {
+    const operationalStates = ['PENDIENTE_COBRO', 'EN_MORA', 'PENDIENTE_PAGO_PROPIETARIO', 'FINALIZADA'];
+    if (estado && !Object.values(EstadoLiquidacion).includes(String(estado) as EstadoLiquidacion) && !operationalStates.includes(String(estado))) {
         return res.status(400).json({ message: 'Estado de liquidación inválido' });
     }
     if (moneda && !['ARS', 'USD'].includes(String(moneda))) {
@@ -30,15 +31,24 @@ router.get('/', requirePermission('liquidaciones.ver'), withPagination(50), asyn
         const where: any = {
             inmobiliariaId,
             ...(contratoId ? { contratoId: Number(contratoId) } : {}),
-            ...(estado ? { estado: String(estado) as EstadoLiquidacion } : {}),
+            ...(estado && Object.values(EstadoLiquidacion).includes(String(estado) as EstadoLiquidacion) ? { estado: String(estado) as EstadoLiquidacion } : {}),
             ...(estadoCobro ? { estadoCobroInquilino: String(estadoCobro) } : {}),
             ...(estadoPagoPropietario ? { estadoPagoPropietario: String(estadoPagoPropietario) } : {}),
             ...(periodo ? { periodo: parseDateOnly(String(periodo).slice(0, 10)) } : {}),
             ...(moneda ? { moneda: String(moneda) } : {}),
             ...(propiedadId ? { contrato: { propiedadId: Number(propiedadId) } } : {}),
             ...(vencidas === 'true' ? { estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['PENDIENTE', 'PARCIAL'] }, fechaVencimiento: { lt: argentinaTodayAsDate() } } : {}),
-            ...(pendientePropietario === 'true' ? { estado: 'CONFIRMADA', estadoPagoPropietario: { in: ['PENDIENTE', 'PARCIAL'] } } : {})
+            ...(pendientePropietario === 'true' ? { estado: 'CONFIRMADA', estadoPagoPropietario: { in: ['PENDIENTE', 'PARCIAL'] } } : {}),
+            ...(conCuotas === 'true' ? { cuotas: { some: {} } } : {})
         };
+        const today = argentinaTodayAsDate();
+        const operationalWhere: Record<string, any> = {
+            PENDIENTE_COBRO: { estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['PENDIENTE', 'PARCIAL'] }, OR: [{ fechaVencimiento: { gte: today } }, { fechaVencimiento: null }] },
+            EN_MORA: { estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['PENDIENTE', 'PARCIAL'] }, fechaVencimiento: { lt: today } },
+            PENDIENTE_PAGO_PROPIETARIO: { estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['COBRADO', 'NO_APLICA'] }, estadoPagoPropietario: { in: ['PENDIENTE', 'PARCIAL'] } },
+            FINALIZADA: { estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['COBRADO', 'NO_APLICA'] }, estadoPagoPropietario: { in: ['PAGADO', 'NO_APLICA'] } }
+        };
+        if (estado && operationalWhere[String(estado)]) where.AND = [operationalWhere[String(estado)]];
         const contractFilters: any[] = [];
         if (search) contractFilters.push({ OR: [
             { propiedad: { direccion: { contains: String(search), mode: 'insensitive' } } },
@@ -213,6 +223,101 @@ router.get('/filtros/propiedades', requirePermission('liquidaciones.ver'), withP
     res.json({ data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } });
 });
 
+router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ver'), async (req, res) => {
+    const { inmobiliariaId } = (req as AuthRequest).user!;
+    const contratoId = Number(req.params.contratoId);
+    if (!Number.isInteger(contratoId) || contratoId <= 0) return res.status(400).json({ message: 'Contrato inválido' });
+    const contrato = await prisma.contrato.findFirst({
+        where: { id: contratoId, inmobiliariaId },
+        include: {
+            propiedad: true,
+            cuentaCobroAcordada: { select: { id: true, banco: true, nombre: true } },
+            inquilinos: { where: { esPrincipal: true }, include: { persona: true } },
+            propietarios: { where: { esPrincipal: true }, include: { persona: true } },
+            decisionesLiquidacion: true,
+            liquidaciones: {
+                include: {
+                    pagos: { where: { anuladoEn: null }, select: { monto: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true } },
+                    aplicacionesCredito: { select: { monto: true } },
+                    pagosPropietario: { where: { anuladoEn: null }, select: { monto: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true } },
+                    movimientos: { select: { concepto: true, observaciones: true } },
+                    cuotas: { include: { plan: { select: { concepto: true, _count: { select: { cuotas: true } } } }, imputacionesPago: { where: { pago: { anuladoEn: null } }, select: { monto: true } } } },
+                    ajustes: { select: { id: true, tipo: true, concepto: true, motivo: true, fechaCreacion: true } }
+                },
+                orderBy: { periodo: 'asc' }
+            }
+        }
+    });
+    if (!contrato) return res.status(404).json({ message: 'Contrato no encontrado' });
+
+    const today = argentinaTodayAsDate();
+    const first = new Date(Date.UTC(contrato.fechaInicio.getUTCFullYear(), contrato.fechaInicio.getUTCMonth(), 1));
+    const lastDate = contrato.fechaRescision || contrato.fechaFin;
+    const last = new Date(Date.UTC(lastDate.getUTCFullYear(), lastDate.getUTCMonth(), 1));
+    const periodos = [];
+    for (let cursor = first; cursor <= last; cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))) {
+        const key = cursor.toISOString().slice(0, 7);
+        const liquidacion = contrato.liquidaciones.find(item => item.periodo.toISOString().slice(0, 7) === key);
+        const decision = contrato.decisionesLiquidacion.find(item => item.periodo.toISOString().slice(0, 7) === key);
+        const tenant = liquidacion ? getTenantSettlement(liquidacion) : null;
+        const owner = liquidacion ? getOwnerPaymentSettlement(liquidacion) : null;
+        const estado = liquidacion?.estado === 'ANULADA' ? 'ANULADA'
+            : liquidacion?.estado === 'BORRADOR' ? 'BORRADOR'
+                : liquidacion && tenant && tenant.saldo.greaterThan(0) && liquidacion.fechaVencimiento && liquidacion.fechaVencimiento < today ? 'EN_MORA'
+                    : liquidacion && tenant && tenant.saldo.greaterThan(0) ? 'PENDIENTE_COBRO'
+                        : liquidacion && owner && owner.saldo.greaterThan(0) ? 'PENDIENTE_PAGO_PROPIETARIO'
+                            : liquidacion ? 'FINALIZADA'
+                                : decision ? 'OMITIDA'
+                                    : !contrato.administrado || contrato.estado !== 'ACTIVO' || contrato.inquilinos.length !== 1 || contrato.propietarios.length !== 1 || Number(contrato.montoAlquiler) <= 0 ? 'REQUIERE_REVISION'
+                                        : 'PENDIENTE_LIQUIDAR';
+        periodos.push({
+            periodo: cursor.toISOString().slice(0, 10), estado,
+            liquidacionId: liquidacion?.id || null,
+            total: liquidacion ? Number(liquidacion.netoACobrar) : null,
+            cobrado: tenant ? tenant.pagos.toNumber() : 0,
+            saldoInquilino: tenant ? tenant.saldo.toNumber() : 0,
+            pagadoPropietario: owner ? owner.pagado.toNumber() : 0,
+            saldoPropietario: owner ? owner.saldo.toNumber() : 0,
+            fechaVencimiento: liquidacion?.fechaVencimiento || null,
+            pagos: liquidacion?.pagos || [],
+            pagosPropietario: liquidacion?.pagosPropietario || [],
+            cuotas: liquidacion?.cuotas.map(cuota => ({
+                id: cuota.id, concepto: cuota.plan.concepto, numeroCuota: cuota.numeroCuota,
+                cantidadCuotas: cuota.plan._count.cuotas, monto: Number(cuota.monto), estado: cuota.estado,
+                saldo: Math.max(0, Number(cuota.monto) - cuota.imputacionesPago.reduce((sum, item) => sum + Number(item.monto), 0))
+            })) || [],
+            ajustes: liquidacion?.ajustes || [],
+            observacion: decision?.motivo || null,
+            observaciones: [
+                ...(decision?.motivo ? [`Omisión: ${decision.motivo}`] : []),
+                ...(liquidacion?.movimientos.flatMap(item => item.observaciones ? [`${item.concepto}: ${item.observaciones}`] : []) || []),
+                ...(liquidacion?.pagos.flatMap(item => item.observaciones ? [`Cobro: ${item.observaciones}`] : []) || []),
+                ...(liquidacion?.pagosPropietario.flatMap(item => item.observaciones ? [`Pago al propietario: ${item.observaciones}`] : []) || []),
+                ...(liquidacion?.ajustes.map(item => `Ajuste ${item.concepto}: ${item.motivo}`) || [])
+            ]
+        });
+    }
+    const requested = typeof req.query.periodo === 'string' ? req.query.periodo.slice(0, 7) : null;
+    const oldestOverdue = periodos.find(item => item.estado === 'EN_MORA');
+    const current = today.toISOString().slice(0, 7);
+    const defaultPeriod = oldestOverdue?.periodo || periodos.find(item => item.periodo.slice(0, 7) === requested)?.periodo
+        || periodos.find(item => item.periodo.slice(0, 7) === current)?.periodo || periodos[periodos.length - 1]?.periodo;
+    res.json({
+        contrato: {
+            id: contrato.id, version: contrato.version, estado: contrato.estado, moneda: contrato.moneda,
+            fechaInicio: contrato.fechaInicio, fechaFin: lastDate, fechaProximaActualizacion: contrato.fechaProximaActualizacion,
+            requiereActualizacion: contrato.requiereActualizacion, diaVencimiento: contrato.diaVencimiento,
+            modalidadCobroInquilino: contrato.modalidadCobroInquilino, modalidadPagoPropietario: contrato.modalidadPagoPropietario,
+            cuentaCobroAcordada: contrato.cuentaCobroAcordada,
+            propiedad: contrato.propiedad,
+            inquilino: contrato.inquilinos[0]?.persona || null,
+            propietario: contrato.propietarios[0]?.persona || null
+        },
+        defaultPeriod,
+        periodos
+    });
+});
+
 router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
     pageParam: 'auditPage', limitParam: 'auditLimit', localsKey: 'auditPagination'
 }), async (req, res) => {
@@ -226,12 +331,14 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
                 contrato: {
                     include: {
                         propiedad: true,
+                        cuentaCobroAcordada: { select: { id: true, banco: true, nombre: true } },
                         inquilinos: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } },
                         propietarios: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } },
                         serviciosGastos: { orderBy: { orden: 'asc' } }
                     }
                 },
-                pagos: { where: { anuladoEn: null }, include: { creadoPor: { select: { id: true, nombreCompleto: true, email: true } } } },
+                pagos: { where: { anuladoEn: null }, include: { creadoPor: { select: { id: true, nombreCompleto: true, email: true } }, imputacionesCuotas: { include: { cuota: { select: { id: true, numeroCuota: true, plan: { select: { concepto: true } } } } } }, movimientoCaja: { select: { cuenta: true, cuentaBancaria: { select: { id: true, banco: true, nombre: true } } } } } },
+                cuotas: { include: { plan: { select: { concepto: true, _count: { select: { cuotas: true } } } }, imputacionesPago: { where: { pago: { anuladoEn: null } }, select: { monto: true } } } },
                 ajustes: {
                     include: {
                         creadoPor: { select: { id: true, nombreCompleto: true } },

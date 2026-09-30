@@ -87,7 +87,7 @@ export const drawPaymentRowsPdf = (
     const amountX = 50 + pageWidth - amountWidth - 10;
     const detailWidth = amountX - detailX - 12;
     payments.forEach(payment => {
-        const detailText = payment.observaciones || '-';
+        const detailText = [payment.comprobante, payment.cuenta, payment.observaciones].filter(Boolean).join(' · ') || '-';
         const methodText = payment.metodoPago || '-';
         doc.fontSize(9).font('Helvetica');
         const contentHeight = Math.max(

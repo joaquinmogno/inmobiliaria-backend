@@ -24,6 +24,7 @@ export const movimientoSchema = z.object({
     concepto: requiredText('El concepto', 255),
     monto: positiveDecimal('El monto'),
     observaciones: optionalText(1000),
+    esParaInmobiliaria: z.boolean().optional().default(false),
     expectedVersion: z.coerce.number().int().positive().optional()
 });
 

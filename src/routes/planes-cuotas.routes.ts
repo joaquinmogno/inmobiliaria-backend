@@ -204,10 +204,10 @@ router.get('/contrato/:contratoId/pendientes', requirePermission('liquidaciones.
                 estado: 'PENDIENTE',
                 liquidacionId: null,
                 movimientoId: null,
-                fechaVencimiento: { lte: liquidationPeriod }
+                ...(req.query.incluirFuturas === 'true' ? {} : { fechaVencimiento: { lte: liquidationPeriod } })
             },
             include: {
-                plan: true
+                plan: { include: { _count: { select: { cuotas: true } } } }
             },
             orderBy: [
                 { fechaVencimiento: 'asc' },

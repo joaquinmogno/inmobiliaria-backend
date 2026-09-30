@@ -78,7 +78,7 @@ test('payment reversal preserves history, restores debt and balances cash', asyn
   const liquidation = await prisma.liquidacion.create({
     data: {
       periodo: new Date('2026-09-01T00:00:00.000Z'),
-      estado: 'PENDIENTE_PAGO',
+      estado: 'CONFIRMADA',
       totalIngresos: 1000,
       totalDescuentos: 0,
       netoACobrar: 1000,
@@ -88,6 +88,7 @@ test('payment reversal preserves history, restores debt and balances cash', asyn
       inmobiliariaId: agency.id
     }
   });
+  const bankAccount = await prisma.cuentaBancaria.create({ data: { nombre: `Reversiones ${Date.now()}-${Math.random()}`, banco: 'Banco de prueba', moneda: 'ARS', inmobiliariaId: agency.id } });
 
   const creation = await post('/pagos', {
     contratoId: contract.id,
@@ -95,6 +96,7 @@ test('payment reversal preserves history, restores debt and balances cash', asyn
     moneda: 'ARS',
     fechaPago: '2026-09-02',
     metodoPago: 'TRANSFERENCIA',
+    cuentaBancariaId: bankAccount.id,
     observaciones: 'Cobro a corregir'
   }, session);
   assert.equal(creation.response.status, 201);
@@ -111,8 +113,8 @@ test('payment reversal preserves history, restores debt and balances cash', asyn
     motivo: 'Importe ingresado por error'
   }, session);
   assert.equal(reversal.response.status, 200);
-  assert.equal(reversal.payload.liquidacion.estado, 'PENDIENTE_PAGO');
-  assert.equal(reversal.payload.liquidacion.totalPagado, '0');
+  assert.equal(reversal.payload.liquidacion.estadoCobroInquilino, 'PENDIENTE');
+  assert.equal(await prisma.pago.count({ where: { liquidacionId: liquidation.id, anuladoEn: null } }), 0);
 
   const preservedPayment = await prisma.pago.findUniqueOrThrow({ where: { id: paymentId } });
   assert.ok(preservedPayment.anuladoEn);
@@ -127,7 +129,8 @@ test('payment reversal preserves history, restores debt and balances cash', asyn
   assert.equal(Number(preservedMovement.reversion.monto), 400);
 
   const liquidationAfter = await prisma.liquidacion.findUniqueOrThrow({ where: { id: liquidation.id } });
-  assert.equal(liquidationAfter.estado, 'PENDIENTE_PAGO');
+  assert.equal(liquidationAfter.estado, 'CONFIRMADA');
+  assert.equal(liquidationAfter.estadoCobroInquilino, 'PENDIENTE');
 
   const debtResponse = await fetch(`${apiBase}/pagos/deuda/contrato/${contract.id}`, {
     headers: { cookie: session.cookie }

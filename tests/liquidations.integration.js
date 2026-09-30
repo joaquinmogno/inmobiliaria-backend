@@ -92,6 +92,8 @@ async function createContract(overrides = {}) {
   const owner = await prisma.persona.create({
     data: {
       nombreCompleto: `Propietario ${suffix}`,
+      aliasBancario: 'propietario.demo',
+      titularidadBancariaVerificada: true,
       inmobiliariaId: agency.id,
     },
   });
@@ -102,7 +104,8 @@ async function createContract(overrides = {}) {
     },
   });
 
-  return prisma.contrato.create({
+  const bankAccount = await prisma.cuentaBancaria.create({ data: { nombre: `Integración ${suffix}`, banco: 'Banco de prueba', moneda: 'ARS', inmobiliariaId: agency.id } });
+  const contract = await prisma.contrato.create({
     data: {
       fechaInicio: new Date('2026-01-01T00:00:00.000Z'),
       fechaFin: new Date('2027-12-31T00:00:00.000Z'),
@@ -120,6 +123,7 @@ async function createContract(overrides = {}) {
     },
     include: { propietarios: true },
   });
+  return { ...contract, testBankAccountId: bankAccount.id };
 }
 
 test('LIQ-001/002/003: canonical totals are identical and confirmed liquidations are immutable', async () => {
@@ -176,6 +180,7 @@ test('LIQ-001/002/003: canonical totals are identical and confirmed liquidations
       moneda: 'ARS',
       fechaPago: '2026-09-04',
       metodoPago: 'TRANSFERENCIA',
+      cuentaBancariaId: contract.testBankAccountId,
     },
   });
   assert.equal(payment.response.status, 201);
@@ -191,7 +196,7 @@ test('LIQ-001/002/003: canonical totals are identical and confirmed liquidations
 
   const ownerPayment = await api(`/liquidaciones/${liquidationId}/pagar-propietario`, {
     method: 'PATCH',
-    body: { monto: 100000, fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA', propietarioId: contract.propietarios[0].personaId },
+    body: { monto: 100000, fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA', cuentaBancariaId: contract.testBankAccountId, propietarioId: contract.propietarios[0].personaId },
   });
   assert.equal(ownerPayment.response.status, 200);
   assert.equal(Number(ownerPayment.payload.montoPropietario), 100000);
@@ -298,29 +303,30 @@ test('LIQ-007/014: owner payout identifies its recipient and can be reversed ato
     body: {
       contratoId: contract.id, liquidacionId: creation.payload.id, monto: 100000,
       moneda: 'ARS', fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA',
+      cuentaBancariaId: contract.testBankAccountId,
     },
   });
 
   const wrongRecipient = await api(`/liquidaciones/${creation.payload.id}/pagar-propietario`, {
     method: 'PATCH',
-    body: { monto: 100000, fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA', propietarioId: ownerId + 999999 },
+    body: { monto: 100000, fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA', cuentaBancariaId: contract.testBankAccountId, propietarioId: ownerId + 999999 },
   });
   assert.equal(wrongRecipient.response.status, 409);
   assert.equal(wrongRecipient.payload.code, 'OWNER_RECIPIENT_MISMATCH');
 
   const payout = await api(`/liquidaciones/${creation.payload.id}/pagar-propietario`, {
     method: 'PATCH',
-    body: { monto: 100000, fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA', propietarioId: ownerId },
+    body: { monto: 100000, fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA', cuentaBancariaId: contract.testBankAccountId, propietarioId: ownerId },
   });
   assert.equal(payout.response.status, 200);
   assert.equal(payout.payload.propietarioPagoId, ownerId);
   assert.ok(payout.payload.pagoPropietarioMovimientoId);
 
-  const reversal = await api(`/liquidaciones/${creation.payload.id}/anular-pago-propietario`, {
+  const reversal = await api(`/liquidaciones/${creation.payload.id}/pagos-propietario/${payout.payload.pagoPropietarioId}/anular`, {
     method: 'POST', body: { motivo: 'Transferencia cargada por error' },
   });
   assert.equal(reversal.response.status, 200);
-  assert.equal(reversal.payload.liquidacion.estado, 'PAGADA_POR_INQUILINO');
+  assert.equal(reversal.payload.liquidacion.estadoPagoPropietario, 'PENDIENTE');
 
   const [original, reverseEntry, persisted] = await Promise.all([
     prisma.movimientoCaja.findUniqueOrThrow({ where: { id: payout.payload.pagoPropietarioMovimientoId } }),
@@ -330,7 +336,7 @@ test('LIQ-007/014: owner payout identifies its recipient and can be reversed ato
   assert.ok(original.anuladoEn);
   assert.equal(reverseEntry.tipo, 'INGRESO');
   assert.equal(Number(reverseEntry.monto), Number(original.monto));
-  assert.equal(persisted.pagoPropietarioMovimientoId, null);
+  assert.equal(persisted.estadoPagoPropietario, 'PENDIENTE');
   assert.equal(persisted.propietarioPagoId, ownerId);
   assert.match(persisted.propietarioNombre, /Propietario/);
 });
@@ -425,6 +431,7 @@ test('installment plans preserve cancellation, forgiveness and rescheduling hist
     method: 'POST', body: {
       contratoId: contract.id, liquidacionId: liquidation.payload.id, monto: 101000,
       moneda: 'ARS', fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA',
+      cuentaBancariaId: contract.testBankAccountId,
     },
   });
   assert.equal(payment.response.status, 201, JSON.stringify(payment.payload));
@@ -471,7 +478,7 @@ test('LIQ-010/015: monthly preparation categorizes contracts and bulk generation
   const preparation = await api('/liquidaciones/preparacion?periodo=2026-10-01');
   assert.equal(preparation.response.status, 200);
   assert.equal(preparation.payload.data.find(row => row.contratoId === ready.id).status, 'LISTA');
-  assert.equal(preparation.payload.data.find(row => row.contratoId === unmanaged.id).status, 'NO_ELEGIBLE');
+  assert.equal(preparation.payload.data.find(row => row.contratoId === unmanaged.id), undefined);
 
   const generated = await api('/liquidaciones/generar-periodo', {
     method: 'POST', body: { periodo: '2026-10-01', contratoIds: [ready.id] },
@@ -526,13 +533,14 @@ test('monthly workspace separates overdue installments, records omissions and re
   assert.equal(installments[0].liquidacionId, null);
   assert.equal(installments[1].liquidacionId, generated.payload.created[0].liquidacionId);
 
-  const omittedContract = await createContract({ administrado: false });
+  const omittedContract = await createContract();
   const omitted = await api('/liquidaciones/preparacion/descartar', {
     method: 'POST', body: { contratoId: omittedContract.id, periodo: '2026-10-01', motivo: 'No corresponde administrar este mes' },
   });
   assert.equal(omitted.response.status, 200);
   const afterOmission = await api('/liquidaciones/preparacion?periodo=2026-10-01');
   assert.equal(afterOmission.payload.data.find(item => item.contratoId === omittedContract.id).descartada, true);
+  assert.equal(await prisma.decisionLiquidacionMensual.count({ where: { contratoId: omittedContract.id, periodo: new Date('2026-10-01T00:00:00.000Z') } }), 1);
   assert.equal((await api('/liquidaciones/preparacion/reabrir', {
     method: 'POST', body: { contratoId: omittedContract.id, periodo: '2026-10-01' },
   })).response.status, 200);
@@ -622,6 +630,7 @@ test('LIQ-017: a credit after an overpayment is returned or applied without dupl
     body: {
       contratoId: contract.id, liquidacionId: source.payload.id, monto: 100000,
       moneda: 'ARS', fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA',
+      cuentaBancariaId: contract.testBankAccountId,
     },
   });
   assert.equal(paid.response.status, 201, JSON.stringify(paid.payload));
@@ -630,7 +639,7 @@ test('LIQ-017: a credit after an overpayment is returned or applied without dupl
     method: 'POST',
     body: {
       tipo: 'CREDITO', concepto: 'Bonificación acordada', motivo: 'Se cobró un importe mayor al correcto',
-      monto: 10000, impactoInquilino: -10000, impactoPropietario: 0,
+      montoInquilino: 10000, montoPropietario: 0,
       destinoCredito: 'SALDO_A_FAVOR',
     },
   });
@@ -670,14 +679,16 @@ test('LIQ-017: a credit after an overpayment is returned or applied without dupl
     body: {
       contratoId: refundContract.id, liquidacionId: refundSource.payload.id, monto: 100000,
       moneda: 'ARS', fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA',
+      cuentaBancariaId: refundContract.testBankAccountId,
     },
   });
   const refund = await api(`/liquidaciones/${refundSource.payload.id}/ajustes`, {
     method: 'POST',
     body: {
       tipo: 'CREDITO', concepto: 'Corrección de alquiler', motivo: 'El alquiler correcto era menor al cobrado',
-      monto: 10000, impactoInquilino: -10000, impactoPropietario: 0,
+      montoInquilino: 10000, montoPropietario: 0,
       destinoCredito: 'DEVOLUCION', fechaDevolucion: '2026-09-05', metodoDevolucion: 'TRANSFERENCIA',
+      cuentaBancariaIdDevolucion: refundContract.testBankAccountId,
       observacionesDevolucion: 'Transferencia de devolución al inquilino',
     },
   });

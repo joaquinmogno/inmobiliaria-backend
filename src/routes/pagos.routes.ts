@@ -17,6 +17,7 @@ import { withPagination } from '../middlewares/pagination.middleware';
 import { getTenantCollectionState, getTenantSettlement } from '../services/tenant-credit.service';
 import { syncInstallmentsForLiquidationSettlement } from '../services/installment-plan-lifecycle.service';
 import { userHasPermission } from '../services/permissions.service';
+import { createLiquidationVoucherSnapshot } from '../services/liquidation-voucher.service';
 
 const router = Router();
 
@@ -29,7 +30,13 @@ const pagoSchema = z.object({
     cuentaBancariaId: z.coerce.number().int().positive().optional(),
     moneda: z.enum(['ARS', 'USD']).optional(),
     observaciones: optionalText(1000),
+    comprobante: optionalText(120),
+    cuotasImputadas: z.array(z.object({ cuotaId: z.coerce.number().int().positive(), monto: positiveDecimal('El importe de la cuota') })).optional(),
     expectedLiquidationVersion: z.coerce.number().int().positive().optional()
+}).superRefine((value, ctx) => {
+    if (value.cuotasImputadas?.length && !value.liquidacionId) ctx.addIssue({ code: 'custom', path: ['liquidacionId'], message: 'La imputación de cuotas requiere una liquidación específica' });
+    if (value.cuotasImputadas && new Set(value.cuotasImputadas.map(item => item.cuotaId)).size !== value.cuotasImputadas.length) ctx.addIssue({ code: 'custom', path: ['cuotasImputadas'], message: 'No repitas la misma cuota' });
+    if (value.cuotasImputadas && value.cuotasImputadas.reduce((sum, item) => sum.plus(item.monto), new Decimal(0)).greaterThan(value.monto)) ctx.addIssue({ code: 'custom', path: ['cuotasImputadas'], message: 'La suma imputada a cuotas supera el cobro' });
 });
 
 const anulacionSchema = z.object({
@@ -196,7 +203,7 @@ router.get('/', authenticateToken, requirePermission('pagos.ver'), withPaginatio
  * conserva el flujo global que distribuye sobre las deudas más antiguas.
  */
 router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBody(pagoSchema), async (req, res) => {
-    const { contratoId, liquidacionId, monto, fechaPago, metodoPago, moneda, cuentaBancariaId, observaciones, expectedLiquidationVersion } = req.body;
+    const { contratoId, liquidacionId, monto, fechaPago, metodoPago, moneda, cuentaBancariaId, comprobante, observaciones, cuotasImputadas, expectedLiquidationVersion } = req.body;
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
 
     try {
@@ -287,6 +294,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                         moneda: liq.moneda,
                         fechaPago: paymentDate,
                         metodoPago: metodoPago || MetodoPago.EFECTIVO,
+                        comprobante,
                         observaciones,
                         contratoId: Number(contratoId),
                         liquidacionId: liq.id,
@@ -297,6 +305,20 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
 
                 pagosCreados.push(nuevoPago);
                 montoRestante = montoRestante.minus(montoAAplicar);
+
+                if (liquidacionId && cuotasImputadas?.length) {
+                    const cuotas = await tx.cuotaPlan.findMany({
+                        where: { id: { in: cuotasImputadas.map((item: { cuotaId: number }) => item.cuotaId) }, liquidacionId: liq.id },
+                        include: { imputacionesPago: { where: { pago: { anuladoEn: null } }, select: { monto: true } } }
+                    });
+                    if (cuotas.length !== cuotasImputadas.length) throw Object.assign(new Error('Una cuota no pertenece a esta liquidación'), { statusCode: 409, code: 'INVALID_INSTALLMENT_ALLOCATION' });
+                    for (const item of cuotasImputadas as Array<{ cuotaId: number; monto: number }>) {
+                        const cuota = cuotas.find(candidate => candidate.id === item.cuotaId)!;
+                        const anterior = cuota.imputacionesPago.reduce((sum, allocation) => sum.plus(allocation.monto), new Decimal(0));
+                        if (anterior.plus(item.monto).greaterThan(cuota.monto)) throw Object.assign(new Error(`La imputación supera el saldo de la cuota ${cuota.numeroCuota}`), { statusCode: 409, code: 'INSTALLMENT_ALLOCATION_EXCEEDS_BALANCE' });
+                        await tx.imputacionPagoCuota.create({ data: { pagoId: nuevoPago.id, cuotaId: cuota.id, monto: item.monto } });
+                    }
+                }
 
                 const cuentaCobro = (metodoPago === 'EFECTIVO' || !metodoPago) ? 'CAJA' : 'BANCO';
                 const dir = (liq as any).contrato?.propiedad?.direccion || 'Sin dirección';
@@ -341,6 +363,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                     });
                 }
                 await syncInstallmentsForLiquidationSettlement({ tx, liquidacionId: liq.id, usuarioId });
+                await createLiquidationVoucherSnapshot({ tx, liquidacionId: liq.id, inmobiliariaId, usuarioId, evento: 'COBRO_INQUILINO' });
             }
 
             // Si sobró dinero, el sistema no lo permite según la regla "No pagos sin liquidación"
@@ -547,11 +570,13 @@ router.post('/:id/anular', authenticateToken, requirePermission('pagos.eliminar'
                     aplicacionesCredito: true
                 }
             });
+            const estadoCobroActualizado = getTenantCollectionState(liquidacionActualizada);
             await tx.liquidacion.update({
                 where: { id: pago.liquidacionId },
-                data: { estadoCobroInquilino: getTenantCollectionState(liquidacionActualizada), version: { increment: 1 } }
+                data: { estadoCobroInquilino: estadoCobroActualizado, version: { increment: 1 } }
             });
             await syncInstallmentsForLiquidationSettlement({ tx, liquidacionId: pago.liquidacionId, usuarioId });
+            await createLiquidationVoucherSnapshot({ tx, liquidacionId: pago.liquidacionId, inmobiliariaId, usuarioId, evento: 'ANULACION_COBRO' });
 
             await tx.auditLog.create({
                 data: {
@@ -570,7 +595,7 @@ router.post('/:id/anular', authenticateToken, requirePermission('pagos.eliminar'
                 anuladoEn: anulacionEn,
                 motivoAnulacion: motivo,
                 movimientoReversion,
-                liquidacion: { id: pago.liquidacionId, estadoCobroInquilino: liquidacionActualizada.estadoCobroInquilino }
+                liquidacion: { id: pago.liquidacionId, estadoCobroInquilino: estadoCobroActualizado }
             };
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 

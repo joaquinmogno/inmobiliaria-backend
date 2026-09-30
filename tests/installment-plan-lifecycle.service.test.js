@@ -32,7 +32,7 @@ test('settling or reopening a liquidation synchronizes its linked installment st
       findUnique: async () => ({ id: 154, netoACobrar: 100000, pagos: [{ monto: 100000 }], aplicacionesCredito: [] }),
     },
     cuotaPlan: {
-      findMany: async () => [{ id: 18, planId: 14, estado: 'PENDIENTE' }],
+      findMany: async () => [{ id: 18, planId: 14, estado: 'PENDIENTE', monto: 100000, imputacionesPago: [] }],
       updateMany: async data => updates.push(data),
     },
     planCuotas: { findMany: async () => [] },
@@ -43,8 +43,28 @@ test('settling or reopening a liquidation synchronizes its linked installment st
   assert.deepEqual(updates[0].where.estado.in, ['PENDIENTE']);
 
   tx.liquidacion.findUnique = async () => ({ id: 154, netoACobrar: 100000, pagos: [{ monto: 20000 }], aplicacionesCredito: [] });
-  tx.cuotaPlan.findMany = async () => [{ id: 18, planId: 14, estado: 'PAGADA' }];
+  tx.cuotaPlan.findMany = async () => [{ id: 18, planId: 14, estado: 'PAGADA', monto: 100000, imputacionesPago: [] }];
   await syncInstallmentsForLiquidationSettlement({ tx, liquidacionId: 154, usuarioId: 7 });
   assert.equal(updates[1].data.estado, 'PENDIENTE');
   assert.deepEqual(updates[1].where.estado.in, ['PAGADA']);
+});
+
+test('an installment is paid by its own allocation even while rent remains due, and reopens when that payment is reversed', async () => {
+  const updates = [];
+  let allocations = [{ monto: 100000 }];
+  let state = 'PENDIENTE';
+  const tx = {
+    liquidacion: { findUnique: async () => ({ id: 155, netoACobrar: 550000, pagos: [{ monto: 100000 }], aplicacionesCredito: [] }) },
+    cuotaPlan: {
+      findMany: async () => [{ id: 19, planId: 15, estado: state, monto: 100000, imputacionesPago: allocations }],
+      updateMany: async data => updates.push(data)
+    },
+    planCuotas: { findMany: async () => [] }
+  };
+  await syncInstallmentsForLiquidationSettlement({ tx, liquidacionId: 155 });
+  assert.equal(updates[0].data.estado, 'PAGADA');
+  state = 'PAGADA';
+  allocations = [];
+  await syncInstallmentsForLiquidationSettlement({ tx, liquidacionId: 155 });
+  assert.equal(updates[1].data.estado, 'PENDIENTE');
 });

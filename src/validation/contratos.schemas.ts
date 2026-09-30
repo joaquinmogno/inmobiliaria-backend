@@ -113,6 +113,9 @@ const contractCreateSchemaBase = z.object({
     porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional()),
     pagaHonorarios: z.enum(['INQUILINO', 'PROPIETARIO']).optional().default('INQUILINO'),
     diaVencimiento: z.coerce.number().int().min(1).max(31).optional().default(10),
+    modalidadCobroInquilino: z.preprocess(value => value === '' ? null : value, paymentMethodSchema.nullable().optional()),
+    modalidadPagoPropietario: z.preprocess(value => value === '' ? null : value, paymentMethodSchema.nullable().optional()),
+    cuentaCobroAcordadaId: z.preprocess(value => value === '' ? null : value, z.coerce.number().int().positive('Cuenta de cobro inválida').nullable().optional()),
     porcentajeActualizacion: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de actualización').max(999).optional()),
     tipoAjuste: optionalText(80),
     administrado: optionalBooleanFromForm.default(true),
@@ -161,6 +164,9 @@ export const contractCreateSchema = contractCreateSchemaBase.superRefine((value,
     }
     if (value.honorarioInicial && Number(value.honorarioInicial) > 0 && value.honorarioInicialMetodoPago !== 'EFECTIVO' && !value.honorarioInicialCuentaBancariaId) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['honorarioInicialCuentaBancariaId'], message: 'Seleccioná la cuenta bancaria donde ingresó el honorario inicial.' });
+    }
+    if (value.modalidadCobroInquilino === 'TRANSFERENCIA' && !value.cuentaCobroAcordadaId) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['cuentaCobroAcordadaId'], message: 'Seleccioná la cuenta acordada para cobrar las transferencias del inquilino.' });
     }
 });
 

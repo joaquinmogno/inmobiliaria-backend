@@ -326,6 +326,9 @@ model Contrato {
   actualizadoPorId          Int?
   creadoPorId               Int?
   diaVencimiento            Int                          @default(10)
+  modalidadCobroInquilino    MetodoPago?
+  modalidadPagoPropietario   MetodoPago?
+  cuentaCobroAcordadaId      Int?
   garanteId                 Int?
   montoAlquiler             Decimal                      @db.Decimal(10, 2)
   montoHonorarios           Decimal                      @db.Decimal(10, 2)
@@ -344,6 +347,7 @@ model Contrato {
   garante                   Persona?                     @relation("GaranteContrato", fields: [garanteId], references: [id])
   inmobiliaria              Inmobiliaria                 @relation(fields: [inmobiliariaId], references: [id])
   propiedad                 Propiedad                    @relation(fields: [propiedadId], references: [id])
+  cuentaCobroAcordada       CuentaBancaria?              @relation("CuentaCobroAcordada", fields: [cuentaCobroAcordadaId], references: [id], onDelete: SetNull)
   contratoAnterior          Contrato?                    @relation("RenovacionContrato", fields: [contratoAnteriorId], references: [id], onDelete: Restrict)
   contratoRenovado          Contrato?                    @relation("RenovacionContrato")
   inquilinos                ContratoInquilino[]
@@ -359,6 +363,7 @@ model Contrato {
 
   @@index([inmobiliariaId])
   @@index([propiedadId])
+  @@index([cuentaCobroAcordadaId])
   @@index([garanteId])
   @@index([rescindidoPorId])
   @@index([inmobiliariaId, contratoAnteriorId])
@@ -616,6 +621,7 @@ model Pago {
   inmobiliaria    Inmobiliaria    @relation(fields: [inmobiliariaId], references: [id])
   liquidacion     Liquidacion     @relation(fields: [liquidacionId], references: [id])
   movimientoCaja  MovimientoCaja?
+  imputacionesCuotas ImputacionPagoCuota[]
 
   @@index([inmobiliariaId])
   @@index([contratoId])
@@ -623,6 +629,18 @@ model Pago {
   @@index([fechaPago])
   @@index([inmobiliariaId, fechaPago])
   @@index([inmobiliariaId, anuladoEn])
+}
+
+model ImputacionPagoCuota {
+  id       Int      @id @default(autoincrement())
+  pagoId   Int
+  cuotaId  Int
+  monto    Decimal  @db.Decimal(10, 2)
+  pago     Pago     @relation(fields: [pagoId], references: [id], onDelete: Cascade)
+  cuota    CuotaPlan @relation(fields: [cuotaId], references: [id], onDelete: Restrict)
+
+  @@unique([pagoId, cuotaId])
+  @@index([cuotaId])
 }
 
 model AuditLog {
@@ -789,6 +807,7 @@ model CuentaBancaria {
   inmobiliaria    Inmobiliaria     @relation(fields: [inmobiliariaId], references: [id], onDelete: Cascade)
   movimientosCaja MovimientoCaja[]
   cierresCaja     CierreCaja[]
+  contratosCobroAcordado Contrato[] @relation("CuentaCobroAcordada")
 
   @@unique([inmobiliariaId, nombre])
   @@index([inmobiliariaId, activa, moneda])
@@ -1136,6 +1155,7 @@ model CuotaPlan {
   plan        PlanCuotas   @relation(fields: [planId], references: [id], onDelete: Cascade)
   movimiento  Movimiento?  @relation(fields: [movimientoId], references: [id], onDelete: SetNull)
   liquidacion Liquidacion? @relation(fields: [liquidacionId], references: [id], onDelete: SetNull)
+  imputacionesPago ImputacionPagoCuota[]
 
   @@index([planId])
   @@index([liquidacionId])

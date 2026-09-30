@@ -15,6 +15,7 @@ export type LiquidationVoucherSnapshot = {
     schemaVersion: 1;
     version: number;
     emitidoEn: string;
+    evento?: 'CONFIRMACION' | 'AJUSTE' | 'COBRO_INQUILINO' | 'ANULACION_COBRO' | 'PAGO_PROPIETARIO' | 'ANULACION_PAGO_PROPIETARIO';
     totalesOriginales: Totals;
     liquidacion: {
         id: number;
@@ -40,12 +41,16 @@ export type LiquidationVoucherSnapshot = {
         tipoAjuste: string | null;
         porcentajeActualizacion: number | null;
         pagaHonorarios: string;
+        modalidadCobroInquilino?: string | null;
+        modalidadPagoPropietario?: string | null;
+        cuentaCobroAcordada?: { banco: string; nombre: string } | null;
         propiedad: Record<string, unknown>;
         inquilinos: Array<{ id: number; esPrincipal: boolean; persona: Record<string, unknown> }>;
         propietarios: Array<{ id: number; esPrincipal: boolean; persona: Record<string, unknown> }>;
     };
     movimientos: Array<{ id: number; tipo: string; concepto: string; monto: number; esParaInmobiliaria: boolean; observaciones: string | null }>;
-    pagos: Array<{ id: number; monto: number; fechaPago: string; metodoPago: string; comprobante: string | null; observaciones: string | null }>;
+    pagos: Array<{ id: number; monto: number; fechaPago: string; metodoPago: string; comprobante: string | null; observaciones: string | null; cuenta?: string | null; imputacionesCuotas?: Array<{ cuotaId: number; monto: number; concepto: string; numeroCuota: number }> }>;
+    pagosPropietario?: Array<{ id: number; monto: number; fechaPago: string; metodoPago: string; comprobante: string | null; observaciones: string | null; cuenta: string }>;
     aplicacionesCredito: Array<{ id: number; monto: number; fechaAplicacion: string; creditoInquilinoId: number; concepto: string }>;
     deudaAnterior: {
         totalDeuda: number;
@@ -78,7 +83,8 @@ const selectPersona = (persona: any) => ({
     cuit: persona.cuit || null,
     email: persona.email || null,
     telefono: persona.telefono || null,
-    direccion: persona.direccion || null
+    direccion: persona.direccion || null,
+    aliasBancario: persona.aliasBancario || null
 });
 
 const totalsOf = (liquidacion: any): Totals => ({
@@ -101,6 +107,7 @@ export const getVoucherSummary = (voucher: { id: number; version: number; fechaE
     return {
         id: voucher.id,
         version: voucher.version,
+        evento: snapshot?.evento || 'CONFIRMACION',
         fechaEmision: voucher.fechaEmision,
         creadoPor: voucher.creadoPor,
         moneda: snapshot?.liquidacion.moneda || 'ARS',
@@ -130,12 +137,14 @@ export const createLiquidationVoucherSnapshot = async ({
     tx,
     liquidacionId,
     inmobiliariaId,
-    usuarioId
+    usuarioId,
+    evento = 'CONFIRMACION'
 }: {
     tx: Prisma.TransactionClient;
     liquidacionId: number;
     inmobiliariaId: number;
     usuarioId: number;
+    evento?: LiquidationVoucherSnapshot['evento'];
 }) => {
     const liquidacion = await tx.liquidacion.findFirst({
         where: { id: liquidacionId, inmobiliariaId },
@@ -145,11 +154,13 @@ export const createLiquidationVoucherSnapshot = async ({
             contrato: {
                 include: {
                     propiedad: true,
+                    cuentaCobroAcordada: { select: { banco: true, nombre: true } },
                     inquilinos: { include: { persona: true }, orderBy: { id: 'asc' } },
                     propietarios: { include: { persona: true }, orderBy: { id: 'asc' } }
                 }
             },
-            pagos: { where: { anuladoEn: null }, orderBy: { id: 'asc' } },
+            pagos: { where: { anuladoEn: null }, include: { movimientoCaja: { include: { cuentaBancaria: true } }, imputacionesCuotas: { include: { cuota: { include: { plan: true } } } } }, orderBy: { id: 'asc' } },
+            pagosPropietario: { where: { anuladoEn: null }, include: { movimientoCaja: { include: { cuentaBancaria: true } } }, orderBy: { id: 'asc' } },
             aplicacionesCredito: {
                 include: { creditoInquilino: { include: { ajusteLiquidacion: { select: { concepto: true } } } } },
                 orderBy: { id: 'asc' }
@@ -200,6 +211,7 @@ export const createLiquidationVoucherSnapshot = async ({
         schemaVersion: 1,
         version,
         emitidoEn: new Date().toISOString(),
+        evento,
         totalesOriginales: snapshotAnterior?.totalesOriginales || totalesActuales,
         liquidacion: {
             id: liquidacion.id,
@@ -225,6 +237,9 @@ export const createLiquidationVoucherSnapshot = async ({
             tipoAjuste: liquidacion.contrato.tipoAjuste,
             porcentajeActualizacion: liquidacion.contrato.porcentajeActualizacion === null ? null : asNumber(liquidacion.contrato.porcentajeActualizacion),
             pagaHonorarios: liquidacion.contrato.pagaHonorarios,
+            modalidadCobroInquilino: liquidacion.contrato.modalidadCobroInquilino,
+            modalidadPagoPropietario: liquidacion.contrato.modalidadPagoPropietario,
+            cuentaCobroAcordada: liquidacion.contrato.cuentaCobroAcordada,
             propiedad: {
                 id: liquidacion.contrato.propiedad.id,
                 direccion: liquidacion.contrato.propiedad.direccion,
@@ -243,7 +258,14 @@ export const createLiquidationVoucherSnapshot = async ({
         })),
         pagos: liquidacion.pagos.map(item => ({
             id: item.id, monto: asNumber(item.monto), fechaPago: asDate(item.fechaPago)!, metodoPago: item.metodoPago,
-            comprobante: item.comprobante || null, observaciones: item.observaciones || null
+            comprobante: item.comprobante || null, observaciones: item.observaciones || null,
+            cuenta: item.movimientoCaja?.cuentaBancaria ? `${item.movimientoCaja.cuentaBancaria.banco} · ${item.movimientoCaja.cuentaBancaria.nombre}` : item.movimientoCaja?.cuenta || null,
+            imputacionesCuotas: item.imputacionesCuotas.map(allocation => ({ cuotaId: allocation.cuotaId, monto: asNumber(allocation.monto), concepto: allocation.cuota.plan.concepto, numeroCuota: allocation.cuota.numeroCuota }))
+        })),
+        pagosPropietario: liquidacion.pagosPropietario.map(item => ({
+            id: item.id, monto: asNumber(item.monto), fechaPago: asDate(item.fechaPago)!, metodoPago: item.metodoPago,
+            comprobante: item.comprobante || null, observaciones: item.observaciones || null,
+            cuenta: item.movimientoCaja?.cuentaBancaria ? `${item.movimientoCaja.cuentaBancaria.banco} · ${item.movimientoCaja.cuentaBancaria.nombre}` : item.cuenta
         })),
         aplicacionesCredito: liquidacion.aplicacionesCredito.map(item => ({
             id: item.id, monto: asNumber(item.monto), fechaAplicacion: asDate(item.fechaAplicacion)!, creditoInquilinoId: item.creditoInquilinoId,
@@ -303,6 +325,7 @@ export const voucherSnapshotToPdfData = (snapshot: LiquidationVoucherSnapshot) =
     propietarioNombre: snapshot.liquidacion.propietarioNombre,
     movimientos: snapshot.movimientos,
     pagos: snapshot.pagos,
+    pagosPropietario: snapshot.pagosPropietario || [],
     aplicacionesCredito: snapshot.aplicacionesCredito.map(item => ({
         ...item,
         creditoInquilino: { ajusteLiquidacion: { concepto: item.concepto } }

@@ -45,6 +45,7 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
         where: {
             inmobiliariaId,
             eliminadoEn: null,
+            administrado: true,
             fechaInicio: { lte: end },
             fechaFin: { gte: period }
         },
@@ -77,6 +78,16 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
         },
         orderBy: [{ propiedad: { direccion: 'asc' } }, { id: 'asc' }]
     });
+
+    const overdueContracts = await prisma.liquidacion.findMany({
+        where: {
+            inmobiliariaId, estado: 'CONFIRMADA', fechaVencimiento: { lt: argentinaTodayAsDate() },
+            estadoCobroInquilino: { in: ['PENDIENTE', 'PARCIAL'] },
+            contrato: { administrado: true, eliminadoEn: null }
+        },
+        select: { contratoId: true }, distinct: ['contratoId']
+    });
+    const overdueContractIds = new Set(overdueContracts.map(item => item.contratoId));
 
     const rows = contracts.map(contract => {
         const existing = contract.liquidaciones[0];
@@ -200,6 +211,7 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             pagado: paid.toString(),
             pendiente: remaining.toString(),
             vencida: Boolean(existing?.estado === 'CONFIRMADA' && hasTenantCollectionPending(existing.estadoCobroInquilino) && existing.fechaVencimiento && existing.fechaVencimiento < argentinaTodayAsDate()),
+            moraHoy: overdueContractIds.has(contract.id),
             cuotasPeriodo: currentInstallments.map(mapInstallment),
             cuotasVencidas: overdueInstallments.map(mapInstallment),
             moneda: contract.moneda,
@@ -218,7 +230,8 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
         periodo: period,
         resumen: {
             total: rows.length,
-            pendientesGenerar: rows.filter(row => row.status === 'LISTA').length,
+            moraHoy: rows.filter(row => row.moraHoy).length,
+            pendientesGenerar: rows.filter(row => row.status === 'LISTA' || row.status === 'REVISAR').length,
             borradores: rows.filter(row => row.estadoLiquidacion === 'BORRADOR').length,
             pendientesCobro: rows.filter(row => row.estadoLiquidacion === 'CONFIRMADA' && hasTenantCollectionPending(row.estadoCobroInquilino)).length,
             pendientesPagoPropietario: rows.filter(row => row.estadoLiquidacion === 'CONFIRMADA' && hasOwnerPaymentPending(row.estadoPagoPropietario)).length,
