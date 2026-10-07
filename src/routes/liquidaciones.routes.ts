@@ -16,6 +16,7 @@ import { assertSameCurrency } from '../services/currency-rules.service';
 import { argentinaTodayAsDate, assertOperationalDateIsNotFuture, parseDateOnly } from '../utils/argentina-date';
 import {
     honorariosSchema,
+    alquilerBorradorSchema,
     liquidacionCreateSchema,
     movimientoSchema,
     pagoPropietarioSchema,
@@ -59,6 +60,7 @@ import { calculateLiquidationAdjustment } from '../services/liquidation-adjustme
 const router = Router();
 
 const firstDayOfUtcMonth = (date: Date) => new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+const monthNumber = (date: Date) => date.getUTCFullYear() * 12 + date.getUTCMonth();
 
 const requestedVoucherVersion = (value: unknown) => {
     if (value === undefined) return 1;
@@ -311,7 +313,7 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
                     inquilinos: { where: { esPrincipal: true }, include: { persona: true } },
                     propietarios: { where: { esPrincipal: true }, include: { persona: true } },
                     actualizaciones: {
-                        select: { fechaActualizacion: true, montoAnterior: true },
+                        select: { fechaActualizacion: true, fechaVigencia: true, montoAnterior: true },
                         orderBy: { fechaActualizacion: 'desc' }
                     }
                 }
@@ -377,7 +379,7 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
                     montoPropietario: 0,
                     fechaVencimiento: getLiquidationDueDate(liquidationPeriod, contrato.diaVencimiento),
                     moneda: contrato.moneda,
-                    pagaHonorarios: contrato.pagaHonorarios,
+                    pagaHonorarios: 'PROPIETARIO',
                     propiedadDireccion: contrato.propiedad.direccion,
                     inquilinoNombre: contrato.inquilinos[0].persona.nombreCompleto,
                     propietarioPagoId: contrato.propietarios[0].persona.id,
@@ -623,7 +625,10 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
                         include: {
                             propiedad: true,
                             propietarios: { where: { esPrincipal: true }, include: { persona: true } },
-                            inquilinos: { where: { esPrincipal: true }, include: { persona: true } }
+                            inquilinos: { where: { esPrincipal: true }, include: { persona: true } },
+                            actualizaciones: {
+                                select: { fechaActualizacion: true, fechaVigencia: true, montoAnterior: true }
+                            }
                         }
                     }
                 }
@@ -637,6 +642,23 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
 
             if (liquidacion.contrato.propietarios.length !== 1 || liquidacion.contrato.inquilinos.length !== 1) {
                 throw Object.assign(new Error('Definí un único propietario y un único inquilino principal antes de confirmar'), { statusCode: 409, code: 'MAIN_PARTIES_REQUIRED' });
+            }
+
+            const contract = liquidacion.contrato;
+            if (contract.requiereActualizacion && !contract.fechaProximaActualizacion) {
+                throw Object.assign(new Error('Falta definir la fecha de próxima actualización del alquiler en el contrato'), { statusCode: 409, code: 'RENT_UPDATE_DATE_MISSING' });
+            }
+            if (contract.requiereActualizacion && contract.fechaProximaActualizacion
+                && monthNumber(contract.fechaProximaActualizacion) <= monthNumber(liquidacion.periodo)) {
+                throw Object.assign(new Error('Antes de confirmar, cargá el alquiler actualizado y guardalo para los próximos períodos'), { statusCode: 409, code: 'RENT_UPDATE_REQUIRED' });
+            }
+            const expectedRent = getEffectiveRentForPeriod(contract.montoAlquiler, contract.actualizaciones, liquidacion.periodo);
+            if (!liquidacion.alquilerExcepcional && !new Decimal(liquidacion.montoAlquilerBase.toString()).equals(expectedRent)) {
+                throw Object.assign(new Error('El borrador tiene un alquiler anterior al vigente en el contrato. Actualizalo antes de confirmar'), { statusCode: 409, code: 'RENT_AMOUNT_OUTDATED' });
+            }
+            const rentMovements = liquidacion.movimientos.filter(movement => movement.tipo === 'INGRESO' && movement.concepto === 'Alquiler Mensual');
+            if (rentMovements.length !== 1 || !new Decimal(rentMovements[0].monto.toString()).equals(liquidacion.montoAlquilerBase)) {
+                throw Object.assign(new Error('El concepto de alquiler mensual no coincide con el importe preparado. Revisalo antes de confirmar'), { statusCode: 409, code: 'RENT_MOVEMENT_INVALID' });
             }
 
             const recalculated = await recalculateLiquidationTotals(liquidacion.id, tx);
@@ -727,11 +749,180 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
     }
 });
 
+// El alquiler de un borrador puede ser una excepción mensual o una nueva
+// vigencia contractual. Ninguna de las dos opciones reescribe comprobantes.
+router.patch('/:id/alquiler', requirePermission('liquidaciones.editar'), validateBody(alquilerBorradorSchema), async (req, res) => {
+    const { inmobiliariaId, id: usuarioId, tipo: tipoUsuario } = (req as AuthRequest).user!;
+    const liquidationId = Number(req.params.id);
+    const { montoNuevo, alcance, motivo, fechaProximaNueva, porcentajeAplicado, expectedVersion, expectedContractVersion } = req.body;
+
+    if (alcance === 'DESDE_PERIODO' && !(await userHasPermission(usuarioId, tipoUsuario, 'contratos.editar'))) {
+        return res.status(403).json({ message: 'Necesitás permiso para editar el contrato y actualizar el alquiler futuro', code: 'CONTRACT_EDIT_PERMISSION_REQUIRED' });
+    }
+
+    try {
+        const result = await prisma.$transaction(async tx => {
+            const liquidation = await tx.liquidacion.findFirst({
+                where: { id: liquidationId, inmobiliariaId },
+                include: {
+                    contrato: {
+                        include: {
+                            actualizaciones: {
+                                select: { id: true, fechaActualizacion: true, fechaVigencia: true, montoAnterior: true },
+                                orderBy: { fechaActualizacion: 'desc' }
+                            }
+                        }
+                    }
+                }
+            });
+            if (!liquidation) throw Object.assign(new Error('Liquidación no encontrada'), { statusCode: 404 });
+            if (liquidation.estado !== EstadoLiquidacion.BORRADOR) {
+                throw Object.assign(new Error('El alquiler de una liquidación confirmada sólo puede corregirse mediante un ajuste'), { statusCode: 409, code: 'LIQUIDATION_NOT_EDITABLE' });
+            }
+            if (liquidation.version !== expectedVersion) {
+                throw Object.assign(new Error('La liquidación cambió mientras estabas trabajando. Actualizá la pantalla'), { statusCode: 409, code: 'LIQUIDATION_CHANGED' });
+            }
+
+            const newRent = new Decimal(montoNuevo.toString()).toDecimalPlaces(2);
+            let drafts: Prisma.LiquidacionGetPayload<object>[] = [liquidation];
+            let contractVersion = liquidation.contrato.version;
+            if (alcance === 'DESDE_PERIODO') {
+                const contract = liquidation.contrato;
+                if (contract.version !== expectedContractVersion) {
+                    throw Object.assign(new Error('El contrato cambió mientras estabas trabajando. Actualizá la pantalla'), { statusCode: 409, code: 'CONTRACT_CHANGED' });
+                }
+                if (!fechaProximaNueva) {
+                    throw Object.assign(new Error('Indicá la próxima fecha de actualización'), { statusCode: 400, code: 'NEXT_RENT_UPDATE_REQUIRED' });
+                }
+                const nextUpdate = parseDateOnly(fechaProximaNueva);
+                const endOfPeriod = new Date(Date.UTC(liquidation.periodo.getUTCFullYear(), liquidation.periodo.getUTCMonth() + 1, 0));
+                if (nextUpdate <= endOfPeriod || nextUpdate > contract.fechaFin) {
+                    throw Object.assign(new Error('La próxima actualización debe ser posterior al período liquidado y estar dentro de la vigencia del contrato'), { statusCode: 400, code: 'INVALID_NEXT_RENT_UPDATE' });
+                }
+                // La política sobre actualizaciones retroactivas de períodos
+                // confirmados está pendiente de definición. Nunca se alteran aquí.
+                const confirmed = await tx.liquidacion.findFirst({
+                    where: { contratoId: contract.id, periodo: { gte: liquidation.periodo }, estado: EstadoLiquidacion.CONFIRMADA },
+                    select: { id: true, periodo: true }
+                });
+                if (confirmed) {
+                    throw Object.assign(new Error('Existe una liquidación confirmada desde ese período. La actualización retroactiva requiere resolver primero su tratamiento'), { statusCode: 409, code: 'CONFIRMED_RENT_PERIOD_REQUIRES_REVIEW' });
+                }
+                const laterUpdate = contract.actualizaciones.find(item =>
+                    monthNumber(item.fechaVigencia || item.fechaActualizacion) > monthNumber(liquidation.periodo)
+                );
+                const samePeriodUpdates = contract.actualizaciones.filter(item =>
+                    monthNumber(item.fechaVigencia || item.fechaActualizacion) === monthNumber(liquidation.periodo)
+                );
+                if (laterUpdate || samePeriodUpdates.length > 1 || samePeriodUpdates.some(item => !item.fechaVigencia)) {
+                    throw Object.assign(new Error('Ya existe una actualización del alquiler desde este mes o uno posterior. Revisá la secuencia antes de cambiarla'), { statusCode: 409, code: 'RENT_UPDATE_OUT_OF_ORDER' });
+                }
+                const samePeriodUpdate = samePeriodUpdates[0];
+                const previousRent = samePeriodUpdate
+                    ? new Decimal(samePeriodUpdate.montoAnterior.toString())
+                    : getEffectiveRentForPeriod(contract.montoAlquiler, contract.actualizaciones, liquidation.periodo);
+                const claimedContract = await tx.contrato.updateMany({
+                    where: { id: contract.id, inmobiliariaId, version: expectedContractVersion },
+                    data: {
+                        montoAlquiler: newRent,
+                        fechaProximaActualizacion: nextUpdate,
+                        requiereActualizacion: true,
+                        actualizadoPorId: usuarioId,
+                        version: { increment: 1 }
+                    }
+                });
+                if (claimedContract.count !== 1) {
+                    throw Object.assign(new Error('El contrato cambió mientras estabas trabajando. Actualizá la pantalla'), { statusCode: 409, code: 'CONTRACT_CHANGED' });
+                }
+                contractVersion += 1;
+                if (samePeriodUpdate) {
+                    await tx.actualizacionContrato.update({
+                        where: { id: samePeriodUpdate.id },
+                        data: {
+                            montoNuevo: newRent,
+                            porcentajeAplicado: porcentajeAplicado === undefined ? null : new Decimal(porcentajeAplicado.toString()),
+                            fechaProximaNueva: nextUpdate,
+                            observaciones: motivo,
+                            fechaActualizacion: new Date(),
+                            usuarioId
+                        }
+                    });
+                } else {
+                    await tx.actualizacionContrato.create({
+                        data: {
+                            contratoId: contract.id,
+                            fechaVigencia: liquidation.periodo,
+                            montoAnterior: previousRent,
+                            montoNuevo: newRent,
+                            porcentajeAplicado: porcentajeAplicado === undefined ? null : new Decimal(porcentajeAplicado.toString()),
+                            moneda: contract.moneda,
+                            fechaProximaAnterior: contract.fechaProximaActualizacion,
+                            fechaProximaNueva: nextUpdate,
+                            observaciones: motivo,
+                            usuarioId
+                        }
+                    });
+                }
+                drafts = await tx.liquidacion.findMany({
+                    where: { contratoId: contract.id, inmobiliariaId, estado: EstadoLiquidacion.BORRADOR, periodo: { gte: liquidation.periodo } },
+                    orderBy: { periodo: 'asc' }
+                });
+            }
+
+            let updated = null;
+            let refreshedDrafts = 0;
+            for (const draft of drafts) {
+                if (draft.id !== liquidationId && draft.alquilerExcepcional) continue;
+                const claimed = await tx.liquidacion.updateMany({
+                    where: {
+                        id: draft.id,
+                        inmobiliariaId,
+                        estado: EstadoLiquidacion.BORRADOR,
+                        ...(draft.id === liquidationId ? { version: expectedVersion } : { version: draft.version })
+                    },
+                    data: {
+                        montoAlquilerBase: newRent,
+                        montoHonorarios: draft.porcentajeHonorarios === null
+                            ? draft.montoHonorarios
+                            : newRent.mul(draft.porcentajeHonorarios).div(100).toDecimalPlaces(2),
+                        pagaHonorarios: 'PROPIETARIO',
+                        alquilerExcepcional: alcance === 'SOLO_PERIODO' && draft.id === liquidationId,
+                        motivoCambioAlquiler: draft.id === liquidationId ? motivo : `Actualización del contrato vigente desde ${liquidation.periodo.toISOString().slice(0, 7)}`,
+                        version: { increment: 1 }
+                    }
+                });
+                if (claimed.count !== 1) throw Object.assign(new Error('Un borrador cambió mientras estabas trabajando. Actualizá la pantalla'), { statusCode: 409, code: 'LIQUIDATION_CHANGED' });
+                const rentMovement = await tx.movimiento.findFirst({
+                    where: { liquidacionId: draft.id, tipo: 'INGRESO', concepto: 'Alquiler Mensual' },
+                    orderBy: { id: 'asc' }
+                });
+                if (!rentMovement) throw Object.assign(new Error('Falta el concepto de alquiler mensual en un borrador. Revisalo antes de actualizar'), { statusCode: 409, code: 'RENT_MOVEMENT_MISSING' });
+                await tx.movimiento.update({ where: { id: rentMovement.id }, data: { monto: newRent } });
+                const recalculated = await recalculateLiquidationTotals(draft.id, tx);
+                if (draft.id === liquidationId) updated = recalculated;
+                refreshedDrafts += 1;
+            }
+            await tx.auditLog.create({
+                data: {
+                    usuarioId, inmobiliariaId, accion: alcance === 'DESDE_PERIODO' ? 'ACTUALIZAR_ALQUILER_CONTRATO_DESDE_LIQUIDACION' : 'CAMBIAR_ALQUILER_SOLO_PERIODO',
+                    entidad: 'Liquidacion', entidadId: liquidationId,
+                    detalle: JSON.stringify({ contratoId: liquidation.contratoId, periodo: liquidation.periodo.toISOString().slice(0, 10), anterior: liquidation.montoAlquilerBase.toString(), nuevo: newRent.toString(), motivo, borradoresActualizados: refreshedDrafts })
+                }
+            });
+            return { liquidacion: updated, borradoresActualizados: refreshedDrafts, contratoVersion: contractVersion };
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        invalidatePerformanceCache(inmobiliariaId);
+        res.json(result);
+    } catch (error: any) {
+        res.status(error.statusCode || 500).json({ message: error.message || 'No se pudo actualizar el alquiler', code: error.code });
+    }
+});
+
 // Actualizar honorarios de una liquidación
 router.patch('/:id/honorarios', requirePermission('liquidaciones.editar'), validateBody(honorariosSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { montoHonorarios, porcentajeHonorarios, expectedVersion } = req.body;
+    const { montoHonorarios, porcentajeHonorarios, motivo, expectedVersion } = req.body;
 
     try {
         const liquidacion = await prisma.liquidacion.findFirst({
@@ -756,8 +947,11 @@ router.patch('/:id/honorarios', requirePermission('liquidaciones.editar'), valid
                     ...(expectedVersion ? { version: expectedVersion } : {})
                 },
                 data: {
-                    montoHonorarios: montoHonorarios !== undefined ? Number(montoHonorarios) : undefined,
-                    porcentajeHonorarios: porcentajeHonorarios !== undefined ? Number(porcentajeHonorarios) : undefined,
+                    montoHonorarios: porcentajeHonorarios !== undefined
+                        ? new Decimal(liquidacion.montoAlquilerBase.toString()).mul(porcentajeHonorarios).div(100).toDecimalPlaces(2)
+                        : new Decimal(montoHonorarios),
+                    porcentajeHonorarios: porcentajeHonorarios === undefined ? null : Number(porcentajeHonorarios),
+                    pagaHonorarios: 'PROPIETARIO',
                     version: { increment: 1 }
                 },
             });
@@ -774,8 +968,9 @@ router.patch('/:id/honorarios', requirePermission('liquidaciones.editar'), valid
             entidad: 'Liquidacion',
             entidadId: Number(id),
             detalle: JSON.stringify({
-                montoHonorarios: { anterior: liquidacion.montoHonorarios.toString(), nuevo: montoHonorarios },
-                porcentajeHonorarios: { anterior: liquidacion.porcentajeHonorarios?.toString() || null, nuevo: porcentajeHonorarios }
+                montoHonorarios: { anterior: liquidacion.montoHonorarios.toString(), nuevo: actualizada.montoHonorarios.toString() },
+                porcentajeHonorarios: { anterior: liquidacion.porcentajeHonorarios?.toString() || null, nuevo: porcentajeHonorarios },
+                motivo
             })
         });
 

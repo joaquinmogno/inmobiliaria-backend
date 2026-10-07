@@ -85,14 +85,15 @@ export const getLiquidationDueDate = (period: Date, dueDay: number) => {
 
 type RentUpdate = {
     fechaActualizacion: Date;
+    fechaVigencia?: Date | null;
     montoAnterior: Prisma.Decimal | Decimal | number | string;
 };
 
 const monthKey = (date: Date) => date.getUTCFullYear() * 12 + date.getUTCMonth();
 
 /**
- * Reconstruye el alquiler vigente para el mes liquidado. Los cambios asentados
- * en un mes se consideran vigentes desde ese mismo período.
+ * Reconstruye el alquiler vigente para el mes liquidado. Las actualizaciones
+ * nuevas tienen vigencia explícita; las históricas conservan su fecha de carga.
  */
 export const getEffectiveRentForPeriod = (
     currentRent: Prisma.Decimal | Decimal | number | string,
@@ -103,9 +104,9 @@ export const getEffectiveRentForPeriod = (
     const targetMonth = monthKey(period);
 
     [...updates]
-        .sort((a, b) => b.fechaActualizacion.getTime() - a.fechaActualizacion.getTime())
+        .sort((a, b) => (b.fechaVigencia || b.fechaActualizacion).getTime() - (a.fechaVigencia || a.fechaActualizacion).getTime())
         .forEach(update => {
-            if (targetMonth < monthKey(update.fechaActualizacion)) {
+            if (targetMonth < monthKey(update.fechaVigencia || update.fechaActualizacion)) {
                 effectiveRent = new Decimal(update.montoAnterior.toString());
             }
         });

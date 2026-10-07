@@ -54,7 +54,7 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             inquilinos: { where: { esPrincipal: true }, include: { persona: true } },
             propietarios: { where: { esPrincipal: true }, include: { persona: true } },
             actualizaciones: {
-                select: { fechaActualizacion: true, montoAnterior: true },
+                select: { fechaActualizacion: true, fechaVigencia: true, montoAnterior: true },
                 orderBy: { fechaActualizacion: 'desc' }
             },
             liquidaciones: {
@@ -146,7 +146,7 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             try {
                 assertValidLiquidationTotals(calculateLiquidationTotals({
                     montoHonorarios: fee,
-                    pagaHonorarios: contract.pagaHonorarios
+                    pagaHonorarios: 'PROPIETARIO'
                 }, [
                     { tipo: 'INGRESO', monto: effectiveRent, esParaInmobiliaria: false },
                     ...currentInstallments.map(({ installment, plan }) => ({

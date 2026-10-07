@@ -334,7 +334,7 @@ model Contrato {
   montoHonorarios           Decimal                      @db.Decimal(10, 2)
   moneda                    Moneda                       @default(ARS)
   porcentajeActualizacion   Decimal?                     @db.Decimal(5, 2)
-  pagaHonorarios            PagadorHonorarios            @default(INQUILINO)
+  pagaHonorarios            PagadorHonorarios            @default(PROPIETARIO)
   porcentajeHonorarios      Decimal?                     @db.Decimal(5, 2)
   tipoAjuste                String?
   administrado              Boolean                      @default(true)
@@ -487,10 +487,12 @@ model Liquidacion {
   totalIngresos               Decimal                      @default(0) @db.Decimal(10, 2)
   montoHonorarios             Decimal                      @default(0) @db.Decimal(10, 2)
   montoAlquilerBase           Decimal                      @default(0) @db.Decimal(10, 2)
+  alquilerExcepcional         Boolean                      @default(false)
+  motivoCambioAlquiler        String?                      @db.Text
   montoPropietario            Decimal                      @default(0) @db.Decimal(10, 2)
   montoPagadoPropietario      Decimal                      @default(0) @db.Decimal(10, 2)
   moneda                      Moneda                       @default(ARS)
-  pagaHonorarios              PagadorHonorarios            @default(INQUILINO)
+  pagaHonorarios              PagadorHonorarios            @default(PROPIETARIO)
   porcentajeHonorarios        Decimal?                     @db.Decimal(5, 2)
   fechaPagoPropietario        DateTime?                    @db.Date
   fechaVencimiento            DateTime?                    @db.Date
@@ -1093,8 +1095,10 @@ enum EstadoCreditoInquilino {
 model ActualizacionContrato {
   id                   Int       @id @default(autoincrement())
   fechaActualizacion   DateTime  @default(now())
+  fechaVigencia        DateTime? @db.Date
   montoAnterior        Decimal   @db.Decimal(10, 2)
   montoNuevo           Decimal   @db.Decimal(10, 2)
+  porcentajeAplicado   Decimal?  @db.Decimal(8, 4)
   moneda               Moneda    @default(ARS)
   fechaProximaAnterior DateTime? @db.Date
   fechaProximaNueva    DateTime  @db.Date
@@ -1110,6 +1114,7 @@ model ActualizacionContrato {
 
   @@index([contratoId])
   @@index([fechaActualizacion])
+  @@index([contratoId, fechaVigencia])
 }
 
 model PlanCuotas {

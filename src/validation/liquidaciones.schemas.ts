@@ -8,6 +8,7 @@ import {
     positiveDecimal,
     requiredText
 } from '../middlewares/validation.middleware';
+import { optimisticVersionSchema } from '../utils/optimistic-lock';
 
 export const liquidacionCreateSchema = z.object({
     contratoId: z.coerce.number().int().positive('Contrato inválido'),
@@ -31,9 +32,26 @@ export const movimientoSchema = z.object({
 export const honorariosSchema = z.object({
     montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional(),
     porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional()),
+    motivo: requiredText('El motivo del cambio', 1000).refine(value => value.length >= 5, { message: 'El motivo debe tener al menos 5 caracteres' }),
     expectedVersion: z.coerce.number().int().positive().optional()
 }).refine(data => data.montoHonorarios !== undefined || data.porcentajeHonorarios !== undefined, {
     message: 'Debe indicar monto o porcentaje de honorarios'
+}).refine(data => data.montoHonorarios === undefined || data.porcentajeHonorarios === undefined, {
+    message: 'Indicá un porcentaje o un importe fijo, no ambos'
+});
+
+export const alquilerBorradorSchema = z.object({
+    montoNuevo: positiveDecimal('El nuevo alquiler'),
+    alcance: z.enum(['SOLO_PERIODO', 'DESDE_PERIODO']),
+    motivo: requiredText('El motivo del cambio', 1000).refine(value => value.length >= 5, { message: 'El motivo debe tener al menos 5 caracteres' }),
+    fechaProximaNueva: optionalDateOnlyString('La próxima actualización'),
+    porcentajeAplicado: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje aplicado').max(999).optional()),
+    expectedVersion: optimisticVersionSchema,
+    expectedContractVersion: optimisticVersionSchema.optional()
+}).superRefine((data, ctx) => {
+    if (data.alcance === 'DESDE_PERIODO' && !data.expectedContractVersion) {
+        ctx.addIssue({ code: 'custom', path: ['expectedContractVersion'], message: 'Actualizá los datos del contrato antes de guardar el nuevo alquiler' });
+    }
 });
 
 export const pagoPropietarioSchema = z.object({

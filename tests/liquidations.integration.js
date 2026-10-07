@@ -139,10 +139,10 @@ test('LIQ-001/002/003: canonical totals are identical and confirmed liquidations
     body: { contratoId: contract.id, periodo: '2026-09-01' },
   });
   assert.equal(creation.response.status, 201, JSON.stringify(creation.payload));
-  assert.equal(Number(creation.payload.netoACobrar), 105000);
-  assert.equal(Number(creation.payload.montoPropietario), 100000);
+  assert.equal(Number(creation.payload.netoACobrar), 100000);
+  assert.equal(Number(creation.payload.montoPropietario), 95000);
   assert.equal(Number(creation.payload.montoAlquilerBase), 100000);
-  assert.equal(creation.payload.pagaHonorarios, 'INQUILINO');
+  assert.equal(creation.payload.pagaHonorarios, 'PROPIETARIO');
 
   const liquidationId = creation.payload.id;
   const confirmation = await api(`/liquidaciones/${liquidationId}/confirmar`, { method: 'PATCH', body: {} });
@@ -152,9 +152,9 @@ test('LIQ-001/002/003: canonical totals are identical and confirmed liquidations
   assert.deepEqual(confirmation.payload.resumenOperativo, {
     cobradoInquilino: 0,
     creditoAplicadoInquilino: 0,
-    saldoInquilino: 105000,
+    saldoInquilino: 100000,
     pagadoPropietario: 0,
-    saldoPropietario: 100000,
+    saldoPropietario: 95000,
     capitalPropioExpuesto: 0,
   });
 
@@ -167,7 +167,7 @@ test('LIQ-001/002/003: canonical totals are identical and confirmed liquidations
 
   const feeAfterConfirmation = await api(`/liquidaciones/${liquidationId}/honorarios`, {
     method: 'PATCH',
-    body: { montoHonorarios: 10000 },
+    body: { montoHonorarios: 10000, motivo: 'Corrección de honorarios' },
   });
   assert.equal(feeAfterConfirmation.response.status, 409);
 
@@ -176,7 +176,7 @@ test('LIQ-001/002/003: canonical totals are identical and confirmed liquidations
     body: {
       contratoId: contract.id,
       liquidacionId: liquidationId,
-      monto: 105000,
+      monto: 100000,
       moneda: 'ARS',
       fechaPago: '2026-09-04',
       metodoPago: 'TRANSFERENCIA',
@@ -188,23 +188,23 @@ test('LIQ-001/002/003: canonical totals are identical and confirmed liquidations
 
   const detail = await api(`/liquidaciones/${liquidationId}`);
   assert.equal(detail.response.status, 200);
-  assert.equal(Number(detail.payload.montoPropietario), 100000);
+  assert.equal(Number(detail.payload.montoPropietario), 95000);
 
   const list = await api(`/liquidaciones?contratoId=${contract.id}`);
   assert.equal(list.response.status, 200);
-  assert.equal(Number(list.payload.data[0].montoPropietario), 100000);
+  assert.equal(Number(list.payload.data[0].montoPropietario), 95000);
 
   const ownerPayment = await api(`/liquidaciones/${liquidationId}/pagar-propietario`, {
     method: 'PATCH',
-    body: { monto: 100000, fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA', cuentaBancariaId: contract.testBankAccountId, propietarioId: contract.propietarios[0].personaId },
+    body: { monto: 95000, fechaPago: '2026-09-04', metodoPago: 'TRANSFERENCIA', cuentaBancariaId: contract.testBankAccountId, propietarioId: contract.propietarios[0].personaId },
   });
   assert.equal(ownerPayment.response.status, 200);
-  assert.equal(Number(ownerPayment.payload.montoPropietario), 100000);
+  assert.equal(Number(ownerPayment.payload.montoPropietario), 95000);
 
   const ownerCashEntry = await prisma.movimientoCaja.findFirstOrThrow({
     where: { liquidacionId: liquidationId, tipo: 'EGRESO' },
   });
-  assert.equal(Number(ownerCashEntry.monto), 100000);
+  assert.equal(Number(ownerCashEntry.monto), 95000);
 });
 
 test('LIQ-004: API rejects periods outside the contract validity', async () => {

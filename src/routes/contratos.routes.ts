@@ -143,8 +143,8 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                     montoAlquiler: new Decimal(payload.montoAlquiler || 0),
                     montoHonorarios: new Decimal(payload.montoHonorarios || 0),
                     moneda: resolveMoneda(payload.moneda),
-                    porcentajeHonorarios: payload.porcentajeHonorarios ? new Decimal(payload.porcentajeHonorarios) : null,
-                    pagaHonorarios: payload.pagaHonorarios || 'INQUILINO',
+                    porcentajeHonorarios: new Decimal(payload.porcentajeHonorarios ?? 5),
+                    pagaHonorarios: 'PROPIETARIO',
                     diaVencimiento: payload.diaVencimiento ? Number(payload.diaVencimiento) : 10,
                     modalidadCobroInquilino: payload.modalidadCobroInquilino || null,
                     modalidadPagoPropietario: payload.modalidadPagoPropietario || null,
@@ -671,7 +671,7 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
             changes.moneda = { anterior: contract.moneda, nuevo: moneda };
         }
         if (porcentajeHonorarios !== undefined) {
-            updateData.porcentajeHonorarios = porcentajeHonorarios ? new Decimal(porcentajeHonorarios) : null;
+            updateData.porcentajeHonorarios = new Decimal(porcentajeHonorarios);
             changes.porcentajeHonorarios = { anterior: contract.porcentajeHonorarios, nuevo: updateData.porcentajeHonorarios };
         }
         if (pagaHonorarios) {

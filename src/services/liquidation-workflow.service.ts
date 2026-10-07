@@ -83,7 +83,7 @@ export async function generateMonthlyLiquidations(params: {
                     inquilinos: { where: { esPrincipal: true }, include: { persona: true } },
                     propietarios: { where: { esPrincipal: true }, include: { persona: true } },
                     actualizaciones: {
-                        select: { fechaActualizacion: true, montoAnterior: true },
+                        select: { fechaActualizacion: true, fechaVigencia: true, montoAnterior: true },
                         orderBy: { fechaActualizacion: 'desc' }
                     },
                     planesCuotas: {
@@ -129,7 +129,7 @@ export async function generateMonthlyLiquidations(params: {
             });
             assertValidLiquidationTotals(calculateLiquidationTotals({
                 montoHonorarios: fee,
-                pagaHonorarios: contract.pagaHonorarios
+                pagaHonorarios: 'PROPIETARIO'
             }, [
                 { tipo: 'INGRESO', monto: effectiveRent, esParaInmobiliaria: false },
                 ...selectedInstallments.map(({ installment, plan }) => ({
@@ -153,7 +153,7 @@ export async function generateMonthlyLiquidations(params: {
                     porcentajeHonorarios: contract.porcentajeHonorarios,
                     montoAlquilerBase: effectiveRent,
                     moneda: contract.moneda,
-                    pagaHonorarios: contract.pagaHonorarios,
+                    pagaHonorarios: 'PROPIETARIO',
                     propiedadDireccion: contract.propiedad.direccion,
                     inquilinoNombre: tenant.nombreCompleto,
                     propietarioPagoId: owner.id,
