@@ -31,13 +31,19 @@ export async function syncPropertyOccupancy(tx: TxClient, propertyIds: number[],
             },
             select: { id: true }
         });
+        const latestFinishedContract = activeContract ? null : await tx.contrato.findFirst({
+            where: { propiedadId: propertyId, estado: { in: [EstadoContrato.EN_CIERRE, EstadoContrato.RESCINDIDO, EstadoContrato.FINALIZADO] } },
+            orderBy: [{ fechaInicio: 'desc' }, { id: 'desc' }],
+            select: { id: true, fechaEntregaLlaves: true }
+        });
+        const nextState = activeContract ? 'ALQUILADO' : latestFinishedContract && !latestFinishedContract.fechaEntregaLlaves ? 'PENDIENTE_ENTREGA' : 'DISPONIBLE';
         await tx.propiedad.updateMany({
             where: {
                 id: propertyId,
-                estado: { notIn: ['INACTIVO', activeContract ? 'ALQUILADO' : 'DISPONIBLE'] }
+                estado: { notIn: ['INACTIVO', nextState] }
             },
             data: {
-                estado: activeContract ? 'ALQUILADO' : 'DISPONIBLE',
+                estado: nextState,
                 version: { increment: 1 }
             }
         });

@@ -38,8 +38,15 @@ export const assertPropertyAvailableForPeriod = async (
     propiedadId: number,
     fechaInicio: Date,
     fechaFin: Date,
-    excludeContractId?: number
+    excludeContractId?: number,
+    sameTenantRenewalSourceId?: number
 ) => {
+    const latestFinished = await tx.contrato.findFirst({
+        where: { propiedadId, estado: { in: ['EN_CIERRE', 'RESCINDIDO', 'FINALIZADO'] }, ...(excludeContractId ? { id: { not: excludeContractId } } : {}) },
+        orderBy: [{ fechaInicio: 'desc' }, { id: 'desc' }],
+        select: { id: true, fechaEntregaLlaves: true }
+    });
+    if (latestFinished && !latestFinished.fechaEntregaLlaves && latestFinished.id !== sameTenantRenewalSourceId) throw new AppError('La propiedad sigue pendiente de entrega de llaves', { statusCode: 409, code: 'PROPERTY_KEYS_PENDING', details: { contractId: latestFinished.id } });
     const overlapping = await tx.contrato.findFirst({
         where: {
             propiedadId,

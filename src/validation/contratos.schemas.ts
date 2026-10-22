@@ -17,7 +17,7 @@ import {
 import { parseDateOnly } from '../utils/argentina-date';
 import { optimisticVersionSchema } from '../utils/optimistic-lock';
 
-export const contractListStatusSchema = z.enum(['PROGRAMADO', 'ACTIVO', 'FINALIZADO', 'RESCINDIDO', 'PAPELERA']);
+export const contractListStatusSchema = z.enum(['PROGRAMADO', 'ACTIVO', 'EN_CIERRE', 'FINALIZADO', 'RESCINDIDO', 'PAPELERA']);
 
 const parseJsonField = <T extends z.ZodTypeAny>(schema: T) => z.preprocess(value => {
     if (typeof value !== 'string') return value;
@@ -96,6 +96,7 @@ const contractCreateSchemaBase = z.object({
     fechaInicio: dateOnlyString('La fecha de inicio'),
     fechaFin: dateOnlyString('La fecha de fin'),
     fechaActualizacion: optionalDateOnlyString('La fecha de actualización'),
+    frecuenciaActualizacionMeses: z.preprocess(value => value === '' || value === null ? undefined : value, z.coerce.number().int().min(1).max(120).optional()),
     observaciones: optionalText(2000),
     serviciosGastos: contractServiceExpensesSchema,
     observacionDocumento: optionalText(1000),
@@ -179,13 +180,65 @@ export const contractUpdateSchema = contractCreateSchemaBase
         version: optimisticVersionSchema
     });
 
-export const contractRescissionSchema = z.object({
+const rescissionMoney = (label: string) => nonNegativeDecimal(label)
+    .max(99_999_999.99, `${label} supera el importe máximo`)
+    .refine(value => Math.abs(value * 100 - Math.round(value * 100)) < 0.000001, `${label} admite hasta dos decimales`);
+
+const keyDeliveryFields = z.object({
+    fechaEntregaLlaves: dateOnlyString('La fecha de entrega de llaves'),
+    horaEntrega: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Indicá una hora válida').optional().nullable(),
+    cantidadLlaves: z.number().int().min(1).max(100),
+    receptorNombre: requiredText('La persona que recibe las llaves', 200),
+    estadoInmueble: requiredText('El estado del inmueble', 2000),
+    observaciones: optionalText(4000),
+    inmuebleDesocupado: z.literal(true),
+    vistaPreviaHash: z.string().length(64).optional(),
+    version: optimisticVersionSchema
+});
+
+export const keyDeliverySchema = keyDeliveryFields;
+export type KeyDeliveryInput = z.infer<typeof keyDeliverySchema>;
+
+const rescissionFields = z.object({
+    tipoCierre: z.enum(['ANTICIPADA_INQUILINO', 'VENCIMIENTO_ACORDADO']),
+    sinReclamosConfirmado: z.literal(true),
+    serviciosSaldadosConfirmados: z.literal(true),
+    depositoResueltoConfirmado: z.literal(true),
     motivo: requiredText('El motivo de la rescisión', 1000).refine(value => value.trim().length >= 5, {
         message: 'El motivo de la rescisión debe tener al menos 5 caracteres'
     }),
-    fechaRescision: optionalDateOnlyString('La fecha de rescisión'),
+    fechaRescision: dateOnlyString('La fecha de rescisión'),
+    llavesEntregadas: z.boolean(),
+    fechaEntregaLlaves: optionalDateOnlyString('La fecha de entrega de llaves'),
+    cantidadLlaves: z.number().int().min(0).max(100),
+    estadoInmueble: requiredText('El estado del inmueble', 2000),
+    observaciones: optionalText(4000),
+    motivoRevision: optionalText(1000),
+    multaImporte: rescissionMoney('La multa'),
+    multaResponsable: z.enum(['INQUILINO', 'PROPIETARIO']).nullable(),
+    depositoADevolver: rescissionMoney('El depósito a devolver'),
+    depositoRetenido: rescissionMoney('El depósito retenido'),
+    motivoRetencion: optionalText(1000),
+    pendientesManuales: z.array(z.object({
+        concepto: requiredText('El concepto pendiente', 200),
+        tipo: z.enum(['ALQUILER', 'SERVICIO', 'EXPENSA', 'OTRO']),
+        responsable: z.enum(['INQUILINO', 'PROPIETARIO']),
+        importe: rescissionMoney('El importe pendiente').refine(value => value > 0, 'El importe pendiente debe ser mayor a cero')
+    })).max(30),
+    vistaPreviaHash: z.string().length(64).optional(),
     version: optimisticVersionSchema
+}).superRefine((data, ctx) => {
+    if (data.pendientesManuales.length > 0) ctx.addIssue({ code: 'custom', path: ['pendientesManuales'], message: 'No puede emitirse un cierre sin reclamos con importes pendientes. Resolvelos antes de firmar.' });
+    if (data.llavesEntregadas && !data.fechaEntregaLlaves) ctx.addIssue({ code: 'custom', path: ['fechaEntregaLlaves'], message: 'Indicá cuándo se entregaron las llaves' });
+    if (data.llavesEntregadas && data.cantidadLlaves < 1) ctx.addIssue({ code: 'custom', path: ['cantidadLlaves'], message: 'Indicá cuántas llaves se entregaron' });
+    if (!data.llavesEntregadas && data.fechaEntregaLlaves) ctx.addIssue({ code: 'custom', path: ['fechaEntregaLlaves'], message: 'No puede haber fecha de entrega si las llaves siguen pendientes' });
+    if (data.depositoRetenido > 0 && !data.motivoRetencion) ctx.addIssue({ code: 'custom', path: ['motivoRetencion'], message: 'Explicá la retención del depósito' });
+    if (data.multaImporte > 0 && !data.multaResponsable) ctx.addIssue({ code: 'custom', path: ['multaResponsable'], message: 'Indicá quién debe pagar la multa' });
 });
+
+export const contractRescissionSchema = rescissionFields;
+export const contractRescissionRevisionSchema = rescissionFields.safeExtend({ motivoRevision: requiredText('El motivo de la nueva versión', 1000) });
+export type ContractRescissionInput = z.infer<typeof contractRescissionSchema>;
 
 export const contractRentUpdateSchema = z.object({
     montoNuevo: positiveDecimal('El monto nuevo'),
@@ -206,15 +259,17 @@ export type PropertyCandidate = z.infer<typeof propertyCandidateSchema>;
 export type ContractCreateInput = z.infer<typeof contractCreateSchema>;
 
 export const normalizeContractUpdateSettings = (
-    payload: Pick<ContractCreateInput, 'requiereActualizacion' | 'fechaActualizacion' | 'porcentajeActualizacion' | 'tipoAjuste'>
+    payload: Pick<ContractCreateInput, 'requiereActualizacion' | 'fechaActualizacion' | 'frecuenciaActualizacionMeses' | 'porcentajeActualizacion' | 'tipoAjuste'>
 ) => payload.requiereActualizacion ? {
     requiereActualizacion: true,
     fechaProximaActualizacion: payload.fechaActualizacion ? parseDateOnly(payload.fechaActualizacion) : null,
+    frecuenciaActualizacionMeses: payload.frecuenciaActualizacionMeses ?? null,
     porcentajeActualizacion: payload.porcentajeActualizacion ? new Decimal(payload.porcentajeActualizacion) : null,
     tipoAjuste: payload.tipoAjuste || null
 } : {
     requiereActualizacion: false,
     fechaProximaActualizacion: null,
+    frecuenciaActualizacionMeses: null,
     porcentajeActualizacion: null,
     tipoAjuste: null
 };

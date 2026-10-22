@@ -13,7 +13,6 @@ import { formatCurrency } from '../utils/currency';
 import { resolveMoneda } from '../services/currency-rules.service';
 import { deleteContractPermanently } from '../services/contract-deletion.service';
 import {
-    assertContractCanBeRescinded,
     getContractFinancialHistory,
     getContractOutstandingObligations,
     hasContractFinancialHistory,
@@ -30,7 +29,6 @@ import {
     contractAttachmentSchema,
     contractCreateSchema,
     contractRentUpdateSchema,
-    contractRescissionSchema,
     contractUpdateSchema,
     normalizeContractUpdateSettings,
     type ContractCreateInput
@@ -47,12 +45,14 @@ import { createPrincipalContractDocument } from '../services/contract-document-v
 import { assertValidContractRenewal } from '../services/contract-renewal.service';
 import contractQueryRouter from './contratos-query.routes';
 import contractDraftRouter from './contratos-drafts.routes';
+import contractRescissionRouter from './contratos-rescision.routes';
 
 const router = Router();
 
 router.use(authenticateToken);
 router.use('/borradores', contractDraftRouter);
 router.use(contractQueryRouter);
+router.use(contractRescissionRouter);
 
 
 function compactChanges(changes: Record<string, { anterior: unknown; nuevo: unknown }>) {
@@ -96,18 +96,6 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
             const draftPrincipal = draft?.adjuntos.find(attachment => attachment.tipo === TipoDocumentoContrato.CONTRATO_PRINCIPAL);
             const principalFilePath = contractFilePath || draftPrincipal?.rutaArchivo || null;
             const propiedad = await createPropertyIfNeeded(tx, payload, inmobiliariaId, userId);
-            await assertPropertyAvailableForPeriod(
-                tx,
-                propiedad.id,
-                fechaInicio,
-                fechaFin
-            );
-            const contratoAnterior = await assertValidContractRenewal(tx, {
-                contratoAnteriorId: payload.contratoAnteriorId,
-                inmobiliariaId,
-                propiedadId: propiedad.id,
-                fechaInicio
-            });
             const propietariosIds = await createPeopleIfNeeded(
                 tx,
                 payload.propietarios,
@@ -125,6 +113,21 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                 'inquilino'
             );
             assertUniqueContractParties(propietariosIds, inquilinosIds);
+            const contratoAnterior = await assertValidContractRenewal(tx, {
+                contratoAnteriorId: payload.contratoAnteriorId,
+                inmobiliariaId,
+                propiedadId: propiedad.id,
+                fechaInicio,
+                inquilinoIds: inquilinosIds
+            });
+            await assertPropertyAvailableForPeriod(
+                tx,
+                propiedad.id,
+                fechaInicio,
+                fechaFin,
+                undefined,
+                contratoAnterior?.id
+            );
             await assertAgreedCollectionAccount(tx, payload.cuentaCobroAcordadaId, inmobiliariaId, resolveMoneda(payload.moneda));
 
             const newContract = await tx.contrato.create({
@@ -136,6 +139,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                         fechaFin
                     ),
                     fechaProximaActualizacion: updateSettings.fechaProximaActualizacion,
+                    frecuenciaActualizacionMeses: updateSettings.frecuenciaActualizacionMeses,
                     observaciones: payload.observaciones,
                     rutaArchivoContrato: principalFilePath,
                     propiedadId: propiedad.id,
@@ -359,8 +363,10 @@ router.delete('/:id', requirePermission('contratos.eliminar'), async (req, res) 
                 getContractFinancialHistory(tx, current.id),
                 getContractOutstandingObligations(tx, current.id)
             ]);
-            if (hasContractFinancialHistory(history) || hasContractOutstandingObligations(obligations)) {
-                throw new AppError('El contrato tiene historial financiero u obligaciones pendientes y no puede enviarse a la papelera. Usá la rescisión con motivo después de regularizar los saldos.', {
+            const actas = await tx.actaRescision.count({ where: { contratoId: current.id } });
+            const actasLlaves = await tx.actaEntregaLlaves.count({ where: { contratoId: current.id } });
+            if (hasContractFinancialHistory(history) || hasContractOutstandingObligations(obligations) || actas > 0 || actasLlaves > 0) {
+                throw new AppError('El contrato tiene historial financiero, actas u obligaciones pendientes y no puede enviarse a la papelera. Conservá el historial mediante la rescisión.', {
                     statusCode: 409,
                     code: 'CONTRACT_REQUIRES_RESCISSION',
                     details: { history, obligations }
@@ -399,70 +405,6 @@ router.delete('/:id', requirePermission('contratos.eliminar'), async (req, res) 
     }
 });
 
-// La rescisión conserva el vínculo contractual y su trazabilidad. No sustituye
-// pagos, liquidaciones ni planes pendientes: éstos deben regularizarse antes.
-router.post('/:id/rescindir', requirePermission('contratos.editar'), requireRecentAuthentication, validateBody(contractRescissionSchema), async (req, res) => {
-    const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
-    const contractId = Number(req.params.id);
-    const { motivo, fechaRescision, version } = req.body;
-
-    try {
-        const updated = await prisma.$transaction(async tx => {
-            const contract = await tx.contrato.findFirst({ where: { id: contractId, inmobiliariaId } });
-            if (!contract) throw new AppError('Contrato no encontrado', { statusCode: 404, code: 'CONTRACT_NOT_FOUND' });
-            if (contract.version !== version) assertOptimisticUpdate(0, version, contract.version);
-            if (contract.estado === 'PAPELERA') throw new AppError('Restaurá el contrato antes de rescindirlo', { statusCode: 409, code: 'CONTRACT_IN_TRASH' });
-            if (contract.estado === 'RESCINDIDO') throw new AppError('El contrato ya fue rescindido', { statusCode: 409, code: 'CONTRACT_ALREADY_RESCINDED' });
-            if (contract.estado === 'FINALIZADO') throw new AppError('Un contrato finalizado no puede rescindirse', { statusCode: 409, code: 'CONTRACT_ALREADY_FINALIZED' });
-
-            const effectiveDate = fechaRescision ? parseDateOnly(fechaRescision) : argentinaTodayAsDate();
-            if (effectiveDate < contract.fechaInicio) {
-                throw new AppError('La fecha de rescisión no puede ser anterior al inicio del contrato', { statusCode: 400, code: 'INVALID_RESCISSION_DATE' });
-            }
-            if (effectiveDate > argentinaTodayAsDate()) {
-                throw new AppError('La fecha de rescisión no puede ser futura', { statusCode: 400, code: 'INVALID_RESCISSION_DATE' });
-            }
-            await assertContractCanBeRescinded(tx, contract.id);
-
-            const claim = await tx.contrato.updateMany({
-                where: { id: contract.id, inmobiliariaId, version },
-                data: {
-                    estado: 'RESCINDIDO',
-                    fechaRescision: effectiveDate,
-                    motivoRescision: motivo,
-                    rescindidoPorId: usuarioId,
-                    actualizadoPorId: usuarioId,
-                    eliminadoEn: null,
-                    estadoAnteriorPapelera: null,
-                    version: { increment: 1 }
-                }
-            });
-            const currentVersion = claim.count === 0
-                ? (await tx.contrato.findFirst({ where: { id: contract.id, inmobiliariaId }, select: { version: true } }))?.version
-                : undefined;
-            assertOptimisticUpdate(claim.count, version, currentVersion);
-            await syncPropertyOccupancy(tx, [contract.propiedadId]);
-            return tx.contrato.findUniqueOrThrow({ where: { id: contract.id } });
-        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-
-        await auditService.log({
-            usuarioId,
-            inmobiliariaId,
-            accion: 'RESCINDIR_CONTRATO',
-            entidad: 'Contrato',
-            entidadId: contractId,
-            severidad: 'WARNING',
-            detalle: compactChanges({ motivo: { anterior: null, nuevo: motivo }, fechaRescision: { anterior: null, nuevo: updated.fechaRescision } })
-        });
-        res.json({ message: 'Contrato rescindido correctamente', version: updated.version, fechaRescision: updated.fechaRescision });
-    } catch (error) {
-        if (error instanceof AppError) {
-            return res.status(error.statusCode).json({ message: error.message, code: error.code, details: error.details });
-        }
-        res.status(500).json({ message: 'No se pudo rescindir el contrato' });
-    }
-});
-
 // Restore contract
 router.post('/:id/restaurar', requirePermission('contratos.restaurar'), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
@@ -484,7 +426,7 @@ router.post('/:id/restaurar', requirePermission('contratos.restaurar'), async (r
         const previousState = contract.estadoAnteriorPapelera && contract.estadoAnteriorPapelera !== 'PAPELERA'
             ? contract.estadoAnteriorPapelera
             : null;
-        const restoredState = previousState === 'FINALIZADO' || previousState === 'RESCINDIDO'
+        const restoredState = previousState === 'FINALIZADO' || previousState === 'RESCINDIDO' || previousState === 'EN_CIERRE'
             ? previousState
             : getContractStateForDates(contract.fechaInicio, contract.fechaFin);
 
@@ -556,6 +498,7 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         fechaInicio,
         fechaFin,
         fechaActualizacion,
+        frecuenciaActualizacionMeses,
         observaciones,
         montoAlquiler,
         montoHonorarios,
@@ -612,10 +555,12 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         if (updatesScheduling && !requiereActualizacion) {
             updateData.requiereActualizacion = false;
             updateData.fechaProximaActualizacion = null;
+            updateData.frecuenciaActualizacionMeses = null;
             updateData.porcentajeActualizacion = null;
             updateData.tipoAjuste = null;
             changes.requiereActualizacion = { anterior: contract.requiereActualizacion, nuevo: updateData.requiereActualizacion };
             changes.fechaProximaActualizacion = { anterior: contract.fechaProximaActualizacion, nuevo: updateData.fechaProximaActualizacion };
+            changes.frecuenciaActualizacionMeses = { anterior: contract.frecuenciaActualizacionMeses, nuevo: null };
             changes.porcentajeActualizacion = { anterior: contract.porcentajeActualizacion, nuevo: updateData.porcentajeActualizacion };
             changes.tipoAjuste = { anterior: contract.tipoAjuste, nuevo: updateData.tipoAjuste };
         } else if (updatesScheduling && requiereActualizacion) {
@@ -626,12 +571,14 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
 
             updateData.requiereActualizacion = true;
             updateData.fechaProximaActualizacion = nextUpdateDate;
+            updateData.frecuenciaActualizacionMeses = frecuenciaActualizacionMeses ?? contract.frecuenciaActualizacionMeses;
             updateData.porcentajeActualizacion = porcentajeActualizacion !== undefined
                 ? (porcentajeActualizacion ? new Decimal(porcentajeActualizacion) : null)
                 : contract.porcentajeActualizacion;
             updateData.tipoAjuste = tipoAjuste !== undefined ? (tipoAjuste || null) : contract.tipoAjuste;
             changes.requiereActualizacion = { anterior: contract.requiereActualizacion, nuevo: updateData.requiereActualizacion };
             changes.fechaProximaActualizacion = { anterior: contract.fechaProximaActualizacion, nuevo: updateData.fechaProximaActualizacion };
+            changes.frecuenciaActualizacionMeses = { anterior: contract.frecuenciaActualizacionMeses, nuevo: updateData.frecuenciaActualizacionMeses };
             changes.porcentajeActualizacion = { anterior: contract.porcentajeActualizacion, nuevo: updateData.porcentajeActualizacion };
             changes.tipoAjuste = { anterior: contract.tipoAjuste, nuevo: updateData.tipoAjuste };
         } else if (fechaActualizacion !== undefined) {

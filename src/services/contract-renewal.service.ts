@@ -54,7 +54,7 @@ const toTimelineEntry = (contract: RenewalTimelineRecord): ContractRenewalTimeli
  */
 export async function assertValidContractRenewal(
     tx: TxClient,
-    input: { contratoAnteriorId?: number; inmobiliariaId: number; propiedadId: number; fechaInicio: Date }
+    input: { contratoAnteriorId?: number; inmobiliariaId: number; propiedadId: number; fechaInicio: Date; inquilinoIds?: number[] }
 ) {
     if (!input.contratoAnteriorId) return null;
 
@@ -66,6 +66,7 @@ export async function assertValidContractRenewal(
             estado: true,
             fechaFin: true,
             fechaRescision: true,
+            inquilinos: { select: { personaId: true } },
             contratoRenovado: { select: { id: true } }
         }
     });
@@ -93,6 +94,16 @@ export async function assertValidContractRenewal(
             statusCode: 400,
             code: 'RENEWAL_PROPERTY_MISMATCH'
         });
+    }
+
+    if (input.inquilinoIds) {
+        const previousIds = previous.inquilinos.map(item => item.personaId).sort((a, b) => a - b);
+        const requestedIds = [...input.inquilinoIds].sort((a, b) => a - b);
+        if (previousIds.length !== requestedIds.length || previousIds.some((id, index) => id !== requestedIds[index])) {
+            throw new AppError('Si cambia el inquilino, creá un contrato nuevo sin marcarlo como renovación. El historial anterior se conserva.', {
+                statusCode: 409, code: 'RENEWAL_TENANT_CHANGED'
+            });
+        }
     }
 
     const effectiveEnd = previous.fechaRescision || previous.fechaFin;

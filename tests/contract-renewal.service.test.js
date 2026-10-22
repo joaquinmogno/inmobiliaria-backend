@@ -24,11 +24,18 @@ test('a renewal source must belong to the same property and can have only one su
     estado: 'FINALIZADO',
     fechaFin: endOfPreviousContract,
     fechaRescision: null,
+    inquilinos: [{ personaId: 3 }],
     contratoRenovado: null
   };
   const tx = { contrato: { findFirst: async () => source } };
 
   assert.equal((await assertValidContractRenewal(tx, validRenewalInput)).id, 12);
+
+  await assert.rejects(
+    () => assertValidContractRenewal(tx, { ...validRenewalInput, inquilinoIds: [99] }),
+    error => error instanceof AppError && error.code === 'RENEWAL_TENANT_CHANGED'
+  );
+  assert.equal((await assertValidContractRenewal(tx, { ...validRenewalInput, inquilinoIds: [3] })).id, 12);
 
   await assert.rejects(
     () => assertValidContractRenewal(tx, { ...validRenewalInput, propiedadId: 9 }),

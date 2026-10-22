@@ -47,6 +47,8 @@ model Inmobiliaria {
   creditosInquilino          CreditoInquilino[]
   gestionesAlertasOperativas GestionAlertaOperativa[]
   borradoresContrato         BorradorContrato[]
+  actasRescision             ActaRescision[]
+  actasEntregaLlaves         ActaEntregaLlaves[]
 }
 
 enum CondicionIva {
@@ -81,6 +83,8 @@ model Usuario {
   contratosActualizados         Contrato[]                       @relation("ContratoActualizadoPor")
   contratosCreados              Contrato[]                       @relation("ContratoCreadoPor")
   contratosRescindidos          Contrato[]                       @relation("ContratoRescindidoPor")
+  actasRescisionCreadas         ActaRescision[]                  @relation("ActaRescisionCreadaPor")
+  actasEntregaLlavesCreadas     ActaEntregaLlaves[]              @relation("ActaEntregaLlavesCreadaPor")
   borradoresContratoCreados     BorradorContrato[]               @relation("BorradorContratoCreadoPor")
   borradoresContratoActualizados BorradorContrato[]              @relation("BorradorContratoActualizadoPor")
   adjuntosBorradorContratoCreados AdjuntoBorradorContrato[]      @relation("AdjuntoBorradorContratoCreadoPor")
@@ -316,6 +320,7 @@ model Contrato {
   eliminadoEn               DateTime?
   estadoAnteriorPapelera    EstadoContrato?
   fechaRescision            DateTime?                    @db.Date
+  fechaEntregaLlaves        DateTime?                    @db.Date
   motivoRescision           String?                      @db.Text
   rescindidoPorId           Int?
   fechaCreacion             DateTime                     @default(now())
@@ -323,6 +328,7 @@ model Contrato {
   inmobiliariaId            Int
   propiedadId               Int
   fechaProximaActualizacion DateTime?                    @db.Date
+  frecuenciaActualizacionMeses Int?
   actualizadoPorId          Int?
   creadoPorId               Int?
   diaVencimiento            Int                          @default(10)
@@ -341,6 +347,8 @@ model Contrato {
   requiereActualizacion     Boolean                      @default(true)
   contratoAnteriorId        Int?                         @unique
   adjuntos                  AdjuntoContrato[]
+  actasRescision            ActaRescision[]
+  actasEntregaLlaves        ActaEntregaLlaves[]
   actualizadoPor            Usuario?                     @relation("ContratoActualizadoPor", fields: [actualizadoPorId], references: [id])
   creadoPor                 Usuario?                     @relation("ContratoCreadoPor", fields: [creadoPorId], references: [id])
   rescindidoPor             Usuario?                     @relation("ContratoRescindidoPor", fields: [rescindidoPorId], references: [id], onDelete: SetNull)
@@ -429,6 +437,40 @@ model AdjuntoContrato {
   @@unique([contratoId, tipo, versionDocumento])
   @@index([contratoId, tipo, esVigente])
   @@index([creadoPorId])
+}
+
+model ActaRescision {
+  id             Int          @id @default(autoincrement())
+  contratoId     Int
+  inmobiliariaId Int
+  version        Int
+  datos          Json
+  motivoRevision String?      @db.Text
+  fechaEmision   DateTime     @default(now())
+  creadoPorId    Int?
+  contrato       Contrato     @relation(fields: [contratoId], references: [id], onDelete: Restrict)
+  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+  creadoPor      Usuario?     @relation("ActaRescisionCreadaPor", fields: [creadoPorId], references: [id], onDelete: SetNull)
+
+  @@unique([contratoId, version])
+  @@index([inmobiliariaId, contratoId, fechaEmision])
+}
+
+model ActaEntregaLlaves {
+  id             Int          @id @default(autoincrement())
+  contratoId     Int
+  inmobiliariaId Int
+  version        Int
+  datos          Json
+  motivoRevision String?      @db.Text
+  fechaEmision   DateTime     @default(now())
+  creadoPorId    Int?
+  contrato       Contrato     @relation(fields: [contratoId], references: [id], onDelete: Restrict)
+  inmobiliaria   Inmobiliaria @relation(fields: [inmobiliariaId], references: [id])
+  creadoPor      Usuario?     @relation("ActaEntregaLlavesCreadaPor", fields: [creadoPorId], references: [id], onDelete: SetNull)
+
+  @@unique([contratoId, version])
+  @@index([inmobiliariaId, contratoId, fechaEmision])
 }
 
 // Un borrador conserva una carga de contrato incompleta. No participa de la
@@ -982,6 +1024,7 @@ enum TipoUsuario {
 enum EstadoContrato {
   PROGRAMADO
   ACTIVO
+  EN_CIERRE
   PAPELERA
   FINALIZADO
   RESCINDIDO
@@ -1051,6 +1094,7 @@ enum TipoAdjuntoPropiedad {
 enum EstadoPropiedad {
   DISPONIBLE
   ALQUILADO
+  PENDIENTE_ENTREGA
   INACTIVO
 }
 
@@ -1187,4 +1231,6 @@ enum TipoDocumentoContrato {
   CONTRATO_PRINCIPAL
   ADENDA
   ADJUNTO
+  ACTA_RESCISION_FIRMADA
+  ACTA_LLAVES_FIRMADA
 }

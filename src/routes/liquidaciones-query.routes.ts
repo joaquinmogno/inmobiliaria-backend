@@ -234,6 +234,7 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
             cuentaCobroAcordada: { select: { id: true, banco: true, nombre: true } },
             inquilinos: { where: { esPrincipal: true }, include: { persona: true } },
             propietarios: { where: { esPrincipal: true }, include: { persona: true } },
+            actasRescision: { select: { id: true }, take: 1 },
             decisionesLiquidacion: true,
             liquidaciones: {
                 include: {
@@ -252,7 +253,7 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
 
     const today = argentinaTodayAsDate();
     const first = new Date(Date.UTC(contrato.fechaInicio.getUTCFullYear(), contrato.fechaInicio.getUTCMonth(), 1));
-    const lastDate = contrato.fechaRescision || contrato.fechaFin;
+    const lastDate = contrato.fechaEntregaLlaves || contrato.fechaFin;
     const last = new Date(Date.UTC(lastDate.getUTCFullYear(), lastDate.getUTCMonth(), 1));
     const periodos = [];
     for (let cursor = first; cursor <= last; cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1))) {
@@ -268,7 +269,7 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
                         : liquidacion && owner && owner.saldo.greaterThan(0) ? 'PENDIENTE_PAGO_PROPIETARIO'
                             : liquidacion ? 'FINALIZADA'
                                 : decision ? 'OMITIDA'
-                                    : !contrato.administrado || contrato.estado !== 'ACTIVO' || contrato.inquilinos.length !== 1 || contrato.propietarios.length !== 1 || Number(contrato.montoAlquiler) <= 0 ? 'REQUIERE_REVISION'
+                                    : !contrato.administrado || (contrato.estado !== 'ACTIVO' && !(contrato.fechaEntregaLlaves && ['EN_CIERRE', 'FINALIZADO'].includes(contrato.estado) && !contrato.actasRescision.length && cursor <= new Date(Date.UTC(contrato.fechaEntregaLlaves.getUTCFullYear(), contrato.fechaEntregaLlaves.getUTCMonth(), 1)))) || contrato.inquilinos.length !== 1 || contrato.propietarios.length !== 1 || Number(contrato.montoAlquiler) <= 0 ? 'REQUIERE_REVISION'
                                         : 'PENDIENTE_LIQUIDAR';
         periodos.push({
             periodo: cursor.toISOString().slice(0, 10), estado,
@@ -304,8 +305,9 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
         || periodos.find(item => item.periodo.slice(0, 7) === current)?.periodo || periodos[periodos.length - 1]?.periodo;
     res.json({
         contrato: {
-            id: contrato.id, version: contrato.version, estado: contrato.estado, moneda: contrato.moneda,
-            fechaInicio: contrato.fechaInicio, fechaFin: lastDate, fechaProximaActualizacion: contrato.fechaProximaActualizacion,
+            id: contrato.id, version: contrato.version, estado: contrato.estado, moneda: contrato.moneda, fechaEntregaLlaves: contrato.fechaEntregaLlaves,
+            fechaInicio: contrato.fechaInicio, fechaFin: contrato.fechaFin, fechaProximaActualizacion: contrato.fechaProximaActualizacion,
+            frecuenciaActualizacionMeses: contrato.frecuenciaActualizacionMeses,
             requiereActualizacion: contrato.requiereActualizacion, diaVencimiento: contrato.diaVencimiento,
             modalidadCobroInquilino: contrato.modalidadCobroInquilino, modalidadPagoPropietario: contrato.modalidadPagoPropietario,
             cuentaCobroAcordada: contrato.cuentaCobroAcordada,
@@ -334,7 +336,8 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
                         cuentaCobroAcordada: { select: { id: true, banco: true, nombre: true } },
                         inquilinos: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } },
                         propietarios: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } },
-                        serviciosGastos: { orderBy: { orden: 'asc' } }
+                        serviciosGastos: { orderBy: { orden: 'asc' } },
+                        actualizaciones: { orderBy: { fechaActualizacion: 'desc' } }
                     }
                 },
                 pagos: { where: { anuladoEn: null }, include: { creadoPor: { select: { id: true, nombreCompleto: true, email: true } }, imputacionesCuotas: { include: { cuota: { select: { id: true, numeroCuota: true, plan: { select: { concepto: true } } } } } }, movimientoCaja: { select: { cuenta: true, cuentaBancaria: { select: { id: true, banco: true, nombre: true } } } } } },

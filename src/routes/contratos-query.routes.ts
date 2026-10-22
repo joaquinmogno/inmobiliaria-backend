@@ -139,6 +139,8 @@ router.get('/:id', requirePermission('contratos.ver'), withPagination(10, {
                     include: { creadoPor: { select: { id: true, nombreCompleto: true } } },
                     orderBy: [{ tipo: 'asc' }, { versionDocumento: 'desc' }, { id: 'desc' }]
                 },
+                actasRescision: { select: { id: true, version: true, fechaEmision: true, motivoRevision: true }, orderBy: { version: 'desc' } },
+                actasEntregaLlaves: { select: { id: true, version: true, fechaEmision: true }, orderBy: { version: 'desc' } },
                 creadoPor: { select: { id: true, nombreCompleto: true, email: true } },
                 actualizadoPor: { select: { id: true, nombreCompleto: true, email: true } },
                 actualizaciones: { orderBy: { fechaActualizacion: 'desc' }, include: { usuario: true } }

@@ -56,6 +56,7 @@ import {
     voucherSnapshotToPdfData
 } from '../services/liquidation-voucher.service';
 import { calculateLiquidationAdjustment } from '../services/liquidation-adjustment.service';
+import { nextContractUpdateDate } from '../utils/contract-update-schedule';
 
 const router = Router();
 
@@ -234,6 +235,17 @@ const releaseCreditApplicationsForCorrection = async ({
 
 router.use(authenticateToken);
 router.use(liquidationQueryRouter);
+router.use('/:id', async (req, res, next) => {
+    if (req.method === 'GET' || req.method === 'HEAD') return next();
+    const liquidationId = Number(req.params.id);
+    if (!Number.isInteger(liquidationId) || liquidationId <= 0) return next();
+    try {
+        const liquidation = await prisma.liquidacion.findFirst({ where: { id: liquidationId, inmobiliariaId: (req as AuthRequest).user!.inmobiliariaId }, select: { contratoId: true } });
+        if (!liquidation) return next();
+        if (await prisma.actaRescision.count({ where: { contratoId: liquidation.contratoId } })) return res.status(409).json({ message: 'El contrato tiene un cierre sin reclamos emitido. No se pueden alterar sus liquidaciones.', code: 'CONTRACT_CLOSURE_IMMUTABLE' });
+        return next();
+    } catch (error) { return next(error); }
+});
 
 // Preparación mensual idempotente: genera únicamente contratos listos y deja
 // las excepciones para revisión individual.
@@ -331,17 +343,20 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
             }
 
             const contractStartPeriod = firstDayOfUtcMonth(contrato.fechaInicio);
-            const contractEndPeriod = firstDayOfUtcMonth(contrato.fechaFin);
+            const contractEndPeriod = firstDayOfUtcMonth(contrato.fechaEntregaLlaves || contrato.fechaFin);
             if (liquidationPeriod < contractStartPeriod || liquidationPeriod > contractEndPeriod) {
                 throw Object.assign(
-                    new Error('El período de la liquidación debe estar comprendido dentro de la vigencia del contrato'),
+                    new Error('El período debe estar comprendido entre el inicio del contrato y la entrega de llaves o fin de vigencia'),
                     { statusCode: 409, code: 'LIQUIDATION_PERIOD_OUTSIDE_CONTRACT' }
                 );
             }
 
-            if (contrato.estado !== 'ACTIVO') {
+            const finalSettlementOpen = Boolean(contrato.fechaEntregaLlaves)
+                && ['EN_CIERRE', 'FINALIZADO'].includes(contrato.estado)
+                && await tx.actaRescision.count({ where: { contratoId: contrato.id } }) === 0;
+            if (contrato.estado !== 'ACTIVO' && !finalSettlementOpen) {
                 throw Object.assign(
-                    new Error('Solo se pueden generar liquidaciones para contratos activos'),
+                    new Error('Solo se pueden generar liquidaciones para contratos activos o en cierre después de entregar las llaves'),
                     { statusCode: 409, code: 'CONTRACT_NOT_ACTIVE' }
                 );
             }
@@ -645,10 +660,16 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
             }
 
             const contract = liquidacion.contrato;
-            if (contract.requiereActualizacion && !contract.fechaProximaActualizacion) {
+            if (contract.fechaEntregaLlaves && monthNumber(contract.fechaEntregaLlaves) === monthNumber(liquidacion.periodo) && !liquidacion.alquilerExcepcional) {
+                throw Object.assign(new Error('Revisá y guardá manualmente el alquiler final por los días hasta la entrega de llaves. No se calcula automáticamente.'), { statusCode: 409, code: 'FINAL_RENT_MANUAL_REVIEW_REQUIRED' });
+            }
+            if (contract.fechaEntregaLlaves && liquidacion.periodo > firstDayOfUtcMonth(contract.fechaEntregaLlaves)) {
+                throw Object.assign(new Error('No se pueden confirmar períodos posteriores a la entrega de llaves'), { statusCode: 409, code: 'PERIOD_AFTER_KEY_DELIVERY' });
+            }
+            if (!contract.fechaEntregaLlaves && contract.requiereActualizacion && !contract.fechaProximaActualizacion) {
                 throw Object.assign(new Error('Falta definir la fecha de próxima actualización del alquiler en el contrato'), { statusCode: 409, code: 'RENT_UPDATE_DATE_MISSING' });
             }
-            if (contract.requiereActualizacion && contract.fechaProximaActualizacion
+            if (!contract.fechaEntregaLlaves && contract.requiereActualizacion && contract.fechaProximaActualizacion
                 && monthNumber(contract.fechaProximaActualizacion) <= monthNumber(liquidacion.periodo)) {
                 throw Object.assign(new Error('Antes de confirmar, cargá el alquiler actualizado y guardalo para los próximos períodos'), { statusCode: 409, code: 'RENT_UPDATE_REQUIRED' });
             }
@@ -768,7 +789,7 @@ router.patch('/:id/alquiler', requirePermission('liquidaciones.editar'), validat
                     contrato: {
                         include: {
                             actualizaciones: {
-                                select: { id: true, fechaActualizacion: true, fechaVigencia: true, montoAnterior: true },
+                                select: { id: true, fechaActualizacion: true, fechaVigencia: true, fechaProximaAnterior: true, montoAnterior: true },
                                 orderBy: { fechaActualizacion: 'desc' }
                             }
                         }
@@ -784,6 +805,9 @@ router.patch('/:id/alquiler', requirePermission('liquidaciones.editar'), validat
             }
 
             const newRent = new Decimal(montoNuevo.toString()).toDecimalPlaces(2);
+            if (alcance === 'DESDE_PERIODO' && liquidation.contrato.fechaEntregaLlaves) {
+                throw Object.assign(new Error('Después de entregar las llaves, el alquiler final solo puede ajustarse para esta liquidación'), { statusCode: 409, code: 'FINAL_RENT_SCOPE_INVALID' });
+            }
             let drafts: Prisma.LiquidacionGetPayload<object>[] = [liquidation];
             let contractVersion = liquidation.contrato.version;
             if (alcance === 'DESDE_PERIODO') {
@@ -791,13 +815,23 @@ router.patch('/:id/alquiler', requirePermission('liquidaciones.editar'), validat
                 if (contract.version !== expectedContractVersion) {
                     throw Object.assign(new Error('El contrato cambió mientras estabas trabajando. Actualizá la pantalla'), { statusCode: 409, code: 'CONTRACT_CHANGED' });
                 }
-                if (!fechaProximaNueva) {
-                    throw Object.assign(new Error('Indicá la próxima fecha de actualización'), { statusCode: 400, code: 'NEXT_RENT_UPDATE_REQUIRED' });
+                const samePeriodUpdates = contract.actualizaciones.filter(item =>
+                    monthNumber(item.fechaVigencia || item.fechaActualizacion) === monthNumber(liquidation.periodo)
+                );
+                const samePeriodUpdate = samePeriodUpdates[0];
+                const scheduledFrom = samePeriodUpdate?.fechaProximaAnterior || contract.fechaProximaActualizacion;
+                if (!contract.frecuenciaActualizacionMeses && !fechaProximaNueva) {
+                    throw Object.assign(new Error('Este contrato no tiene una frecuencia registrada. Configurala en el contrato o indicá la próxima fecha de actualización'), { statusCode: 400, code: 'NEXT_RENT_UPDATE_REQUIRED' });
                 }
-                const nextUpdate = parseDateOnly(fechaProximaNueva);
+                if (!samePeriodUpdate && scheduledFrom && monthNumber(liquidation.periodo) < monthNumber(scheduledFrom)) {
+                    throw Object.assign(new Error('Todavía no corresponde actualizar el alquiler del contrato en este período. Si es una excepción, elegí solo esta liquidación'), { statusCode: 409, code: 'RENT_UPDATE_NOT_DUE' });
+                }
+                const nextUpdate = contract.frecuenciaActualizacionMeses && scheduledFrom
+                    ? nextContractUpdateDate(scheduledFrom, contract.frecuenciaActualizacionMeses, liquidation.periodo)
+                    : parseDateOnly(fechaProximaNueva!);
                 const endOfPeriod = new Date(Date.UTC(liquidation.periodo.getUTCFullYear(), liquidation.periodo.getUTCMonth() + 1, 0));
-                if (nextUpdate <= endOfPeriod || nextUpdate > contract.fechaFin) {
-                    throw Object.assign(new Error('La próxima actualización debe ser posterior al período liquidado y estar dentro de la vigencia del contrato'), { statusCode: 400, code: 'INVALID_NEXT_RENT_UPDATE' });
+                if (nextUpdate <= endOfPeriod) {
+                    throw Object.assign(new Error('La próxima actualización debe ser posterior al período liquidado'), { statusCode: 400, code: 'INVALID_NEXT_RENT_UPDATE' });
                 }
                 // La política sobre actualizaciones retroactivas de períodos
                 // confirmados está pendiente de definición. Nunca se alteran aquí.
@@ -811,13 +845,9 @@ router.patch('/:id/alquiler', requirePermission('liquidaciones.editar'), validat
                 const laterUpdate = contract.actualizaciones.find(item =>
                     monthNumber(item.fechaVigencia || item.fechaActualizacion) > monthNumber(liquidation.periodo)
                 );
-                const samePeriodUpdates = contract.actualizaciones.filter(item =>
-                    monthNumber(item.fechaVigencia || item.fechaActualizacion) === monthNumber(liquidation.periodo)
-                );
                 if (laterUpdate || samePeriodUpdates.length > 1 || samePeriodUpdates.some(item => !item.fechaVigencia)) {
                     throw Object.assign(new Error('Ya existe una actualización del alquiler desde este mes o uno posterior. Revisá la secuencia antes de cambiarla'), { statusCode: 409, code: 'RENT_UPDATE_OUT_OF_ORDER' });
                 }
-                const samePeriodUpdate = samePeriodUpdates[0];
                 const previousRent = samePeriodUpdate
                     ? new Decimal(samePeriodUpdate.montoAnterior.toString())
                     : getEffectiveRentForPeriod(contract.montoAlquiler, contract.actualizaciones, liquidation.periodo);
@@ -2070,7 +2100,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
 
         // Honorarios inmobiliaria
         const montoHonorarios = Number(liquidacion.montoHonorarios || 0);
-        const porcentajeHonorarios = liquidacion.porcentajeHonorarios ? Number(liquidacion.porcentajeHonorarios) : null;
+        const porcentajeHonorarios = liquidacion.porcentajeHonorarios === null ? null : Number(liquidacion.porcentajeHonorarios);
         const pagaHonorarios: string = liquidacion.pagaHonorarios || contrato?.pagaHonorarios || 'INQUILINO';
 
         doc.fillColor(TEAL).fontSize(11).font('Helvetica-Bold').text('HONORARIOS INMOBILIARIA', 50, y);
@@ -2078,7 +2108,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
         y += 22;
 
         doc.rect(50, y, pageWidth, 22).fill('#F0FDFA');
-        const honorariosDescText = porcentajeHonorarios ? `${porcentajeHonorarios}% sobre alquiler` : 'Monto fijo';
+        const honorariosDescText = porcentajeHonorarios !== null ? `${porcentajeHonorarios}% sobre alquiler` : 'Monto fijo';
         doc.fillColor('#134E4A').fontSize(9).font('Helvetica')
             .text(`${honorariosDescText} — Abona: ${pagaHonorarios}`, 58, y + 7);
         doc.font('Helvetica-Bold')

@@ -29,7 +29,7 @@ const propiedadSchema = z.object({
     piso: optionalText(30),
     departamento: optionalText(30),
     tipo: z.enum(['DEPARTAMENTO', 'CASA', 'LOCAL', 'OTRO']).optional().default('DEPARTAMENTO'),
-    estado: z.enum(['DISPONIBLE', 'ALQUILADO', 'INACTIVO']).optional().default('DISPONIBLE'),
+    estado: z.enum(['DISPONIBLE', 'ALQUILADO', 'PENDIENTE_ENTREGA', 'INACTIVO']).optional().default('DISPONIBLE'),
     observaciones: optionalText(2000),
     servicios: optionalText(2000),
     llaves: optionalText(1000), partidaInmobiliaria: registroInmobiliario, matricula: registroInmobiliario, superficieM2: z.coerce.number().positive().max(100000).optional().nullable()
@@ -50,7 +50,7 @@ router.get('/', requireAnyPermission('propiedades.ver', 'contratos.ver'), withPa
     const pagination = res.locals.pagination;
 
     const propertyTypes = ['DEPARTAMENTO', 'CASA', 'LOCAL', 'OTRO'] as const;
-    const propertyStates = ['DISPONIBLE', 'ALQUILADO', 'INACTIVO'] as const;
+    const propertyStates = ['DISPONIBLE', 'ALQUILADO', 'PENDIENTE_ENTREGA', 'INACTIVO'] as const;
     if (tipo && !propertyTypes.includes(String(tipo) as typeof propertyTypes[number])) {
         return res.status(400).json({ message: 'Tipo de propiedad inválido', code: 'INVALID_PROPERTY_TYPE_FILTER' });
     }
@@ -225,6 +225,10 @@ router.put('/:id', requirePermission('propiedades.editar'), validateBody(propied
         }
 
         const property = await prisma.$transaction(async tx => {
+            if (estado === 'DISPONIBLE') {
+                const latestFinished = await tx.contrato.findFirst({ where: { propiedadId: Number(id), estado: { in: ['EN_CIERRE', 'RESCINDIDO', 'FINALIZADO'] } }, orderBy: [{ fechaInicio: 'desc' }, { id: 'desc' }], select: { id: true, fechaEntregaLlaves: true } });
+                if (latestFinished && !latestFinished.fechaEntregaLlaves) throw new AppError('La propiedad no puede estar disponible hasta registrar el acta de entrega de llaves', { statusCode: 409, code: 'PROPERTY_KEYS_PENDING' });
+            }
             const result = await tx.propiedad.updateMany({
                 where: { id: Number(id), inmobiliariaId, version },
                 data: {

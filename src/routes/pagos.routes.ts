@@ -210,12 +210,14 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
         const paymentDate = fechaPago ? parseDateOnly(fechaPago) : argentinaTodayAsDate();
         assertOperationalDateIsNotFuture(paymentDate, 'La fecha de cobro');
         const contrato = await prisma.contrato.findFirst({
-            where: { id: Number(contratoId), inmobiliariaId }
+            where: { id: Number(contratoId), inmobiliariaId },
+            include: { actasRescision: { select: { id: true }, take: 1 } }
         });
 
         if (!contrato) {
             return res.status(404).json({ message: 'Contrato no encontrado' });
         }
+        if (contrato.actasRescision?.length) return res.status(409).json({ message: 'El contrato tiene un cierre sin reclamos emitido', code: 'CONTRACT_CLOSURE_IMMUTABLE' });
 
         // Ejecutamos todo en una transacción para asegurar integridad
         const result = await prisma.$transaction(async (tx) => {
@@ -464,6 +466,7 @@ router.post('/:id/anular', authenticateToken, requirePermission('pagos.eliminar'
             const pago = await tx.pago.findFirst({
                 where: { id: pagoId, inmobiliariaId },
                 include: {
+                    contrato: { select: { actasRescision: { select: { id: true }, take: 1 } } },
                     liquidacion: {
                         include: {
                             pagos: { where: { anuladoEn: null }, select: { id: true, monto: true } },
@@ -477,6 +480,7 @@ router.post('/:id/anular', authenticateToken, requirePermission('pagos.eliminar'
             if (!pago) {
                 throw Object.assign(new Error('Pago no encontrado'), { statusCode: 404, code: 'PAYMENT_NOT_FOUND' });
             }
+            if (pago.contrato?.actasRescision?.length) throw Object.assign(new Error('El contrato tiene un cierre sin reclamos emitido'), { statusCode: 409, code: 'CONTRACT_CLOSURE_IMMUTABLE' });
             if (pago.anuladoEn) {
                 throw Object.assign(new Error('El pago ya fue anulado'), { statusCode: 409, code: 'PAYMENT_ALREADY_VOIDED' });
             }

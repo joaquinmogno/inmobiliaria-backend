@@ -73,10 +73,12 @@ export async function generateMonthlyLiquidations(params: {
                     id: selection.contratoId,
                     inmobiliariaId: params.inmobiliariaId,
                     administrado: true,
-                    estado: 'ACTIVO',
                     eliminadoEn: null,
                     fechaInicio: { lte: end },
-                    fechaFin: { gte: params.period }
+                    OR: [
+                        { estado: 'ACTIVO', fechaFin: { gte: params.period } },
+                        { estado: { in: ['EN_CIERRE', 'FINALIZADO'] }, fechaEntregaLlaves: { gte: params.period }, actasRescision: { none: {} } }
+                    ]
                 },
                 include: {
                     propiedad: true,

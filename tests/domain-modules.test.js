@@ -114,6 +114,7 @@ test('la política de actualización limpia campos cuando no hay ajustes', () =>
   }), {
     requiereActualizacion: false,
     fechaProximaActualizacion: null,
+    frecuenciaActualizacionMeses: null,
     porcentajeActualizacion: null,
     tipoAjuste: null
   });

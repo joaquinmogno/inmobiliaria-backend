@@ -1,7 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
-import { AppError } from '../errors/app-error';
-import { getTenantSettlement } from './tenant-credit.service';
+import { getOwnerPaymentSettlement, getTenantSettlement } from './tenant-credit.service';
 
 type Tx = Prisma.TransactionClient;
 
@@ -35,8 +34,8 @@ export type ContractOutstandingObligations = {
 export const getContractOutstandingObligations = async (tx: Tx, contratoId: number): Promise<ContractOutstandingObligations> => {
     const [liquidaciones, cuotasPendientes, creditos] = await Promise.all([
         tx.liquidacion.findMany({
-            where: { contratoId, estado: { not: 'BORRADOR' } },
-            include: { pagos: { where: { anuladoEn: null } }, aplicacionesCredito: true },
+            where: { contratoId, estado: { notIn: ['BORRADOR', 'ANULADA'] } },
+            include: { pagos: { where: { anuladoEn: null } }, aplicacionesCredito: true, pagosPropietario: { where: { anuladoEn: null } } },
             orderBy: { periodo: 'asc' }
         }),
         tx.cuotaPlan.count({
@@ -60,8 +59,7 @@ export const getContractOutstandingObligations = async (tx: Tx, contratoId: numb
                 moneda: liquidacion.moneda
             });
         }
-        const saldoPropietario = new Decimal(liquidacion.montoPropietario.toString())
-            .minus(liquidacion.montoPagadoPropietario.toString());
+        const saldoPropietario = getOwnerPaymentSettlement(liquidacion).saldo;
         if (saldoPropietario.greaterThan(0)) {
             pagosPendientesPropietario.push({
                 liquidacionId: liquidacion.id,
@@ -89,15 +87,3 @@ export const hasContractOutstandingObligations = (obligations: ContractOutstandi
     || obligations.pagosPendientesPropietario.length > 0
     || obligations.cuotasPendientes > 0
     || obligations.saldosAFavorInquilino.length > 0;
-
-export const assertContractCanBeRescinded = async (tx: Tx, contratoId: number) => {
-    const obligations = await getContractOutstandingObligations(tx, contratoId);
-    if (hasContractOutstandingObligations(obligations)) {
-        throw new AppError('No se puede rescindir mientras existan obligaciones pendientes. Regularizá los saldos antes de continuar.', {
-            statusCode: 409,
-            code: 'CONTRACT_OUTSTANDING_OBLIGATIONS',
-            details: obligations
-        });
-    }
-    return obligations;
-};

@@ -27,6 +27,7 @@ const isOwnerPaymentResolved = (state: string | null | undefined) => state === '
 const stateLabel: Record<EstadoContrato, string> = {
     PROGRAMADO: 'programado',
     ACTIVO: 'activo',
+    EN_CIERRE: 'en cierre',
     PAPELERA: 'en papelera',
     FINALIZADO: 'finalizado',
     RESCINDIDO: 'rescindido'
@@ -47,10 +48,14 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             eliminadoEn: null,
             administrado: true,
             fechaInicio: { lte: end },
-            fechaFin: { gte: period }
+            AND: [
+                { OR: [{ fechaFin: { gte: period } }, { fechaEntregaLlaves: { gte: period } }] },
+                { OR: [{ fechaEntregaLlaves: null }, { fechaEntregaLlaves: { gte: period } }] }
+            ]
         },
         include: {
             propiedad: true,
+            actasRescision: { select: { id: true }, take: 1 },
             inquilinos: { where: { esPrincipal: true }, include: { persona: true } },
             propietarios: { where: { esPrincipal: true }, include: { persona: true } },
             actualizaciones: {
@@ -115,7 +120,7 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
         } else if (!contract.administrado) {
             status = 'NO_ELEGIBLE';
             problemas.push(issue('CONTRACT_NOT_MANAGED', 'El contrato no está marcado como administrado', 'REVISAR_CONTRATO', 'Revisar contrato'));
-        } else if (contract.estado !== 'ACTIVO') {
+        } else if (contract.estado !== 'ACTIVO' && !(contract.fechaEntregaLlaves && ['EN_CIERRE', 'FINALIZADO'].includes(contract.estado) && !contract.actasRescision.length)) {
             status = 'NO_ELEGIBLE';
             problemas.push(issue('CONTRACT_NOT_ACTIVE', `El contrato está ${stateLabel[contract.estado]} y no corresponde liquidarlo`, 'REVISAR_CONTRATO', 'Revisar contrato'));
         } else {
@@ -201,7 +206,8 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
                 : existing?.estado === 'CONFIRMADA' && hasTenantCollectionPending(existing.estadoCobroInquilino) ? 'Registrar cobro del inquilino'
                     : existing?.estado === 'CONFIRMADA' && hasOwnerPaymentPending(existing.estadoPagoPropietario) ? `Pagar a ${existing.propietarioNombre || contract.propietarios[0]?.persona.nombreCompleto || 'propietario'}`
                         : existing?.estado === 'CONFIRMADA' ? 'Ver comprobantes'
-                            : status === 'LISTA' ? 'Generar borrador'
+                            : status === 'LISTA' && contract.fechaEntregaLlaves ? 'Generar liquidación final y cargar alquiler manual'
+                                : status === 'LISTA' ? 'Generar borrador'
                                 : status === 'REVISAR' ? 'Resolver excepción'
                                     : 'Sin acción pendiente',
             fechaVencimiento: existing?.fechaVencimiento || getLiquidationDueDate(period, contract.diaVencimiento),

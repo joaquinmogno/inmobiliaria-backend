@@ -1,11 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  assertContractCanBeRescinded,
   getContractOutstandingObligations,
   hasContractFinancialHistory,
 } = require('../dist/services/contract-financial-integrity.service');
-const { contractRescissionSchema } = require('../dist/validation/contratos.schemas');
+const { contractRescissionSchema, keyDeliverySchema } = require('../dist/validation/contratos.schemas');
 
 const financialTx = {
   liquidacion: {
@@ -24,14 +23,13 @@ const financialTx = {
   creditoInquilino: { findMany: async () => [{ id: 18, saldoPendiente: 5000, moneda: 'ARS' }] },
 };
 
-test('rescission is blocked while tenant, owner, installment or credit obligations remain', async () => {
+test('rescission preparation exposes tenant, owner, installment and credit obligations', async () => {
   const obligations = await getContractOutstandingObligations(financialTx, 20);
 
   assert.equal(obligations.cobrosPendientesInquilino[0].saldo, '75000.00');
   assert.equal(obligations.pagosPendientesPropietario[0].saldo, '90000.00');
   assert.equal(obligations.cuotasPendientes, 2);
   assert.equal(obligations.saldosAFavorInquilino[0].saldo, '5000.00');
-  await assert.rejects(() => assertContractCanBeRescinded(financialTx, 20), error => error.code === 'CONTRACT_OUTSTANDING_OBLIGATIONS');
 });
 
 test('financial history is never eligible for trash, even when balances were already settled', () => {
@@ -39,7 +37,14 @@ test('financial history is never eligible for trash, even when balances were alr
   assert.equal(hasContractFinancialHistory({ liquidaciones: 0, pagos: 0, movimientosCaja: 0, planesCuotas: 0 }), false);
 });
 
-test('rescission requires an auditable reason and an optimistic-lock version', () => {
-  assert.equal(contractRescissionSchema.safeParse({ motivo: 'Acuerdo anticipado de ambas partes', fechaRescision: '2026-09-24', version: 4 }).success, true);
+test('key delivery and no-claims closure require separate explicit confirmations', () => {
+  const keys = { fechaEntregaLlaves: '2026-09-24', cantidadLlaves: 2, receptorNombre: 'Administrador', estadoInmueble: 'Desocupado', inmuebleDesocupado: true, version: 4 };
+  assert.equal(keyDeliverySchema.safeParse(keys).success, true);
+  assert.equal(keyDeliverySchema.safeParse({ ...keys, inmuebleDesocupado: false }).success, false);
+  const valid = { tipoCierre: 'ANTICIPADA_INQUILINO', sinReclamosConfirmado: true, serviciosSaldadosConfirmados: true, depositoResueltoConfirmado: true, motivo: 'Rescisión voluntaria del inquilino', fechaRescision: '2026-09-24', llavesEntregadas: true, fechaEntregaLlaves: '2026-09-24', cantidadLlaves: 2, estadoInmueble: 'Desocupado', multaImporte: 0, multaResponsable: null, depositoADevolver: 0, depositoRetenido: 0, pendientesManuales: [], version: 5 };
+  assert.equal(contractRescissionSchema.safeParse(valid).success, true);
+  assert.equal(contractRescissionSchema.safeParse({ ...valid, sinReclamosConfirmado: false }).success, false);
+  assert.equal(contractRescissionSchema.safeParse({ ...valid, pendientesManuales: [{ tipo: 'SERVICIO', concepto: 'Luz', responsable: 'INQUILINO', importe: 100 }] }).success, false);
+  assert.equal(contractRescissionSchema.safeParse({ ...valid, depositoRetenido: 100 }).success, false);
   assert.equal(contractRescissionSchema.safeParse({ motivo: 'No', version: 4 }).success, false);
 });

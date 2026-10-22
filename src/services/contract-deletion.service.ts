@@ -9,7 +9,9 @@ export async function deleteContractPermanently(contractId: number, inmobiliaria
       where: { id: contractId, inmobiliariaId },
       include: {
         adjuntos: { select: { rutaArchivo: true } },
-        contratoRenovado: { select: { id: true } }
+        contratoRenovado: { select: { id: true } },
+        actasRescision: { select: { id: true } },
+        actasEntregaLlaves: { select: { id: true } }
       }
     });
 
@@ -33,6 +35,8 @@ export async function deleteContractPermanently(contractId: number, inmobiliaria
         details: dependencies
       });
     }
+    if (contract.actasRescision?.length > 0) throw new AppError('El contrato tiene actas de rescisión y debe conservarse', { statusCode: 409, code: 'CONTRACT_HAS_RESCISSION_ACTS' });
+    if (contract.actasEntregaLlaves?.length > 0) throw new AppError('El contrato tiene un acta de entrega de llaves y debe conservarse', { statusCode: 409, code: 'CONTRACT_HAS_KEY_DELIVERY_ACT' });
 
     if (contract.contratoAnteriorId || contract.contratoRenovado) {
       throw new AppError('El contrato forma parte de una cadena de renovación y debe conservarse por trazabilidad comercial', {
