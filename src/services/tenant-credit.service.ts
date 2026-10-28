@@ -1,17 +1,20 @@
 import { Decimal } from '@prisma/client/runtime/library';
 import { EstadoCobroInquilino, EstadoPagoPropietario } from '@prisma/client';
 
-type Amount = { monto: Decimal | number | string };
+type Amount = { monto: Decimal | number | string; moneda?: string | null; anuladoEn?: Date | null };
 
-export const sumAmounts = (rows: Amount[] = []) =>
-    rows.reduce((total, row) => total.plus(row.monto), new Decimal(0));
+export const sumAmounts = (rows: Amount[] = [], moneda?: string) =>
+    rows
+        .filter(row => !row.anuladoEn && (!moneda || !row.moneda || row.moneda === moneda))
+        .reduce((total, row) => total.plus(row.monto), new Decimal(0));
 
 export const getTenantSettlement = (liquidacion: {
     netoACobrar: Decimal | number | string;
+    moneda?: string;
     pagos?: Amount[];
     aplicacionesCredito?: Amount[];
 }) => {
-    const pagos = sumAmounts(liquidacion.pagos);
+    const pagos = sumAmounts(liquidacion.pagos, liquidacion.moneda);
     const creditosAplicados = sumAmounts(liquidacion.aplicacionesCredito);
     const totalAplicado = pagos.plus(creditosAplicados);
     const saldo = Decimal.max(new Decimal(0), new Decimal(liquidacion.netoACobrar).minus(totalAplicado));
@@ -37,9 +40,10 @@ export const getTenantCollectionState = (liquidacion: {
 
 export const getOwnerPaymentSettlement = (liquidacion: {
     montoPropietario: Decimal | number | string;
+    moneda?: string;
     pagosPropietario?: Amount[];
 }) => {
-    const pagado = sumAmounts(liquidacion.pagosPropietario);
+    const pagado = sumAmounts(liquidacion.pagosPropietario, liquidacion.moneda);
     const saldo = Decimal.max(new Decimal(0), new Decimal(liquidacion.montoPropietario).minus(pagado));
     return { pagado, saldo };
 };
@@ -91,10 +95,11 @@ export async function getActiveOwnerPaymentSettlement(
  * eso sólo los cobros de caja del inquilino compensan un adelanto.
  */
 export const getAgencyAdvanceExposure = (liquidacion: {
+    moneda?: string;
     pagos?: Amount[];
     pagosPropietario?: Amount[];
 }) => {
-    const cobradoInquilino = sumAmounts(liquidacion.pagos);
-    const entregadoPropietario = sumAmounts(liquidacion.pagosPropietario);
+    const cobradoInquilino = sumAmounts(liquidacion.pagos, liquidacion.moneda);
+    const entregadoPropietario = sumAmounts(liquidacion.pagosPropietario, liquidacion.moneda);
     return Decimal.max(new Decimal(0), entregadoPropietario.minus(cobradoInquilino));
 };

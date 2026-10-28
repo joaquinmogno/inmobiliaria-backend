@@ -24,6 +24,7 @@ export const movimientoSchema = z.object({
     tipo: z.enum(['INGRESO', 'DESCUENTO', 'EGRESO']),
     concepto: requiredText('El concepto', 255),
     monto: positiveDecimal('El monto'),
+    moneda: z.enum(['ARS', 'USD']).optional(),
     observaciones: optionalText(1000),
     esParaInmobiliaria: z.boolean().optional().default(false),
     expectedVersion: z.coerce.number().int().positive().optional()
@@ -56,6 +57,7 @@ export const alquilerBorradorSchema = z.object({
 
 export const pagoPropietarioSchema = z.object({
     monto: positiveDecimal('El monto a pagar'),
+    moneda: z.enum(['ARS', 'USD']).optional(),
     fechaPago: optionalDateOnlyString('La fecha de pago'),
     metodoPago: paymentMethodSchema.optional().default('EFECTIVO'),
     cuentaBancariaId: z.coerce.number().int().positive().optional(),

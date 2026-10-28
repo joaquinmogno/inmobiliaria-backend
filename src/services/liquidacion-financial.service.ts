@@ -1,6 +1,7 @@
 import { Decimal } from '@prisma/client/runtime/library';
 import { PagadorHonorarios, Prisma, TipoMovimiento } from '@prisma/client';
 import { prisma } from '../prisma';
+import { AppError } from '../errors/app-error';
 
 export const buildLiquidationCashConcept = (tipo: string, liquidacion: any): string => {
     const address = liquidacion.contrato?.propiedad?.direccion || 'Sin dirección';
@@ -121,11 +122,15 @@ export const recalculateLiquidationTotals = async (
     const [liquidacion, movimientos] = await Promise.all([
         db.liquidacion.findUniqueOrThrow({
             where: { id: liquidacionId },
-            select: { montoHonorarios: true, pagaHonorarios: true }
+            select: { montoHonorarios: true, pagaHonorarios: true, moneda: true }
         }),
         db.movimiento.findMany({ where: { liquidacionId } })
     ]);
-    const totals = assertValidLiquidationTotals(calculateLiquidationTotals(liquidacion, movimientos));
+    // Los campos de totales históricos de Liquidacion representan la moneda
+    // contractual. Los conceptos de una segunda moneda se exponen y liquidan
+    // por separado, nunca se convierten ni se suman a este total.
+    const movementsInContractCurrency = movimientos.filter(movement => movement.moneda === liquidacion.moneda);
+    const totals = assertValidLiquidationTotals(calculateLiquidationTotals(liquidacion, movementsInContractCurrency));
 
     return db.liquidacion.update({
         where: { id: liquidacionId },
@@ -146,4 +151,37 @@ export const recalculateLiquidationTotals = async (
             }
         }
     });
+};
+
+/** Reemplaza el alquiler completo de un borrador y recalcula sus honorarios. */
+export const replaceDraftMonthlyRent = async (
+    db: Prisma.TransactionClient,
+    draft: { id: number; inmobiliariaId: number; version: number; moneda: string; porcentajeHonorarios: Prisma.Decimal | number | null; montoHonorarios: Prisma.Decimal },
+    rent: Decimal,
+    options: { alquilerExcepcional: boolean; motivo: string }
+) => {
+    const rentMovements = await db.movimiento.findMany({
+        where: { liquidacionId: draft.id, tipo: 'INGRESO', concepto: 'Alquiler Mensual' }
+    });
+    if (rentMovements.length !== 1 || rentMovements[0].moneda !== draft.moneda) {
+        throw new AppError('El borrador debe tener un único concepto de alquiler mensual en la moneda del contrato. Revisalo antes de actualizar', {
+            statusCode: 409, code: 'RENT_MOVEMENT_INVALID'
+        });
+    }
+    const claimed = await db.liquidacion.updateMany({
+        where: { id: draft.id, inmobiliariaId: draft.inmobiliariaId, estado: 'BORRADOR', version: draft.version },
+        data: {
+            montoAlquilerBase: rent,
+            montoHonorarios: draft.porcentajeHonorarios == null
+                ? draft.montoHonorarios
+                : rent.mul(draft.porcentajeHonorarios).div(100).toDecimalPlaces(2),
+            pagaHonorarios: 'PROPIETARIO',
+            alquilerExcepcional: options.alquilerExcepcional,
+            motivoCambioAlquiler: options.motivo,
+            version: { increment: 1 }
+        }
+    });
+    if (claimed.count !== 1) throw new AppError('Un borrador cambió mientras estabas trabajando. Actualizá la pantalla', { statusCode: 409, code: 'LIQUIDATION_CHANGED' });
+    await db.movimiento.update({ where: { id: rentMovements[0].id }, data: { monto: rent } });
+    return recalculateLiquidationTotals(draft.id, db);
 };

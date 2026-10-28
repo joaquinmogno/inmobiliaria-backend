@@ -3,6 +3,7 @@ import { Decimal } from '@prisma/client/runtime/library';
 type OwnerPaymentRecord = {
     id: number;
     monto: Decimal | number | string;
+    moneda: 'ARS' | 'USD';
     fechaPago: Date;
     fechaCreacion: Date;
     metodoPago: string;
@@ -57,10 +58,15 @@ const buildLegacyHistory = (montoPropietario: Decimal | number | string, movemen
 };
 
 /** Mayor de entregas: el pago y su reversión son eventos distintos. */
-export function buildOwnerPaymentHistory(montoPropietario: Decimal | number | string, records: OwnerPaymentRecord[] | LegacyMovement[]) {
+export function buildOwnerPaymentHistory(
+    montoPropietario: Decimal | number | string,
+    records: OwnerPaymentRecord[] | LegacyMovement[],
+    totalsByCurrency: Partial<Record<'ARS' | 'USD', Decimal | number | string>> = {}
+) {
     if (records.length && 'tipo' in records[0]) return buildLegacyHistory(montoPropietario, records as LegacyMovement[]);
     const payments = records as OwnerPaymentRecord[];
     const total = new Decimal(montoPropietario || 0);
+    const deliveredByCurrency = new Map<'ARS' | 'USD', Decimal>();
     const events = payments.flatMap(payment => [
         { kind: 'PAGO' as const, payment, date: payment.fechaCreacion, id: payment.id },
         ...(payment.movimientoCaja?.reversion
@@ -72,6 +78,13 @@ export function buildOwnerPaymentHistory(montoPropietario: Decimal | number | st
     return events.map(event => {
         const amount = new Decimal(event.payment.monto.toString());
         const reversal = event.kind === 'REVERSION';
+        const moneda = event.payment.moneda;
+        const deliveredInCurrency = deliveredByCurrency.get(moneda) || new Decimal(0);
+        const nextDeliveredInCurrency = reversal
+            ? Decimal.max(0, deliveredInCurrency.minus(amount))
+            : deliveredInCurrency.plus(amount);
+        deliveredByCurrency.set(moneda, nextDeliveredInCurrency);
+        // Conserva el cálculo anterior para historiales de una sola moneda.
         delivered = reversal ? Decimal.max(0, delivered.minus(amount)) : delivered.plus(amount);
         const reversalId = event.payment.movimientoCaja?.reversion?.id || null;
         return {
@@ -80,6 +93,7 @@ export function buildOwnerPaymentHistory(montoPropietario: Decimal | number | st
             tipo: reversal ? 'REVERSION' : 'PAGO',
             estado: reversal ? 'REVERSION' : reversalId ? 'REVERTIDO' : event.payment.anuladoEn ? 'ANULADO' : 'VIGENTE',
             monto: amount.toNumber(),
+            moneda,
             fecha: reversal ? event.payment.movimientoCaja!.reversion!.fecha : event.payment.fechaPago,
             fechaCreacion: event.date,
             metodoPago: event.payment.metodoPago,
@@ -94,7 +108,7 @@ export function buildOwnerPaymentHistory(montoPropietario: Decimal | number | st
             motivoAnulacion: event.payment.motivoAnulacion,
             creadoPor: event.payment.creadoPor,
             anuladoPor: event.payment.anuladoPor,
-            saldoPosterior: Decimal.max(0, total.minus(delivered)).toNumber(),
+            saldoPosterior: Decimal.max(0, new Decimal((totalsByCurrency[moneda] ?? total).toString()).minus(nextDeliveredInCurrency)).toNumber(),
             reversionDeId: reversal ? event.payment.id : null,
             reversionId: !reversal ? reversalId : null
         };

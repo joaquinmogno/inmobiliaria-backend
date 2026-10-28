@@ -11,6 +11,7 @@ import { getVoucherSummary } from '../services/liquidation-voucher.service';
 import { buildOwnerPaymentHistory } from '../services/owner-payment-history.service';
 import { getAgencyAdvanceExposure, getOwnerPaymentSettlement, getTenantSettlement } from '../services/tenant-credit.service';
 import { getOutstandingOwnerAdvances } from '../services/owner-advance.service';
+import { getLiquidationCurrencySummaries } from '../services/liquidation-currency.service';
 
 const router = Router();
 
@@ -93,7 +94,7 @@ router.get('/', requirePermission('liquidaciones.ver'), withPagination(50), asyn
                     },
                     pagos: { where: { anuladoEn: null } },
                     aplicacionesCredito: true,
-                    pagosPropietario: { where: { anuladoEn: null }, select: { monto: true } }
+                    pagosPropietario: { where: { anuladoEn: null }, select: { monto: true, moneda: true } }
                 },
                 orderBy: [{ periodo: 'desc' }, { id: 'desc' }],
                 skip,
@@ -238,9 +239,9 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
             decisionesLiquidacion: true,
             liquidaciones: {
                 include: {
-                    pagos: { where: { anuladoEn: null }, select: { monto: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true } },
+                    pagos: { where: { anuladoEn: null }, select: { monto: true, moneda: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true } },
                     aplicacionesCredito: { select: { monto: true } },
-                    pagosPropietario: { where: { anuladoEn: null }, select: { monto: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true } },
+                    pagosPropietario: { where: { anuladoEn: null }, select: { monto: true, moneda: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true } },
                     movimientos: { select: { concepto: true, observaciones: true } },
                     cuotas: { include: { plan: { select: { concepto: true, _count: { select: { cuotas: true } } } }, imputacionesPago: { where: { pago: { anuladoEn: null } }, select: { monto: true } } } },
                     ajustes: { select: { id: true, tipo: true, concepto: true, motivo: true, fechaCreacion: true } }
@@ -399,19 +400,24 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
         });
         const { comprobantes, pagosPropietario, ...detalleLiquidacion } = liquidacion;
         const tenantSettlement = getTenantSettlement(liquidacion);
-        const ownerSettlement = getOwnerPaymentSettlement({ montoPropietario: liquidacion.montoPropietario, pagosPropietario: pagosPropietario.filter(payment => !payment.anuladoEn) });
+        const ownerSettlement = getOwnerPaymentSettlement({ montoPropietario: liquidacion.montoPropietario, moneda: liquidacion.moneda, pagosPropietario: pagosPropietario.filter(payment => !payment.anuladoEn) });
+        const resumenMonedas = getLiquidationCurrencySummaries({
+            ...liquidacion,
+            pagosPropietario: pagosPropietario.filter(payment => !payment.anuladoEn)
+        });
         res.json({
             ...detalleLiquidacion,
             montoPagadoPropietario: ownerSettlement.pagado.toNumber(),
             comprobantes: comprobantes.map(getVoucherSummary),
-            historialPagosPropietario: buildOwnerPaymentHistory(liquidacion.montoPropietario, pagosPropietario),
+            historialPagosPropietario: buildOwnerPaymentHistory(liquidacion.montoPropietario, pagosPropietario, Object.fromEntries(resumenMonedas.map(summary => [summary.moneda, summary.montoPropietario]))),
+            resumenMonedas,
             resumenOperativo: {
                 cobradoInquilino: tenantSettlement.pagos.toNumber(),
                 creditoAplicadoInquilino: tenantSettlement.creditosAplicados.toNumber(),
                 saldoInquilino: tenantSettlement.saldo.toNumber(),
                 pagadoPropietario: ownerSettlement.pagado.toNumber(),
                 saldoPropietario: ownerSettlement.saldo.toNumber(),
-                capitalPropioExpuesto: getAgencyAdvanceExposure({ pagos: liquidacion.pagos, pagosPropietario: pagosPropietario.filter(payment => !payment.anuladoEn) }).toNumber()
+                capitalPropioExpuesto: getAgencyAdvanceExposure({ moneda: liquidacion.moneda, pagos: liquidacion.pagos, pagosPropietario: pagosPropietario.filter(payment => !payment.anuladoEn) }).toNumber()
             },
             auditLogs: auditLogs.data,
             auditMeta: auditLogs.meta

@@ -32,7 +32,8 @@ import {
     buildLiquidationCashConcept,
     getEffectiveRentForPeriod,
     getLiquidationDueDate,
-    recalculateLiquidationTotals
+    recalculateLiquidationTotals,
+    replaceDraftMonthlyRent
 } from '../services/liquidacion-financial.service';
 import { getMonthlyLiquidationPreparation } from '../services/liquidation-preparation.service';
 import {
@@ -46,7 +47,7 @@ import {
 import liquidationQueryRouter from './liquidaciones-query.routes';
 import { generateMonthlyLiquidations } from '../services/liquidation-workflow.service';
 import { assertCashPeriodOpen, prepareCashCorrection } from '../services/cash-closing.service';
-import { getActiveOwnerPaymentSettlement, getAgencyAdvanceExposure, getOwnerPaymentSettlement, getOwnerPaymentState, getTenantCollectionState, getTenantSettlement } from '../services/tenant-credit.service';
+import { getAgencyAdvanceExposure, getOwnerPaymentSettlement, getOwnerPaymentState, getTenantCollectionState, getTenantSettlement } from '../services/tenant-credit.service';
 import { syncInstallmentsForLiquidationSettlement } from '../services/installment-plan-lifecycle.service';
 import { isValidBankAlias, isValidCbu, maskedBankDestination } from '../utils/bank-account';
 import { getOutstandingOwnerAdvances } from '../services/owner-advance.service';
@@ -57,6 +58,7 @@ import {
 } from '../services/liquidation-voucher.service';
 import { calculateLiquidationAdjustment } from '../services/liquidation-adjustment.service';
 import { nextContractUpdateDate } from '../utils/contract-update-schedule';
+import { getLiquidationCurrencySummaries, getOwnerPaymentStateByCurrency } from '../services/liquidation-currency.service';
 
 const router = Router();
 
@@ -70,6 +72,19 @@ const requestedVoucherVersion = (value: unknown) => {
         throw Object.assign(new Error('La versión del comprobante no es válida'), { statusCode: 400, code: 'INVALID_VOUCHER_VERSION' });
     }
     return version;
+};
+
+// La dirección sola no identifica una unidad cuando un propietario tiene más
+// de un inmueble en el mismo edificio. El comprobante conserva estos datos
+// desde su fotografía histórica cuando se consulta una versión emitida.
+const formatVoucherProperty = (liquidacion: any) => {
+    const property = liquidacion?.contrato?.propiedad;
+    const address = liquidacion?.propiedadDireccion || property?.direccion || '-';
+    return [
+        address,
+        property?.piso ? `Piso ${property.piso}` : null,
+        property?.departamento ? `Depto. ${property.departamento}` : null
+    ].filter(Boolean).join(' · ');
 };
 
 const drawVoucherCorrectionsPdf = (
@@ -507,7 +522,7 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
 router.post('/:id/movimientos', requirePermission('liquidaciones.editar'), validateBody(movimientoSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { tipo, concepto, monto, observaciones, esParaInmobiliaria, expectedVersion } = req.body;
+    const { tipo, concepto, monto, moneda, observaciones, esParaInmobiliaria, expectedVersion } = req.body;
 
     try {
         const liquidacion = await prisma.liquidacion.findFirst({
@@ -543,7 +558,7 @@ router.post('/:id/movimientos', requirePermission('liquidaciones.editar'), valid
                     tipo,
                     concepto,
                     monto: monto ? monto.toString() : 0,
-                    moneda: liquidacion.moneda,
+                    moneda: moneda || liquidacion.moneda,
                     observaciones,
                     esParaInmobiliaria,
                     liquidacionId: Number(id)
@@ -558,7 +573,7 @@ router.post('/:id/movimientos', requirePermission('liquidaciones.editar'), valid
             accion: 'AGREGAR_MOVIMIENTO',
             entidad: 'Liquidacion',
             entidadId: Number(id),
-            detalle: `${tipo}: ${concepto} por monto ${monto}`
+            detalle: `${tipo}: ${concepto} por ${formatCurrency(monto, moneda || liquidacion.moneda)}`
         });
 
         invalidatePerformanceCache(inmobiliariaId);
@@ -688,6 +703,17 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
             }
             if (new Decimal(recalculated.montoPropietario.toString()).lessThanOrEqualTo(0)) {
                 throw Object.assign(new Error('El importe a entregar al propietario debe ser mayor que cero'), { statusCode: 409, code: 'OWNER_TOTAL_NOT_POSITIVE' });
+            }
+            const currencySummaries = getLiquidationCurrencySummaries(liquidacion);
+            const invalidCurrencySummary = currencySummaries.find(summary =>
+                (summary.totalIngresos > 0 || summary.totalDescuentos > 0)
+                && (summary.netoACobrar <= 0 || summary.montoPropietario < 0)
+            );
+            if (invalidCurrencySummary) {
+                throw Object.assign(new Error(`La liquidación en ${invalidCurrencySummary.moneda} debe dejar un importe válido para el inquilino y el propietario`), {
+                    statusCode: 409,
+                    code: 'INVALID_MULTI_CURRENCY_TOTAL'
+                });
             }
 
             const owner = liquidacion.contrato.propietarios[0].persona;
@@ -903,32 +929,10 @@ router.patch('/:id/alquiler', requirePermission('liquidaciones.editar'), validat
             let refreshedDrafts = 0;
             for (const draft of drafts) {
                 if (draft.id !== liquidationId && draft.alquilerExcepcional) continue;
-                const claimed = await tx.liquidacion.updateMany({
-                    where: {
-                        id: draft.id,
-                        inmobiliariaId,
-                        estado: EstadoLiquidacion.BORRADOR,
-                        ...(draft.id === liquidationId ? { version: expectedVersion } : { version: draft.version })
-                    },
-                    data: {
-                        montoAlquilerBase: newRent,
-                        montoHonorarios: draft.porcentajeHonorarios === null
-                            ? draft.montoHonorarios
-                            : newRent.mul(draft.porcentajeHonorarios).div(100).toDecimalPlaces(2),
-                        pagaHonorarios: 'PROPIETARIO',
-                        alquilerExcepcional: alcance === 'SOLO_PERIODO' && draft.id === liquidationId,
-                        motivoCambioAlquiler: draft.id === liquidationId ? motivo : `Actualización del contrato vigente desde ${liquidation.periodo.toISOString().slice(0, 7)}`,
-                        version: { increment: 1 }
-                    }
+                const recalculated = await replaceDraftMonthlyRent(tx, draft, newRent, {
+                    alquilerExcepcional: alcance === 'SOLO_PERIODO' && draft.id === liquidationId,
+                    motivo: draft.id === liquidationId ? motivo : `Actualización del contrato vigente desde ${liquidation.periodo.toISOString().slice(0, 7)}`
                 });
-                if (claimed.count !== 1) throw Object.assign(new Error('Un borrador cambió mientras estabas trabajando. Actualizá la pantalla'), { statusCode: 409, code: 'LIQUIDATION_CHANGED' });
-                const rentMovement = await tx.movimiento.findFirst({
-                    where: { liquidacionId: draft.id, tipo: 'INGRESO', concepto: 'Alquiler Mensual' },
-                    orderBy: { id: 'asc' }
-                });
-                if (!rentMovement) throw Object.assign(new Error('Falta el concepto de alquiler mensual en un borrador. Revisalo antes de actualizar'), { statusCode: 409, code: 'RENT_MOVEMENT_MISSING' });
-                await tx.movimiento.update({ where: { id: rentMovement.id }, data: { monto: newRent } });
-                const recalculated = await recalculateLiquidationTotals(draft.id, tx);
                 if (draft.id === liquidationId) updated = recalculated;
                 refreshedDrafts += 1;
             }
@@ -1265,7 +1269,7 @@ router.post('/creditos-inquilino/:id/aplicar', requirePermission('liquidaciones.
 router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_propietario'), validateBody(pagoPropietarioSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { fechaPago, metodoPago, cuentaBancariaId, comprobante, observaciones, motivoAdelanto, propietarioId, monto, expectedVersion } = req.body;
+    const { fechaPago, metodoPago, cuentaBancariaId, comprobante, observaciones, motivoAdelanto, propietarioId, monto, moneda, expectedVersion } = req.body;
 
     try {
         const paymentDate = fechaPago ? parseDateOnly(fechaPago) : argentinaTodayAsDate();
@@ -1274,9 +1278,10 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
             const liquidacion = await tx.liquidacion.findFirst({
                 where: { id: Number(id), inmobiliariaId },
                 include: {
+                    movimientos: true,
                     propietarioPago: true,
-                    pagos: { where: { anuladoEn: null }, select: { monto: true } },
-                    pagosPropietario: { where: { anuladoEn: null }, select: { monto: true } },
+                    pagos: { where: { anuladoEn: null }, select: { monto: true, moneda: true } },
+                    pagosPropietario: { where: { anuladoEn: null }, select: { monto: true, moneda: true } },
                     contrato: {
                         include: {
                             propiedad: true,
@@ -1294,16 +1299,21 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
                 throw Object.assign(new Error('La liquidación no admite nuevos pagos al propietario'), { statusCode: 409, code: 'INVALID_LIQUIDATION_STATE' });
             }
 
-            const montoPropietario = new Decimal(liquidacion.montoPropietario.toString());
-            const { pagado: montoYaPagado, saldo: saldoPropietario } = getOwnerPaymentSettlement(liquidacion);
+            const paymentCurrency = moneda || liquidacion.moneda;
+            const currencySummary = getLiquidationCurrencySummaries(liquidacion).find(summary => summary.moneda === paymentCurrency);
+            const montoPropietario = new Decimal(currencySummary?.montoPropietario || 0);
+            const montoYaPagado = new Decimal(currencySummary?.pagadoPropietario || 0);
+            const saldoPropietario = new Decimal(currencySummary?.saldoPropietario || 0);
             const montoAPagar = new Decimal(monto.toString());
             if (montoPropietario.lessThanOrEqualTo(0)) {
-                throw Object.assign(new Error('El importe a entregar al propietario debe ser mayor que cero'), { statusCode: 409, code: 'OWNER_TOTAL_NOT_POSITIVE' });
+                throw Object.assign(new Error(`No hay importe pendiente para entregar al propietario en ${paymentCurrency}`), { statusCode: 409, code: 'OWNER_TOTAL_NOT_POSITIVE' });
             }
             if (montoAPagar.greaterThan(saldoPropietario)) {
-                throw Object.assign(new Error(`El pago supera el saldo pendiente del propietario (${formatCurrency(saldoPropietario.toString(), liquidacion.moneda)})`), { statusCode: 409, code: 'OWNER_PAYMENT_EXCEEDS_BALANCE' });
+                throw Object.assign(new Error(`El pago supera el saldo pendiente del propietario (${formatCurrency(saldoPropietario.toString(), paymentCurrency)})`), { statusCode: 409, code: 'OWNER_PAYMENT_EXCEEDS_BALANCE' });
             }
-            const totalCobrado = liquidacion.pagos.reduce((sum, pago) => sum.plus(pago.monto), new Decimal(0));
+            const totalCobrado = liquidacion.pagos
+                .filter(pago => pago.moneda === paymentCurrency)
+                .reduce((sum, pago) => sum.plus(pago.monto), new Decimal(0));
             // Sólo el efectivo ya cobrado puede financiar esta entrega. El
             // excedente es capital propio expuesto, aunque el inquilino tenga
             // créditos aplicados que reduzcan su deuda documental.
@@ -1350,9 +1360,9 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
                 ? maskedBankDestination(validCbu ? principalOwner.cbu : null, validAlias ? principalOwner.aliasBancario : null)
                 : null;
             const cuentaPago = (metodoPago === 'EFECTIVO') ? 'CAJA' : 'BANCO';
-            const cuentaBancaria = cuentaPago === 'CAJA' ? null : await tx.cuentaBancaria.findFirst({ where: { id: cuentaBancariaId, inmobiliariaId, activa: true, moneda: liquidacion.moneda }, select: { id: true } });
+            const cuentaBancaria = cuentaPago === 'CAJA' ? null : await tx.cuentaBancaria.findFirst({ where: { id: cuentaBancariaId, inmobiliariaId, activa: true, moneda: paymentCurrency }, select: { id: true } });
             if (cuentaPago === 'BANCO' && !cuentaBancaria) throw Object.assign(new Error('Seleccioná una cuenta bancaria activa para la transferencia o cheque.'), { statusCode: 400, code: 'BANK_ACCOUNT_REQUIRED' });
-            await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: paymentDate, cuenta: cuentaPago, moneda: liquidacion.moneda, cuentaBancariaId: cuentaBancaria?.id });
+            await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: paymentDate, cuenta: cuentaPago, moneda: paymentCurrency, cuentaBancariaId: cuentaBancaria?.id });
 
             const cashMovement = await tx.movimientoCaja.create({
                 data: {
@@ -1360,7 +1370,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
                     tipo: 'EGRESO',
                     concepto: buildLiquidationCashConcept(`Pago a ${principalOwner.nombreCompleto}`, liquidacion),
                     monto: montoAPagar,
-                    moneda: liquidacion.moneda,
+                    moneda: paymentCurrency,
                     fecha: paymentDate,
                     metodoPago: metodoPago || 'EFECTIVO',
                     cuenta: cuentaPago,
@@ -1381,7 +1391,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
                     propietarioId: principalOwner.id,
                     inmobiliariaId,
                     monto: montoAPagar,
-                    moneda: liquidacion.moneda,
+                    moneda: paymentCurrency,
                     fechaPago: paymentDate,
                     metodoPago: metodoPago || 'EFECTIVO',
                     cuenta: cuentaPago,
@@ -1397,16 +1407,15 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
                     movimientoCajaId: cashMovement.id
                 }
             });
-            const estadoPagoPropietario = getOwnerPaymentState({
-                montoPropietario,
-                pagosPropietario: [...liquidacion.pagosPropietario, pagoPropietario]
-            });
+            const paymentStateSource = { ...liquidacion, pagosPropietario: [...liquidacion.pagosPropietario, pagoPropietario] };
+            const estadoPagoPropietario = getOwnerPaymentStateByCurrency(paymentStateSource);
+            const primarySummary = getLiquidationCurrencySummaries(paymentStateSource).find(summary => summary.moneda === liquidacion.moneda)!;
 
             const claimed = await tx.liquidacion.updateMany({
                 where: { id: Number(id), inmobiliariaId, estado: EstadoLiquidacion.CONFIRMADA, ...(expectedVersion ? { version: expectedVersion } : {}) },
                 data: {
                     estadoPagoPropietario,
-                    montoPagadoPropietario: nuevoMontoPagado,
+                    montoPagadoPropietario: primarySummary.pagadoPropietario,
                     fechaPagoPropietario: paymentDate,
                     metodoPagoPropietario: metodoPago || 'EFECTIVO',
                     propietarioPagoId: principalOwner.id,
@@ -1423,9 +1432,9 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
 
             return {
                 ...actualizada,
-                montoPropietario: montoPropietario.toString(), montoPagadoPropietario: nuevoMontoPagado.toString(),
+                montoPropietario: montoPropietario.toString(), montoPagadoPropietario: primarySummary.pagadoPropietario.toString(),
                 saldoPropietario: montoPropietario.minus(nuevoMontoPagado).toString(), esAdelanto,
-                moneda: liquidacion.moneda,
+                moneda: paymentCurrency,
                 propiedadDireccion: liquidacion.contrato?.propiedad?.direccion || 'Sin dirección',
                 propietarioNombre: principalOwner.nombreCompleto,
                 propietarioPagoId: principalOwner.id,
@@ -1649,16 +1658,22 @@ router.post(
                         reversionDeId: pago.movimientoCaja.id
                     }
                 });
-                const settlement = await getActiveOwnerPaymentSettlement(tx, {
-                    inmobiliariaId,
-                    liquidacionId,
-                    montoPropietario: pago.liquidacion.montoPropietario
+                const settlementSource = await tx.liquidacion.findUniqueOrThrow({
+                    where: { id: liquidacionId },
+                    include: {
+                        movimientos: true,
+                        pagos: { where: { anuladoEn: null }, select: { monto: true, moneda: true } },
+                        pagosPropietario: { where: { anuladoEn: null }, select: { monto: true, moneda: true } },
+                        aplicacionesCredito: { select: { monto: true } }
+                    }
                 });
+                const settlement = getLiquidationCurrencySummaries(settlementSource);
+                const primarySettlement = settlement.find(summary => summary.moneda === settlementSource.moneda)!;
                 const updated = await tx.liquidacion.update({
                     where: { id: liquidacionId },
                     data: {
-                        estadoPagoPropietario: settlement.estado,
-                        montoPagadoPropietario: settlement.pagado,
+                        estadoPagoPropietario: getOwnerPaymentStateByCurrency(settlementSource),
+                        montoPagadoPropietario: primarySettlement.pagadoPropietario,
                         version: { increment: 1 }
                     }
                 });
@@ -1756,7 +1771,7 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
         };
 
         const liqAny = liquidacion as any;
-        field('Inmueble', liqAny.propiedadDireccion || liqAny.contrato?.propiedad.direccion || '-', col1, y);
+        field('Inmueble', formatVoucherProperty(liqAny), col1, y);
         const pPrincipal = liqAny.propietarioNombre
             || liqAny.propietarioPago?.nombreCompleto
             || liqAny.contrato?.propietarios?.find((p: any) => p.esPrincipal)?.persona.nombreCompleto
@@ -1999,7 +2014,7 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
         };
 
         const liqAnyProp = liquidacion as any;
-        field('Inmueble', liqAnyProp.propiedadDireccion || contrato?.propiedad?.direccion || '-', col1, y);
+        field('Inmueble', formatVoucherProperty(liqAnyProp), col1, y);
         const pPrincipal = liqAnyProp.propietarioNombre
             || (liquidacion as any).propietarioPago?.nombreCompleto
             || contrato?.propietarios?.find((p: any) => p.esPrincipal)?.persona.nombreCompleto

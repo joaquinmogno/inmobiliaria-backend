@@ -46,6 +46,8 @@ import { assertValidContractRenewal } from '../services/contract-renewal.service
 import contractQueryRouter from './contratos-query.routes';
 import contractDraftRouter from './contratos-drafts.routes';
 import contractRescissionRouter from './contratos-rescision.routes';
+import { replaceDraftMonthlyRent } from '../services/liquidacion-financial.service';
+import { invalidatePerformanceCache } from '../services/performance-cache.service';
 
 const router = Router();
 
@@ -791,12 +793,33 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
             return res.status(400).json({ message: 'Este contrato no tiene actualización de alquiler programada.' });
         }
 
+        if (contrato.fechaEntregaLlaves) {
+            return res.status(409).json({ message: 'Después de entregar las llaves, ajustá el alquiler final desde su liquidación.', code: 'FINAL_RENT_SCOPE_INVALID' });
+        }
+
+        const scheduledFrom = contrato.fechaProximaActualizacion || argentinaTodayAsDate();
+        const effectivePeriod = new Date(Date.UTC(scheduledFrom.getUTCFullYear(), scheduledFrom.getUTCMonth(), 1));
+        const nextUpdate = parseDateOnly(fechaProximaNueva);
+        const nextPeriod = new Date(Date.UTC(effectivePeriod.getUTCFullYear(), effectivePeriod.getUTCMonth() + 1, 1));
+        if (nextUpdate < nextPeriod) {
+            return res.status(400).json({ message: 'La próxima actualización debe ser posterior al período actualizado.', code: 'INVALID_NEXT_RENT_UPDATE' });
+        }
+        const newRent = new Decimal(montoNuevo.toString()).toDecimalPlaces(2);
+
         const result = await prisma.$transaction(async (tx) => {
+            const confirmed = await tx.liquidacion.findFirst({
+                where: { contratoId: contrato.id, inmobiliariaId, periodo: { gte: effectivePeriod }, estado: 'CONFIRMADA' },
+                select: { id: true }
+            });
+            if (confirmed) {
+                throw new AppError('Existe una liquidación confirmada desde ese período. Revisá su ajuste antes de actualizar el contrato.', { statusCode: 409, code: 'CONFIRMED_RENT_PERIOD_REQUIRES_REVIEW' });
+            }
             const claim = await tx.contrato.updateMany({
                 where: { id: Number(id), inmobiliariaId, version },
                 data: {
-                    montoAlquiler: new Decimal(montoNuevo),
-                    fechaProximaActualizacion: parseDateOnly(fechaProximaNueva),
+                    montoAlquiler: newRent,
+                    ...(contrato.porcentajeHonorarios != null ? { montoHonorarios: newRent.mul(contrato.porcentajeHonorarios).div(100).toDecimalPlaces(2) } : {}),
+                    fechaProximaActualizacion: nextUpdate,
                     actualizadoPorId: (req as AuthRequest).user!.id,
                     version: { increment: 1 }
                 }
@@ -811,7 +834,8 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
                 data: {
                     contratoId: Number(id),
                     montoAnterior: contrato.montoAlquiler,
-                    montoNuevo: new Decimal(montoNuevo),
+                    montoNuevo: newRent,
+                    fechaVigencia: effectivePeriod,
                     moneda: contrato.moneda,
                     fechaProximaAnterior: contrato.fechaProximaActualizacion,
                     fechaProximaNueva: parseDateOnly(fechaProximaNueva),
@@ -819,6 +843,17 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
                     usuarioId: (req as AuthRequest).user!.id
                 }
             });
+
+            const drafts = await tx.liquidacion.findMany({
+                where: { contratoId: contrato.id, inmobiliariaId, estado: 'BORRADOR', periodo: { gte: effectivePeriod }, alquilerExcepcional: false },
+                orderBy: { periodo: 'asc' }
+            });
+            for (const draft of drafts) {
+                await replaceDraftMonthlyRent(tx, draft, newRent, {
+                    alquilerExcepcional: false,
+                    motivo: observaciones || `Actualización del contrato vigente desde ${effectivePeriod.toISOString().slice(0, 7)}`
+                });
+            }
 
             const actualizado = await tx.contrato.findUniqueOrThrow({
                 where: { id: Number(id) },
@@ -835,7 +870,7 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
             });
 
             return actualizado;
-        });
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -846,6 +881,7 @@ router.post('/:id/actualizar', requirePermission('contratos.editar'), validateBo
             detalle: `Actualización de monto de alquiler: ${formatCurrency(contrato.montoAlquiler.toString(), contrato.moneda)} -> ${formatCurrency(montoNuevo, contrato.moneda)}`
         });
 
+        invalidatePerformanceCache(inmobiliariaId);
         res.json(result);
     } catch (error) {
         if (error instanceof AppError) {

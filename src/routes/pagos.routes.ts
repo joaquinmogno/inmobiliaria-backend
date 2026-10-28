@@ -18,6 +18,7 @@ import { getTenantCollectionState, getTenantSettlement } from '../services/tenan
 import { syncInstallmentsForLiquidationSettlement } from '../services/installment-plan-lifecycle.service';
 import { userHasPermission } from '../services/permissions.service';
 import { createLiquidationVoucherSnapshot } from '../services/liquidation-voucher.service';
+import { getLiquidationCurrencySummaries, getTenantCollectionStateByCurrency } from '../services/liquidation-currency.service';
 
 const router = Router();
 
@@ -221,7 +222,15 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
 
         // Ejecutamos todo en una transacción para asegurar integridad
         const result = await prisma.$transaction(async (tx) => {
-            const cuentaBancaria = metodoPago === 'EFECTIVO' ? null : await tx.cuentaBancaria.findFirst({ where: { id: cuentaBancariaId, inmobiliariaId, activa: true, moneda: moneda || contrato.moneda }, select: { id: true } });
+            const paymentCurrency = moneda || contrato.moneda;
+            if (!liquidacionId && paymentCurrency !== contrato.moneda) {
+                assertSameCurrency(
+                    paymentCurrency,
+                    contrato.moneda,
+                    `No se permite mezclar monedas: para cobrar una moneda adicional, registrá el cobro desde la liquidación correspondiente en ${contrato.moneda}.`
+                );
+            }
+            const cuentaBancaria = metodoPago === 'EFECTIVO' ? null : await tx.cuentaBancaria.findFirst({ where: { id: cuentaBancariaId, inmobiliariaId, activa: true, moneda: paymentCurrency }, select: { id: true } });
             if (metodoPago !== 'EFECTIVO' && !cuentaBancaria) throw Object.assign(new Error('Seleccioná una cuenta bancaria activa para la transferencia o cheque.'), { statusCode: 400, code: 'BANK_ACCOUNT_REQUIRED' });
             // 1. Buscar liquidaciones del contrato que no sean borrador y no estén pagadas del todo
             // Traemos también sus pagos para calcular la deuda actual de cada una
@@ -236,6 +245,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                     ...(liquidacionId ? { id: Number(liquidacionId) } : {})
                 },
                 include: {
+                    movimientos: true,
                     pagos: { where: { anuladoEn: null } },
                     aplicacionesCredito: true,
                     contrato: {
@@ -250,11 +260,17 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
             // 2. Calcular deuda real por liquidación y filtrar las que deben algo
             const liquidacionesConDeuda = liquidaciones.map(liq => {
                 assertSameCurrency(liq.moneda, contrato.moneda, 'La liquidación tiene una moneda distinta a la del contrato');
-                if (moneda && moneda !== liq.moneda) {
-                    assertSameCurrency(moneda, liq.moneda, `El pago debe registrarse en ${liq.moneda}; no se permite mezclar monedas en una misma operación`);
+                if (!liquidacionId && paymentCurrency !== liq.moneda) {
+                    assertSameCurrency(paymentCurrency, liq.moneda, `El pago debe registrarse en ${liq.moneda}; no se permite mezclar monedas en una misma operación`);
                 }
-
-                const { saldo: deuda } = getTenantSettlement(liq);
+                const currencySummary = getLiquidationCurrencySummaries(liq).find(summary => summary.moneda === paymentCurrency);
+                if (!currencySummary) {
+                    throw Object.assign(new Error(`El pago debe registrarse en ${liq.moneda}; la liquidación no tiene conceptos en ${paymentCurrency}`), {
+                        statusCode: 400,
+                        code: 'PAYMENT_CURRENCY_NOT_IN_LIQUIDATION'
+                    });
+                }
+                const deuda = new Decimal(currencySummary?.saldoInquilino || 0);
                 return { ...liq, deuda };
             }).filter(l => l.deuda.greaterThan(0));
 
@@ -276,7 +292,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
             const montoEntregado = new Decimal(monto.toString());
             if (montoEntregado.greaterThan(deudaTotal)) {
                 throw Object.assign(
-                    new Error(`El pago supera ${liquidacionId ? 'la deuda de esta liquidación' : 'la deuda total'}. El máximo permitido es ${formatCurrency(deudaTotal.toString(), contrato.moneda)}`),
+                    new Error(`El pago supera ${liquidacionId ? 'la deuda de esta liquidación' : 'la deuda total'}. El máximo permitido es ${formatCurrency(deudaTotal.toString(), paymentCurrency)}`),
                     { statusCode: 409, code: 'PAYMENT_EXCEEDS_DEBT' }
                 );
             }
@@ -293,7 +309,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                 const nuevoPago = await tx.pago.create({
                     data: {
                         monto: montoAAplicar,
-                        moneda: liq.moneda,
+                    moneda: paymentCurrency,
                         fechaPago: paymentDate,
                         metodoPago: metodoPago || MetodoPago.EFECTIVO,
                         comprobante,
@@ -309,6 +325,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                 montoRestante = montoRestante.minus(montoAAplicar);
 
                 if (liquidacionId && cuotasImputadas?.length) {
+                    if (paymentCurrency !== liq.moneda) throw Object.assign(new Error('Las cuotas sólo se pueden imputar en la moneda del contrato.'), { statusCode: 409, code: 'INSTALLMENT_CURRENCY_MISMATCH' });
                     const cuotas = await tx.cuotaPlan.findMany({
                         where: { id: { in: cuotasImputadas.map((item: { cuotaId: number }) => item.cuotaId) }, liquidacionId: liq.id },
                         include: { imputacionesPago: { where: { pago: { anuladoEn: null } }, select: { monto: true } } }
@@ -326,14 +343,14 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                 const dir = (liq as any).contrato?.propiedad?.direccion || 'Sin dirección';
                 const periodoStr = new Date(liq.periodo).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 
-                await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: paymentDate, cuenta: cuentaCobro, moneda: liq.moneda, cuentaBancariaId: cuentaBancaria?.id });
+                await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: paymentDate, cuenta: cuentaCobro, moneda: paymentCurrency, cuentaBancariaId: cuentaBancaria?.id });
                 await tx.movimientoCaja.create({
                     data: {
                         inmobiliariaId,
                         tipo: 'INGRESO',
                         concepto: `Cobro Alquiler - ${dir} - Liq. ${periodoStr}`,
                         monto: montoAAplicar,
-                        moneda: liq.moneda,
+                        moneda: paymentCurrency,
                         fecha: paymentDate,
                         creadoPorId: usuarioId,
                         contratoId: Number(contratoId),
@@ -352,7 +369,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                         ...(liquidacionId && expectedLiquidationVersion ? { version: expectedLiquidationVersion } : {})
                     },
                     data: {
-                        estadoCobroInquilino: getTenantCollectionState({
+                        estadoCobroInquilino: getTenantCollectionStateByCurrency({
                             ...liq,
                             pagos: [...liq.pagos, nuevoPago]
                         }),
@@ -364,7 +381,9 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                         statusCode: 409, code: 'LIQUIDATION_CHANGED'
                     });
                 }
-                await syncInstallmentsForLiquidationSettlement({ tx, liquidacionId: liq.id, usuarioId });
+                if (paymentCurrency === liq.moneda) {
+                    await syncInstallmentsForLiquidationSettlement({ tx, liquidacionId: liq.id, usuarioId });
+                }
                 await createLiquidationVoucherSnapshot({ tx, liquidacionId: liq.id, inmobiliariaId, usuarioId, evento: 'COBRO_INQUILINO' });
             }
 
@@ -375,7 +394,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
             return {
                 pagos: pagosCreados,
                 montoSobrante: montoRestante,
-                moneda: contrato.moneda,
+                moneda: paymentCurrency,
                 modoAplicacion: liquidacionId ? 'LIQUIDACION_ESPECIFICA' : 'DEUDA_MAS_ANTIGUA'
             };
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
