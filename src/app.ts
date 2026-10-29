@@ -18,6 +18,7 @@ import cuentasBancariasRoutes from './routes/cuentas-bancarias.routes';
 import planesCuotasRoutes from './routes/planes-cuotas.routes';
 import alertasOperativasRoutes from './routes/alertas-operativas.routes';
 import filesRoutes from './routes/files.routes';
+import controlInternoRoutes from './routes/control-interno.routes';
 import { apiLimiter, expensiveApiLimiter } from './middlewares/rateLimiter.middleware';
 import multer from 'multer';
 import { requestContext } from './middlewares/request-context.middleware';
@@ -93,6 +94,7 @@ app.use('/api/backups', ...sessionRateLimit, expensiveApiLimiter, backupsRoutes)
 app.use('/api/inmobiliaria', ...sessionRateLimit, inmobiliariaRoutes);
 app.use('/api/reportes', ...sessionRateLimit, expensiveApiLimiter, reportesRoutes);
 app.use('/api/cajachica', ...sessionRateLimit, cajachicaRoutes);
+app.use('/api/control-interno', ...sessionRateLimit, controlInternoRoutes);
 app.use('/api/cuentas-bancarias', ...sessionRateLimit, cuentasBancariasRoutes);
 app.use('/api/planes-cuotas', ...sessionRateLimit, planesCuotasRoutes);
 app.use('/api/alertas-operativas', ...sessionRateLimit, alertasOperativasRoutes);
