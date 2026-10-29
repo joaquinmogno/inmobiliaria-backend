@@ -3,7 +3,7 @@ import PDFDocument from 'pdfkit';
 import { argentinaDateOnly } from '../utils/argentina-date';
 import { formatCurrency } from '../utils/currency';
 import { formatDatePdf } from './liquidacion-pdf.service';
-import { internalReportFilterLabel, summarizeInternalMovements, type InternalMovementRow } from './control-interno.service';
+import { internalReportFilterLabel, internalReportMonthLabel, summarizeInternalMovements, type InternalMovementRow } from './control-interno.service';
 import type { FiltroControlInterno } from '../validation/control-interno.schemas';
 
 type InternalReport = { rows: InternalMovementRow[]; filters: FiltroControlInterno; agency: string };
@@ -54,7 +54,7 @@ export async function buildInternalExcel({ rows, filters, agency }: InternalRepo
     sheet.pageSetup.printArea = `A1:N${Math.max(sheet.rowCount, 5)}`;
     const summary = book.addWorksheet('Resumen', { pageSetup: { paperSize: 9, orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 1 } });
     summary.columns = [{ width: 18 }, { width: 23 }, { width: 23 }, { width: 23 }];
-    summary.addRow(['Control interno', filters.periodo]);
+    summary.addRow(['Control interno', internalReportMonthLabel(filters.periodo)]);
     summary.addRow(['Moneda', 'Ingresos', 'Gastos', 'Diferencia']);
     summarizeInternalMovements(rows).forEach(total => summary.addRow([total.moneda, total.ingresos, total.gastos, total.diferencia]));
     summary.getRow(2).font = { bold: true };

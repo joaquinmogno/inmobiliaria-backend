@@ -42,8 +42,13 @@ export function summarizeInternalMovements(rows: Array<{ tipo: string; moneda: s
     });
 }
 
+export const internalReportMonthLabel = (periodo: string) => {
+    const month = new Date(`${periodo}-01T00:00:00Z`).toLocaleDateString('es-AR', { month: 'long', timeZone: 'UTC' });
+    return `Mes: ${month.charAt(0).toUpperCase()}${month.slice(1)} ${periodo.slice(0, 4)}`;
+};
+
 export const internalReportFilterLabel = (filters: FiltroControlInterno) => [
-    `Mes: ${filters.periodo}`, `Estado: ${filters.estado}`, filters.tipo && `Tipo: ${filters.tipo}`,
+    internalReportMonthLabel(filters.periodo), `Estado: ${filters.estado}`, filters.tipo && `Tipo: ${filters.tipo}`,
     filters.moneda && `Moneda: ${filters.moneda}`, filters.categoria && `Categoría: ${filters.categoria}`,
     filters.metodoPago && `Medio: ${filters.metodoPago}`, filters.search && `Búsqueda: ${filters.search}`,
     filters.creadoPorId && `Usuario: #${filters.creadoPorId}`

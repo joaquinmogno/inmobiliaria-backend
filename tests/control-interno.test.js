@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const ExcelJS = require('exceljs');
 const { Prisma } = require('@prisma/client');
 const { movimientoInternoSchema, filtroControlInternoSchema } = require('../dist/validation/control-interno.schemas');
-const { internalMovementWhere, summarizeInternalMovements } = require('../dist/services/control-interno.service');
+const { internalMovementWhere, summarizeInternalMovements, internalReportMonthLabel, internalReportFilterLabel } = require('../dist/services/control-interno.service');
 const { buildInternalExcel, buildInternalPdf } = require('../dist/services/control-interno-report.service');
 
 const sample = (overrides = {}) => ({
@@ -47,6 +47,13 @@ test('los totales internos separan pesos y dólares y excluyen anulados sin asie
   ]);
 });
 
+test('los reportes identifican el mes en español, sin cambiar de mes por la zona horaria', () => {
+  assert.equal(internalReportMonthLabel('2026-10'), 'Mes: Octubre 2026');
+  assert.equal(internalReportMonthLabel('2027-01'), 'Mes: Enero 2027');
+  assert.equal(internalReportMonthLabel('2026-12'), 'Mes: Diciembre 2026');
+  assert.match(internalReportFilterLabel(filtroControlInternoSchema.parse({ periodo: '2026-10' })), /^Mes: Octubre 2026 · Estado:/);
+});
+
 test('el Excel es un XLSX real con importes numéricos, filtros, hoja de resumen y texto sin fórmulas', async () => {
   const payload = { agency: 'PropControl', filters: filtroControlInternoSchema.parse({ periodo: '2026-10' }), rows: [sample({ detalle: '=HYPERLINK("https://example.invalid","texto")' }), sample({ id: 2, monto: '90000', anuladoEn: new Date(), motivoAnulacion: 'Duplicado' })] };
   const binary = await buildInternalExcel(payload);
@@ -58,6 +65,8 @@ test('el Excel es un XLSX real con importes numéricos, filtros, hoja de resumen
   assert.equal(typeof sheet.getCell('D6').value, 'string');
   assert.equal(sheet.getCell('J7').value, 'Anulado');
   assert.equal(sheet.pageSetup.orientation, 'landscape');
+  assert.match(sheet.getCell('A2').value, /^Mes: Octubre 2026/);
+  assert.equal(workbook.getWorksheet('Resumen').getCell('B1').value, 'Mes: Octubre 2026');
   assert.equal(workbook.getWorksheet('Resumen').getCell('C3').value, 25000.5);
 });
 
