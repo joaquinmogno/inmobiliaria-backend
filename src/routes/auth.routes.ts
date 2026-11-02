@@ -2,7 +2,7 @@ import { Router } from 'express';
 import bcrypt from 'bcrypt';
 import { z } from 'zod';
 import { prisma } from '../prisma';
-import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
+import { authenticateToken, AuthRequest, hasRecentAuthentication, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { requireAdmin } from '../middlewares/permissions.middleware';
 import {
     clearLoginThrottle,
@@ -30,7 +30,7 @@ const loginSchema = z.object({
 }).strict();
 const reauthenticateSchema = z.object({ password: z.string().min(1).max(128) }).strict();
 const changePasswordSchema = z.object({
-    currentPassword: z.string().min(1, 'La contraseña actual es requerida').max(128),
+    currentPassword: z.string().min(1, 'La contraseña actual es requerida').max(128).optional(),
     newPassword: z.string().min(12, 'La nueva contraseña debe tener al menos 12 caracteres').max(128)
 }).strict();
 const adminResetSchema = z.object({
@@ -193,11 +193,25 @@ router.post('/change-password', authenticateToken, async (req, res) => {
     const id = (req as AuthRequest).user!.id;
     const user = await prisma.usuario.findUnique({ where: { id } });
     if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
-    if (!(await bcrypt.compare(validation.data.currentPassword, user.password))) {
-        return res.status(400).json({ message: 'Contraseña actual incorrecta' });
+    if (user.mustChangePassword) {
+        if (!hasRecentAuthentication(req)) {
+            await revokeSession((req as AuthRequest).sessionId!);
+            clearAuthCookies(res);
+            return res.status(401).json({
+                message: 'Volvé a iniciar sesión para crear tu contraseña personal.',
+                code: 'RECENT_LOGIN_REQUIRED'
+            });
+        }
+    } else {
+        if (!validation.data.currentPassword) {
+            return res.status(400).json({ message: 'La contraseña actual es requerida' });
+        }
+        if (!(await bcrypt.compare(validation.data.currentPassword, user.password))) {
+            return res.status(400).json({ message: 'Contraseña actual incorrecta' });
+        }
     }
-    if (validation.data.newPassword === validation.data.currentPassword) {
-        return res.status(400).json({ message: 'La nueva contraseña debe ser diferente de la contraseña temporal' });
+    if (await bcrypt.compare(validation.data.newPassword, user.password)) {
+        return res.status(400).json({ message: `La nueva contraseña debe ser diferente de la contraseña ${user.mustChangePassword ? 'temporal' : 'actual'}` });
     }
     const passwordErrors = validatePasswordStrength(validation.data.newPassword, [user.email, user.nombreCompleto]);
     if (passwordErrors.length) {

@@ -5,6 +5,7 @@ import { CSRF_COOKIE, SESSION_COOKIE, sha256 } from '../services/security.servic
 export interface AuthRequest extends Request {
     requestId?: string;
     sessionId?: number;
+    sessionAuthenticatedAt?: Date;
     csrfToken?: string;
     user?: {
         id: number;
@@ -17,9 +18,13 @@ export interface AuthRequest extends Request {
 
 const RECENT_AUTH_MS = 15 * 60 * 1000;
 
+export const hasRecentAuthentication = (req: Request) => {
+    const authenticatedAt = (req as AuthRequest).sessionAuthenticatedAt;
+    return Boolean(authenticatedAt && Date.now() - authenticatedAt.getTime() <= RECENT_AUTH_MS);
+};
+
 export const requireRecentAuthentication = (req: Request, res: Response, next: NextFunction) => {
-    const authenticatedAt = (req as Request & { sessionAuthenticatedAt?: Date }).sessionAuthenticatedAt;
-    if (!authenticatedAt || Date.now() - authenticatedAt.getTime() > RECENT_AUTH_MS) {
+    if (!hasRecentAuthentication(req)) {
         return res.status(403).json({ message: 'Por seguridad, volvé a confirmar tu contraseña', code: 'REAUTHENTICATION_REQUIRED' });
     }
     next();
@@ -84,7 +89,7 @@ export const authenticateToken = async (req: Request, res: Response, next: NextF
         }).catch(() => undefined);
 
         (req as AuthRequest).sessionId = session.id;
-        (req as Request & { sessionAuthenticatedAt?: Date }).sessionAuthenticatedAt = session.authenticatedAt || session.createdAt;
+        (req as AuthRequest).sessionAuthenticatedAt = session.authenticatedAt || session.createdAt;
         (req as AuthRequest).csrfToken = req.cookies?.[CSRF_COOKIE];
         (req as AuthRequest).user = {
             id: user.id,
