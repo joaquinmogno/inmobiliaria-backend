@@ -34,6 +34,36 @@ export const ensurePdfSpace = (doc: PDFKit.PDFDocument, y: number, requiredHeigh
     return 50;
 };
 
+export const getLiquidationNoteForRecipient = (liquidacion: {
+    notaLiquidacion?: string | null;
+    destinatarioNotaLiquidacion?: string | null;
+}, recipient: 'INQUILINO' | 'PROPIETARIO') => {
+    const audience = liquidacion.destinatarioNotaLiquidacion || 'AMBOS';
+    return audience === 'AMBOS' || audience === recipient ? liquidacion.notaLiquidacion?.trim() || null : null;
+};
+
+export const drawLiquidationNotePdf = (
+    doc: PDFKit.PDFDocument,
+    initialY: number,
+    pageWidth: number,
+    liquidacion: { notaLiquidacion?: string | null; destinatarioNotaLiquidacion?: string | null },
+    recipient: 'INQUILINO' | 'PROPIETARIO'
+) => {
+    const text = getLiquidationNoteForRecipient(liquidacion, recipient);
+    if (!text) return initialY;
+    doc.font('Helvetica').fontSize(10);
+    const options = { width: pageWidth - 16, lineGap: 3 };
+    const y = ensurePdfSpace(doc, initialY, Math.min(doc.heightOfString(text, options) + 40, 200));
+    doc.fillColor('#4F46E5').font('Helvetica-Bold').fontSize(11).text('ACLARACIONES', 50, y);
+    doc.moveTo(50, y + 14).lineTo(50 + pageWidth, y + 14).strokeColor('#C7D2FE').lineWidth(1).stroke();
+    // PDFKit distribuye las notas extensas entre páginas, reservando el pie.
+    const bottomMargin = doc.page.margins.bottom;
+    doc.page.margins.bottom = 70;
+    doc.fillColor('#374151').font('Helvetica').fontSize(10).text(text, 58, y + 24, options);
+    doc.page.margins.bottom = bottomMargin;
+    return doc.y + 24;
+};
+
 export const drawDebtSummaryPdf = (
     doc: PDFKit.PDFDocument,
     initialY: number,

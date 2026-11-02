@@ -6,7 +6,7 @@ import { Decimal } from '@prisma/client/runtime/library';
 import { DestinoCreditoInquilino, EstadoCreditoInquilino, EstadoLiquidacion, OrigenPagoPropietario, Prisma } from '@prisma/client';
 import PDFDocument from 'pdfkit';
 import type PDFKit from 'pdfkit';
-import { auditService } from '../services/audit.service';
+import { auditService, getAuditRequestMetadata } from '../services/audit.service';
 import { validateBody } from '../middlewares/validation.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { userHasPermission } from '../services/permissions.service';
@@ -19,6 +19,7 @@ import {
     alquilerBorradorSchema,
     liquidacionCreateSchema,
     movimientoSchema,
+    notaLiquidacionSchema,
     pagoPropietarioSchema,
     ajusteLiquidacionSchema,
     aplicarCreditoInquilinoSchema,
@@ -38,6 +39,7 @@ import {
 import { getMonthlyLiquidationPreparation } from '../services/liquidation-preparation.service';
 import {
     drawDebtSummaryPdf,
+    drawLiquidationNotePdf,
     drawPaymentRowsPdf,
     ensurePdfSpace,
     formatCurrencyPdf,
@@ -59,6 +61,7 @@ import {
 import { calculateLiquidationAdjustment } from '../services/liquidation-adjustment.service';
 import { nextContractUpdateDate } from '../utils/contract-update-schedule';
 import { getLiquidationCurrencySummaries, getOwnerPaymentStateByCurrency } from '../services/liquidation-currency.service';
+import { updateLiquidationNote } from '../services/liquidation-note.service';
 
 const router = Router();
 
@@ -793,6 +796,27 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
             resultado: 'FALLIDO', severidad: 'WARNING', detalle: error.message
         });
         res.status(error.statusCode || 500).json({ message: error.message || 'Error al confirmar liquidación', code: error.code });
+    }
+});
+
+router.patch('/:id/nota', requirePermission('liquidaciones.editar'), validateBody(notaLiquidacionSchema), async (req, res) => {
+    const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
+    const liquidacionId = Number(req.params.id);
+    if (!Number.isInteger(liquidacionId) || liquidacionId <= 0) {
+        return res.status(400).json({ message: 'Liquidación inválida' });
+    }
+    try {
+        const result = await prisma.$transaction(tx => updateLiquidationNote(tx, {
+            ...req.body, liquidacionId, inmobiliariaId, usuarioId,
+            auditMetadata: getAuditRequestMetadata(req)
+        }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        res.json(result);
+    } catch (error: any) {
+        const conflict = error.code === 'P2034';
+        res.status(conflict ? 409 : error.statusCode || 500).json({
+            message: conflict ? 'La liquidación cambió mientras estabas trabajando. Actualizá la pantalla y volvé a intentar' : error.message || 'No se pudo guardar la nota',
+            code: conflict ? 'LIQUIDATION_CHANGED' : error.code
+        });
     }
 });
 
@@ -1867,6 +1891,8 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
         y += 50;
 
         y = drawVoucherCorrectionsPdf(doc, y, pageWidth, snapshot, moneyPdf, 'INQUILINO');
+        y = drawLiquidationNotePdf(doc, y, pageWidth, liquidacion, 'INQUILINO');
+        y = ensurePdfSpace(doc, y, 60);
 
         // Pagos
         if (liqAny.pagos && liqAny.pagos.length > 0) {
@@ -2141,6 +2167,8 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
         y += 50;
 
         y = drawVoucherCorrectionsPdf(doc, y, pageWidth, snapshot, moneyPdf, 'PROPIETARIO');
+        y = drawLiquidationNotePdf(doc, y, pageWidth, liquidacion, 'PROPIETARIO');
+        y = ensurePdfSpace(doc, y, 60);
 
         // Pagos recibidos
         if (liquidacion.pagos && liquidacion.pagos.length > 0) {

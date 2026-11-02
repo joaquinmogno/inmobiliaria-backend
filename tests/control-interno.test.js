@@ -19,11 +19,19 @@ test('el registro interno admite medio de pago y comprobantes opcionales, pero e
   const valid = { fecha: '2026-10-28', detalle: 'Compra de insumos', monto: '25000.50' };
   const data = movimientoInternoSchema.parse(valid);
   assert.equal(data.metodoPago, undefined);
+  assert.equal(data.cuentaPago, undefined);
   assert.equal(data.tipo, 'GASTO');
   assert.equal(data.moneda, 'ARS');
   for (const monto of ['-1', '0', 'NaN', '12.001', 12.001]) assert.equal(movimientoInternoSchema.safeParse({ ...valid, monto }).success, false);
   assert.equal(movimientoInternoSchema.safeParse({ ...valid, fecha: '2026-02-30' }).success, false);
   assert.equal(movimientoInternoSchema.safeParse({ ...valid, detalle: ' ' }).success, false);
+});
+
+test('la cuenta del pago es una referencia opcional que conserva el nombre y se puede quitar', () => {
+  const valid = { fecha: '2026-10-29', detalle: 'Luz Balcarce', monto: '200000' };
+  assert.equal(movimientoInternoSchema.parse({ ...valid, cuentaPago: '  Nación · Cuenta personal (ARS)  ' }).cuentaPago, 'Nación · Cuenta personal (ARS)');
+  for (const cuentaPago of ['', '   ', null]) assert.equal(movimientoInternoSchema.parse({ ...valid, cuentaPago }).cuentaPago, null);
+  for (const cuentaPago of ['a'.repeat(221), 123, {}]) assert.equal(movimientoInternoSchema.safeParse({ ...valid, cuentaPago }).success, false);
 });
 
 test('la consulta mensual usa límites civiles exactos y siempre pertenece a una inmobiliaria', () => {
@@ -34,6 +42,8 @@ test('la consulta mensual usa límites civiles exactos y siempre pertenece a una
   assert.equal(where.anuladoEn, null);
   assert.equal(where.categoria, 'Servicios');
   assert.equal(filtroControlInternoSchema.safeParse({ periodo: '2026-13' }).success, false);
+  const byAccount = internalMovementWhere(7, filtroControlInternoSchema.parse({ periodo: '2026-10', search: 'Nación' }));
+  assert.deepEqual(byAccount.OR.find(condition => condition.cuentaPago), { cuentaPago: { contains: 'Nación', mode: 'insensitive' } });
 });
 
 test('los totales internos separan pesos y dólares y excluyen anulados sin asientos de reversión', () => {
@@ -55,7 +65,7 @@ test('los reportes identifican el mes en español, sin cambiar de mes por la zon
 });
 
 test('el Excel es un XLSX real con importes numéricos, filtros, hoja de resumen y texto sin fórmulas', async () => {
-  const payload = { agency: 'PropControl', filters: filtroControlInternoSchema.parse({ periodo: '2026-10' }), rows: [sample({ detalle: '=HYPERLINK("https://example.invalid","texto")' }), sample({ id: 2, monto: '90000', anuladoEn: new Date(), motivoAnulacion: 'Duplicado' })] };
+  const payload = { agency: 'PropControl', filters: filtroControlInternoSchema.parse({ periodo: '2026-10' }), rows: [sample({ detalle: '=HYPERLINK("https://example.invalid","texto")', cuentaPago: 'Nación · Cuenta personal (ARS)' }), sample({ id: 2, monto: '90000', anuladoEn: new Date(), motivoAnulacion: 'Duplicado', cuentaPago: '=Una referencia, no una fórmula' })] };
   const binary = await buildInternalExcel(payload);
   assert.equal(binary.subarray(0, 2).toString(), 'PK');
   const workbook = new ExcelJS.Workbook();
@@ -64,6 +74,10 @@ test('el Excel es un XLSX real con importes numéricos, filtros, hoja de resumen
   assert.equal(sheet.getCell('H6').value, 25000.5);
   assert.equal(typeof sheet.getCell('D6').value, 'string');
   assert.equal(sheet.getCell('J7').value, 'Anulado');
+  assert.equal(sheet.getCell('O5').value, 'Cuenta de origen / destino');
+  assert.equal(sheet.getCell('O6').value, 'Nación · Cuenta personal (ARS)');
+  assert.equal(sheet.getCell('O7').value, '=Una referencia, no una fórmula');
+  assert.equal(sheet.autoFilter, 'A5:O7');
   assert.equal(sheet.pageSetup.orientation, 'landscape');
   assert.match(sheet.getCell('A2').value, /^Mes: Octubre 2026/);
   assert.equal(workbook.getWorksheet('Resumen').getCell('B1').value, 'Mes: Octubre 2026');

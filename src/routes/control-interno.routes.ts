@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { authenticateToken, type AuthRequest } from '../middlewares/auth.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
+import { userHasPermission } from '../services/permissions.service';
 import { validateBody, idParamSchema } from '../middlewares/validation.middleware';
 import { cleanupFailedUpload, commitUploadedFile, removeUploadedFile, upload, validateUploadedFilesContent } from '../middlewares/upload.middleware';
 import { auditService } from '../services/audit.service';
@@ -78,12 +79,24 @@ router.get('/', async (req, res) => {
 
 router.get('/opciones', async (req, res) => {
     const inmobiliariaId = auth(req).inmobiliariaId;
-    const [categories, methods, authors] = await Promise.all([
+    const canViewBankAccounts = await userHasPermission(auth(req).id, auth(req).tipo, 'caja_chica.ver');
+    const [categories, methods, authors, accounts, bankAccounts] = await Promise.all([
         prisma.movimientoInterno.findMany({ where: { inmobiliariaId, categoria: { not: null } }, select: { categoria: true }, distinct: ['categoria'], orderBy: { categoria: 'asc' } }),
         prisma.movimientoInterno.findMany({ where: { inmobiliariaId, metodoPago: { not: null } }, select: { metodoPago: true }, distinct: ['metodoPago'], orderBy: { metodoPago: 'asc' } }),
-        prisma.movimientoInterno.findMany({ where: { inmobiliariaId }, select: { creadoPor: { select: { id: true, nombreCompleto: true } } }, distinct: ['creadoPorId'] })
+        prisma.movimientoInterno.findMany({ where: { inmobiliariaId }, select: { creadoPor: { select: { id: true, nombreCompleto: true } } }, distinct: ['creadoPorId'] }),
+        prisma.movimientoInterno.findMany({ where: { inmobiliariaId, cuentaPago: { not: null } }, select: { cuentaPago: true }, distinct: ['cuentaPago'], orderBy: { cuentaPago: 'asc' } }),
+        canViewBankAccounts ? prisma.cuentaBancaria.findMany({
+            where: { inmobiliariaId, activa: true, esHistorica: false },
+            select: { banco: true, nombre: true, moneda: true }, orderBy: [{ banco: 'asc' }, { nombre: 'asc' }]
+        }) : Promise.resolve([])
     ]);
-    res.json({ categorias: categories.map(row => row.categoria).filter(Boolean), mediosPago: methods.map(row => row.metodoPago).filter(Boolean), usuarios: authors.map(row => row.creadoPor) });
+    // Se guarda la descripción, no un vínculo contable: un cambio posterior
+    // de nombre de la cuenta no debe reescribir el registro personal histórico.
+    const cuentasPago = [...new Set([
+        ...accounts.map(row => row.cuentaPago).filter((name): name is string => Boolean(name)),
+        ...bankAccounts.map(account => `${account.banco} · ${account.nombre} (${account.moneda})`)
+    ])].sort((left, right) => left.localeCompare(right, 'es'));
+    res.json({ categorias: categories.map(row => row.categoria).filter(Boolean), mediosPago: methods.map(row => row.metodoPago).filter(Boolean), usuarios: authors.map(row => row.creadoPor), cuentasPago });
 });
 
 for (const format of ['excel', 'pdf'] as const) {
@@ -124,23 +137,23 @@ router.post('/', requirePermission('control_interno.crear'), cleanupFailedUpload
     const moved: string[] = [];
     try {
         const files = await attachmentData(req, moved);
-        const { fecha, monto, categoria, metodoPago, observaciones, ...rest } = req.body;
+        const { fecha, monto, categoria, metodoPago, cuentaPago, observaciones, ...rest } = req.body;
         const record = await prisma.movimientoInterno.create({
-            data: { ...rest, fecha: parseDateOnly(fecha), monto: new Prisma.Decimal(monto), categoria: categoria || null, metodoPago: metodoPago || null, observaciones: observaciones || null, inmobiliariaId: auth(req).inmobiliariaId, creadoPorId: auth(req).id, adjuntos: { create: files } },
+            data: { ...rest, fecha: parseDateOnly(fecha), monto: new Prisma.Decimal(monto), categoria: categoria || null, metodoPago: metodoPago || null, cuentaPago: cuentaPago || null, observaciones: observaciones || null, inmobiliariaId: auth(req).inmobiliariaId, creadoPorId: auth(req).id, adjuntos: { create: files } },
             include: internalMovementInclude
         });
-        await auditWrite(req, 'CREAR_MOVIMIENTO_INTERNO', record.id, JSON.stringify({ tipo: record.tipo, detalle: record.detalle, monto: record.monto, moneda: record.moneda }));
+        await auditWrite(req, 'CREAR_MOVIMIENTO_INTERNO', record.id, JSON.stringify({ tipo: record.tipo, detalle: record.detalle, monto: record.monto, moneda: record.moneda, cuentaPago: record.cuentaPago }));
         res.status(201).json(record);
     } catch (error) { await Promise.all(moved.map(removeUploadedFile)); throw error; }
 });
 
 router.put('/:id', requirePermission('control_interno.editar'), validateBody(editarMovimientoInternoSchema), async (req, res) => {
     const original = await ensureRecord(req);
-    const { version, fecha, monto, categoria, metodoPago, observaciones, ...rest } = req.body;
+    const { version, fecha, monto, categoria, metodoPago, cuentaPago, observaciones, ...rest } = req.body;
     const updated = await prisma.$transaction(async tx => {
         const claimed = await tx.movimientoInterno.updateMany({
             where: { id: original.id, inmobiliariaId: auth(req).inmobiliariaId, version, anuladoEn: null },
-            data: { ...rest, fecha: parseDateOnly(fecha), monto: new Prisma.Decimal(monto), categoria: categoria || null, metodoPago: metodoPago || null, observaciones: observaciones || null, actualizadoPorId: auth(req).id, version: { increment: 1 } }
+            data: { ...rest, fecha: parseDateOnly(fecha), monto: new Prisma.Decimal(monto), categoria: categoria || null, metodoPago: metodoPago || null, ...(cuentaPago === undefined ? {} : { cuentaPago: cuentaPago || null }), observaciones: observaciones || null, actualizadoPorId: auth(req).id, version: { increment: 1 } }
         });
         if (claimed.count !== 1) throw claimError();
         return tx.movimientoInterno.findUniqueOrThrow({ where: { id: original.id }, include: internalMovementInclude });

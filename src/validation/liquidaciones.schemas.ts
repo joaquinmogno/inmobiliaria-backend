@@ -30,6 +30,12 @@ export const movimientoSchema = z.object({
     expectedVersion: z.coerce.number().int().positive().optional()
 });
 
+export const notaLiquidacionSchema = z.object({
+    notaLiquidacion: z.string().trim().max(3000, 'La nota no puede superar los 3000 caracteres').nullable().transform(value => value || null),
+    destinatarioNotaLiquidacion: z.enum(['INQUILINO', 'PROPIETARIO', 'AMBOS']),
+    expectedVersion: optimisticVersionSchema
+});
+
 export const honorariosSchema = z.object({
     montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional(),
     porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional()),

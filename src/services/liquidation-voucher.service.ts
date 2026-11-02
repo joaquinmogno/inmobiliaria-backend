@@ -15,7 +15,7 @@ export type LiquidationVoucherSnapshot = {
     schemaVersion: 1;
     version: number;
     emitidoEn: string;
-    evento?: 'CONFIRMACION' | 'AJUSTE' | 'COBRO_INQUILINO' | 'ANULACION_COBRO' | 'PAGO_PROPIETARIO' | 'ANULACION_PAGO_PROPIETARIO';
+    evento?: 'CONFIRMACION' | 'AJUSTE' | 'COBRO_INQUILINO' | 'ANULACION_COBRO' | 'PAGO_PROPIETARIO' | 'ANULACION_PAGO_PROPIETARIO' | 'NOTA_LIQUIDACION';
     totalesOriginales: Totals;
     liquidacion: {
         id: number;
@@ -31,6 +31,8 @@ export type LiquidationVoucherSnapshot = {
         propiedadDireccion: string | null;
         inquilinoNombre: string | null;
         propietarioNombre: string | null;
+        notaLiquidacion?: string | null;
+        destinatarioNotaLiquidacion?: 'INQUILINO' | 'PROPIETARIO' | 'AMBOS';
     };
     contrato: {
         id: number;
@@ -226,7 +228,9 @@ export const createLiquidationVoucherSnapshot = async ({
             porcentajeHonorarios: liquidacion.porcentajeHonorarios === null ? null : asNumber(liquidacion.porcentajeHonorarios),
             propiedadDireccion: liquidacion.propiedadDireccion,
             inquilinoNombre: liquidacion.inquilinoNombre,
-            propietarioNombre: liquidacion.propietarioNombre
+            propietarioNombre: liquidacion.propietarioNombre,
+            notaLiquidacion: liquidacion.notaLiquidacion,
+            destinatarioNotaLiquidacion: liquidacion.destinatarioNotaLiquidacion
         },
         contrato: {
             id: liquidacion.contrato.id,
@@ -323,6 +327,8 @@ export const voucherSnapshotToPdfData = (snapshot: LiquidationVoucherSnapshot) =
     propiedadDireccion: snapshot.liquidacion.propiedadDireccion,
     inquilinoNombre: snapshot.liquidacion.inquilinoNombre,
     propietarioNombre: snapshot.liquidacion.propietarioNombre,
+    notaLiquidacion: snapshot.liquidacion.notaLiquidacion || null,
+    destinatarioNotaLiquidacion: snapshot.liquidacion.destinatarioNotaLiquidacion || 'AMBOS',
     movimientos: snapshot.movimientos,
     pagos: snapshot.pagos,
     pagosPropietario: snapshot.pagosPropietario || [],

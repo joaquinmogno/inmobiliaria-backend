@@ -51,3 +51,16 @@ test('PDF data comes exclusively from the stored snapshot', () => {
   assert.equal(data.contrato.propiedad.direccion, 'Av. Siempre Viva 123');
   assert.equal(data.ajustes[0].id, 18);
 });
+
+test('las notas se conservan en la fotografía y los comprobantes anteriores siguen sin nota', () => {
+  const legacy = voucherSnapshotToPdfData(readLiquidationVoucherSnapshot(snapshot));
+  assert.equal(legacy.notaLiquidacion, null);
+  const withNote = structuredClone(snapshot);
+  withNote.evento = 'NOTA_LIQUIDACION';
+  withNote.liquidacion.notaLiquidacion = 'Cotización del período: $1.250 por dólar';
+  withNote.liquidacion.destinatarioNotaLiquidacion = 'PROPIETARIO';
+  const data = voucherSnapshotToPdfData(readLiquidationVoucherSnapshot(withNote));
+  assert.equal(data.notaLiquidacion, withNote.liquidacion.notaLiquidacion);
+  assert.equal(data.destinatarioNotaLiquidacion, 'PROPIETARIO');
+  assert.equal(voucherSnapshotToPdfData(readLiquidationVoucherSnapshot(snapshot)).notaLiquidacion, null);
+});

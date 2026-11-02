@@ -536,6 +536,8 @@ model Liquidacion {
   montoAlquilerBase           Decimal                      @default(0) @db.Decimal(10, 2)
   alquilerExcepcional         Boolean                      @default(false)
   motivoCambioAlquiler        String?                      @db.Text
+  notaLiquidacion            String?                      @db.Text
+  destinatarioNotaLiquidacion DestinatarioNotaLiquidacion  @default(AMBOS)
   montoPropietario            Decimal                      @default(0) @db.Decimal(10, 2)
   montoPagadoPropietario      Decimal                      @default(0) @db.Decimal(10, 2)
   moneda                      Moneda                       @default(ARS)
@@ -860,6 +862,7 @@ model MovimientoInterno {
   moneda             Moneda                     @default(ARS)
   categoria          String?                    @db.VarChar(80)
   metodoPago         String?                    @db.VarChar(80)
+  cuentaPago         String?                    @db.VarChar(220)
   observaciones      String?                    @db.VarChar(2000)
   fechaCreacion      DateTime                   @default(now())
   fechaActualizacion DateTime                   @updatedAt
@@ -1095,6 +1098,12 @@ enum EstadoLiquidacion {
   BORRADOR
   CONFIRMADA
   ANULADA
+}
+
+enum DestinatarioNotaLiquidacion {
+  INQUILINO
+  PROPIETARIO
+  AMBOS
 }
 
 enum EstadoCobroInquilino {

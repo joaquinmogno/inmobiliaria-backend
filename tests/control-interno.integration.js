@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const bcrypt = require('bcrypt');
 const ExcelJS = require('exceljs');
+const { spawnSync } = require('node:child_process');
 const { prisma } = require('../dist/prisma');
 const app = require('../dist/app').default;
 
@@ -21,6 +22,10 @@ test('control interno: permisos, comprobantes, reportes y aislamiento de caja co
     prisma.usuario.create({ data: { email: `${unique}-viewer@example.com`, password: hash, nombreCompleto: 'Usuario consulta', tipo: 'USUARIO', rolId: role.id, inmobiliariaId: agency.id } }),
     prisma.usuario.create({ data: { email: `${unique}-none@example.com`, password: hash, nombreCompleto: 'Sin acceso', tipo: 'USUARIO', rolId: deniedRole.id, inmobiliariaId: agency.id } })
   ]);
+  const bankAccount = await prisma.cuentaBancaria.create({ data: { nombre: `Cuenta ${unique}`, banco: 'Nación', moneda: 'ARS', inmobiliariaId: agency.id } });
+  const unusedAccount = await prisma.cuentaBancaria.create({ data: { nombre: `Reservada ${unique}`, banco: 'Otro banco', moneda: 'USD', inmobiliariaId: agency.id } });
+  const bankLabel = `${bankAccount.banco} · ${bankAccount.nombre} (${bankAccount.moneda})`;
+  const unusedLabel = `${unusedAccount.banco} · ${unusedAccount.nombre} (${unusedAccount.moneda})`;
   const baseline = {};
   for (const model of ['movimientoCaja', 'pago', 'pagoPropietario', 'liquidacion']) baseline[model] = await prisma[model].count({ where: { inmobiliariaId: agency.id } });
   const server = await new Promise(resolve => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
@@ -44,16 +49,21 @@ test('control interno: permisos, comprobantes, reportes y aislamiento de caja co
       assert.equal((await api(viewer, '/control-interno', 'POST', {})).status, 403);
       assert.equal((await api(viewer, '/control-interno/reportes/excel?periodo=2026-10')).status, 403);
       assert.equal((await api(viewer, '/control-interno/reportes/pdf?periodo=2026-10')).status, 403);
+      const adminOptions = await (await api(admin, '/control-interno/opciones')).json();
+      assert.ok(adminOptions.cuentasPago.includes(bankLabel));
+      const viewerOptions = await (await api(viewer, '/control-interno/opciones')).json();
+      assert.ok(!viewerOptions.cuentasPago.includes(unusedLabel), 'No expone el catálogo bancario sin permiso de caja');
     });
     const pdf = Buffer.from('%PDF-1.4\nComprobante de prueba\n%%EOF');
     const form = new FormData();
-    for (const [key, value] of Object.entries({ fecha: '2026-10-28', tipo: 'GASTO', detalle: 'Artículos de oficina', monto: '25000.50', moneda: 'ARS', categoria: 'Oficina' })) form.append(key, value);
+    for (const [key, value] of Object.entries({ fecha: '2026-10-28', tipo: 'GASTO', detalle: 'Artículos de oficina', monto: '25000.50', moneda: 'ARS', categoria: 'Oficina', cuentaPago: bankLabel })) form.append(key, value);
     form.append('comprobantes', new Blob([pdf], { type: 'application/pdf' }), 'Compra oficina.pdf');
     const createdResponse = await api(admin, '/control-interno', 'POST', form);
     assert.equal(createdResponse.status, 201, await createdResponse.clone().text());
     let record = await createdResponse.json();
     await t.test('guarda un comprobante y permite omitir el medio de pago', async () => {
       assert.equal(record.metodoPago, null);
+      assert.equal(record.cuentaPago, bankLabel);
       assert.equal(record.adjuntos.length, 1);
       const attachment = record.adjuntos[0];
       const response = await api(viewer, `/control-interno/adjuntos/${attachment.id}/archivo`);
@@ -61,6 +71,14 @@ test('control interno: permisos, comprobantes, reportes y aislamiento de caja co
       assert.deepEqual(Buffer.from(await response.arrayBuffer()), pdf);
       assert.equal((await api(denied, `/control-interno/adjuntos/${attachment.id}/archivo`)).status, 403);
       assert.equal((await api(admin, '/control-interno/adjuntos/2147483647/archivo')).status, 404);
+    });
+    await t.test('conserva la cuenta informada aunque se renombre en el catálogo bancario', async () => {
+      await prisma.cuentaBancaria.update({ where: { id: bankAccount.id }, data: { nombre: `Renombrada ${unique}` } });
+      const list = await (await api(admin, `/control-interno?periodo=2026-10&search=${encodeURIComponent(bankLabel)}`)).json();
+      assert.equal(list.data.find(row => row.id === record.id).cuentaPago, bankLabel);
+      const viewerOptions = await (await api(viewer, '/control-interno/opciones')).json();
+      assert.ok(viewerOptions.cuentasPago.includes(bankLabel), 'Puede reutilizar cuentas visibles en el propio control interno');
+      assert.ok(!viewerOptions.cuentasPago.includes(unusedLabel));
     });
     await t.test('rechaza archivos falsificados y formatos ajenos a comprobantes', async () => {
       const data = new FormData();
@@ -95,9 +113,14 @@ test('control interno: permisos, comprobantes, reportes y aislamiento de caja co
       await workbook.xlsx.load(Buffer.from(await response.arrayBuffer()));
       assert.equal(workbook.getWorksheet('Movimientos').rowCount, 7);
       assert.equal(workbook.getWorksheet('Resumen').getCell('C3').value, 25000.5);
+      assert.equal(workbook.getWorksheet('Movimientos').getCell('O6').value, bankLabel);
       const pdfResponse = await api(admin, '/control-interno/reportes/pdf?periodo=2026-10');
       assert.equal(pdfResponse.status, 200);
-      assert.equal(Buffer.from(await pdfResponse.arrayBuffer()).subarray(0, 5).toString(), '%PDF-');
+      const binary = Buffer.from(await pdfResponse.arrayBuffer());
+      assert.equal(binary.subarray(0, 5).toString(), '%PDF-');
+      const parsed = spawnSync('pdftotext', ['-', '-'], { input: binary, encoding: 'utf8' });
+      assert.equal(parsed.status, 0, parsed.stderr || parsed.error?.message);
+      assert.ok(parsed.stdout.replace(/\s+/g, ' ').includes(bankLabel));
     });
     await t.test('la edición es versionada y no permite modificar datos ajenos', async () => {
       const body = { fecha: '2026-10-28', detalle: 'Artículos de oficina corregido', monto: '27000', moneda: 'ARS', tipo: 'GASTO', version: record.version };
@@ -107,7 +130,23 @@ test('control interno: permisos, comprobantes, reportes y aislamiento de caja co
       assert.equal(response.status, 200, await response.clone().text());
       record = await response.json();
       assert.equal(record.version, 2);
+      assert.equal(record.cuentaPago, bankLabel, 'Un cliente anterior que omita el campo no borra la cuenta existente');
       assert.equal((await api(admin, `/control-interno/${record.id}`, 'PUT', body)).status, 409);
+    });
+    await t.test('permite corregir o quitar la cuenta con control de versión', async () => {
+      const updateAccount = async cuentaPago => {
+        const response = await api(admin, `/control-interno/${record.id}`, 'PUT', {
+          fecha: '2026-10-28', detalle: record.detalle, monto: record.monto, moneda: record.moneda, tipo: record.tipo, version: record.version, cuentaPago
+        });
+        assert.equal(response.status, 200, await response.clone().text());
+        record = await response.json();
+      };
+      await updateAccount('Cuenta personal · Billetera virtual');
+      assert.equal(record.cuentaPago, 'Cuenta personal · Billetera virtual');
+      await updateAccount('');
+      assert.equal(record.cuentaPago, null);
+      await updateAccount(bankLabel);
+      assert.equal(record.cuentaPago, bankLabel);
     });
     await t.test('la anulación conserva el motivo y comprobantes y excluye el importe de los totales', async () => {
       const response = await api(admin, `/control-interno/${record.id}/anular`, 'POST', { version: record.version, motivo: 'Movimiento cargado por duplicado' });
@@ -115,6 +154,7 @@ test('control interno: permisos, comprobantes, reportes y aislamiento de caja co
       const canceled = await response.json();
       assert.ok(canceled.anuladoEn);
       assert.equal(canceled.adjuntos.length, 1);
+      assert.equal(canceled.cuentaPago, bankLabel);
       assert.equal(canceled.motivoAnulacion, 'Movimiento cargado por duplicado');
       const all = await (await api(admin, `/control-interno?periodo=2026-10&estado=TODOS&creadoPorId=${users[0].id}`)).json();
       assert.equal(all.meta.total, 3);
@@ -140,6 +180,7 @@ test('control interno: permisos, comprobantes, reportes y aislamiento de caja co
     await prisma.usuario.deleteMany({ where: { id: { in: users.map(user => user.id) } } });
     await prisma.rol.delete({ where: { id: role.id } });
     await prisma.rol.delete({ where: { id: deniedRole.id } });
+    await prisma.cuentaBancaria.deleteMany({ where: { id: { in: [bankAccount.id, unusedAccount.id] } } });
     if (!existingAgency) await prisma.inmobiliaria.delete({ where: { id: agency.id } });
     await prisma.$disconnect();
   }

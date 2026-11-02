@@ -12,6 +12,8 @@ export const movimientoInternoSchema = z.object({
     moneda: z.enum(['ARS', 'USD']).default('ARS'),
     categoria: optionalText(80),
     metodoPago: optionalText(80),
+    cuentaPago: z.string().trim().max(220, 'La cuenta admite hasta 220 caracteres').nullable().optional()
+        .transform(value => value === undefined ? undefined : value || null),
     observaciones: optionalText(2000)
 });
 

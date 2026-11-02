@@ -27,7 +27,7 @@ export function internalMovementWhere(inmobiliariaId: number, filters: FiltroCon
         ...(filters.categoria ? { categoria: filters.categoria } : {}),
         ...(filters.metodoPago ? { metodoPago: filters.metodoPago } : {}),
         ...(filters.creadoPorId ? { creadoPorId: filters.creadoPorId } : {}),
-        ...(filters.search ? { OR: ['detalle', 'observaciones'].map(field => ({ [field]: { contains: filters.search, mode: 'insensitive' } })) } : {})
+        ...(filters.search ? { OR: ['detalle', 'observaciones', 'cuentaPago'].map(field => ({ [field]: { contains: filters.search, mode: 'insensitive' } })) } : {})
     };
 }
 

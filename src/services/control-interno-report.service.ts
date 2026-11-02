@@ -19,21 +19,21 @@ export async function buildInternalExcel({ rows, filters, agency }: InternalRepo
     });
     sheet.columns = [
         { width: 9 }, { width: 14 }, { width: 13 }, { width: 44 }, { width: 23 }, { width: 23 },
-        { width: 12 }, { width: 20 }, { width: 30 }, { width: 16 }, { width: 44 }, { width: 55 }, { width: 28 }, { width: 23 }
+        { width: 12 }, { width: 20 }, { width: 30 }, { width: 16 }, { width: 44 }, { width: 55 }, { width: 28 }, { width: 23 }, { width: 36 }
     ];
-    sheet.mergeCells('A1:N1');
+    sheet.mergeCells('A1:O1');
     sheet.getCell('A1').value = `${agency} · Control interno`;
     sheet.getCell('A1').font = { size: 17, bold: true, color: { argb: 'FF4338CA' } };
-    sheet.mergeCells('A2:N2');
+    sheet.mergeCells('A2:O2');
     sheet.getCell('A2').value = internalReportFilterLabel(filters);
     sheet.getCell('A2').alignment = { wrapText: true };
     sheet.getRow(2).height = 35;
-    sheet.mergeCells('A3:N3');
+    sheet.mergeCells('A3:O3');
     sheet.getCell('A3').value = `Emitido: ${formatDatePdf(argentinaDateOnly())}. Los anulados se muestran para consulta y se excluyen de los totales. Importes separados por moneda.`;
     sheet.getCell('A3').alignment = { wrapText: true };
     sheet.getRow(3).height = 30;
     const header = sheet.getRow(5);
-    header.values = ['ID', 'Fecha', 'Tipo', 'Detalle', 'Categoría', 'Medio de pago', 'Moneda', 'Importe', 'Cargado por', 'Estado', 'Motivo de anulación', 'Observaciones', 'Comprobantes', 'Fecha de carga'];
+    header.values = ['ID', 'Fecha', 'Tipo', 'Detalle', 'Categoría', 'Medio de pago', 'Moneda', 'Importe', 'Cargado por', 'Estado', 'Motivo de anulación', 'Observaciones', 'Comprobantes', 'Fecha de carga', 'Cuenta de origen / destino'];
     header.eachCell(cell => {
         cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4338CA' } };
@@ -42,7 +42,7 @@ export async function buildInternalExcel({ rows, filters, agency }: InternalRepo
         const added = sheet.addRow([
             row.id, row.fecha, row.tipo === 'GASTO' ? 'Gasto' : 'Ingreso', row.detalle, row.categoria || '', row.metodoPago || '', row.moneda,
             Number(row.monto), row.creadoPor.nombreCompleto, state(row), row.motivoAnulacion || '', row.observaciones || '',
-            row.adjuntos.map(file => file.nombreArchivo).join('\n'), row.fechaCreacion
+            row.adjuntos.map(file => file.nombreArchivo).join('\n'), row.fechaCreacion, row.cuentaPago || ''
         ]);
         added.getCell(2).numFmt = 'dd/mm/yyyy';
         added.getCell(8).numFmt = '#,##0.00';
@@ -50,8 +50,8 @@ export async function buildInternalExcel({ rows, filters, agency }: InternalRepo
         added.alignment = { vertical: 'top', wrapText: true };
         if (row.anuladoEn) added.font = { color: { argb: 'FF6B7280' } };
     }
-    sheet.autoFilter = { from: 'A5', to: `N${Math.max(sheet.rowCount, 5)}` };
-    sheet.pageSetup.printArea = `A1:N${Math.max(sheet.rowCount, 5)}`;
+    sheet.autoFilter = { from: 'A5', to: `O${Math.max(sheet.rowCount, 5)}` };
+    sheet.pageSetup.printArea = `A1:O${Math.max(sheet.rowCount, 5)}`;
     const summary = book.addWorksheet('Resumen', { pageSetup: { paperSize: 9, orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 1 } });
     summary.columns = [{ width: 18 }, { width: 23 }, { width: 23 }, { width: 23 }];
     summary.addRow(['Control interno', internalReportMonthLabel(filters.periodo)]);
@@ -73,8 +73,8 @@ export function buildInternalPdf({ rows, filters, agency }: InternalReport): Pro
         doc.on('error', reject);
         const left = 38;
         const width = doc.page.width - 76;
-        const columns = [52, 42, 181, 70, 70, 35, 82, 91, 62, 44];
-        const headers = ['Fecha', 'Tipo', 'Detalle', 'Categoría', 'Medio', 'Moneda', 'Importe', 'Cargado por', 'Estado', 'Adj.'];
+        const columns = [52, 42, 160, 65, 125, 35, 82, 86, 62, 44];
+        const headers = ['Fecha', 'Tipo', 'Detalle', 'Categoría', 'Medio / cuenta', 'Moneda', 'Importe', 'Cargado por', 'Estado', 'Adj.'];
         let y = 0;
         const startPage = () => {
             doc.fillColor('#4338CA').font('Helvetica-Bold').fontSize(16).text(`${agency} · Control interno`, left, 34, { width });
@@ -91,7 +91,8 @@ export function buildInternalPdf({ rows, filters, agency }: InternalReport): Pro
         };
         startPage();
         for (const row of rows) {
-            const values = [formatDatePdf(row.fecha), row.tipo === 'GASTO' ? 'Gasto' : 'Ingreso', row.detalle, row.categoria || '—', row.metodoPago || '—', row.moneda,
+            const paymentDetails = [row.metodoPago || 'Medio sin especificar', row.cuentaPago ? `Cuenta: ${row.cuentaPago}` : null].filter(Boolean).join('\n');
+            const values = [formatDatePdf(row.fecha), row.tipo === 'GASTO' ? 'Gasto' : 'Ingreso', row.detalle, row.categoria || '—', paymentDetails, row.moneda,
                 formatCurrency(Number(row.monto), row.moneda), row.creadoPor.nombreCompleto, state(row), String(row.adjuntos.length)];
             doc.font('Helvetica').fontSize(8);
             const height = Math.max(25, ...values.map((value, index) => doc.heightOfString(value, { width: columns[index] - 8 }) + 12));
