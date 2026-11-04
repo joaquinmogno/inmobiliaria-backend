@@ -851,10 +851,17 @@ enum TipoMovimientoInterno {
   GASTO
 }
 
+enum AmbitoMovimientoInterno {
+  INTERNO
+  TEODORO
+  DANIEL
+}
+
 // Registro de control personal. No participa en caja, cobros ni liquidaciones.
 model MovimientoInterno {
   id                 Int                        @id @default(autoincrement())
   version            Int                        @default(1)
+  ambito             AmbitoMovimientoInterno     @default(INTERNO)
   fecha              DateTime                   @db.Date
   tipo               TipoMovimientoInterno      @default(GASTO)
   detalle            String                     @db.VarChar(255)
@@ -878,9 +885,9 @@ model MovimientoInterno {
   anuladoPor         Usuario?                   @relation("MovimientoInternoAnuladoPor", fields: [anuladoPorId], references: [id], onDelete: SetNull)
   adjuntos           AdjuntoMovimientoInterno[]
 
-  @@index([inmobiliariaId, fecha, id])
-  @@index([inmobiliariaId, anuladoEn, moneda, tipo])
-  @@index([inmobiliariaId, categoria])
+  @@index([inmobiliariaId, ambito, fecha, id])
+  @@index([inmobiliariaId, ambito, anuladoEn, moneda, tipo], map: "MovimientoInterno_ambito_totales_idx")
+  @@index([inmobiliariaId, ambito, categoria])
 }
 
 model AdjuntoMovimientoInterno {

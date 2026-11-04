@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, type AmbitoMovimientoInterno } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { parseDateOnly } from '../utils/argentina-date';
 import type { FiltroControlInterno } from '../validation/control-interno.schemas';
@@ -15,11 +15,12 @@ export const internalMovementInclude = {
 
 export type InternalMovementRow = Prisma.MovimientoInternoGetPayload<{ include: typeof internalMovementInclude }>;
 
-export function internalMovementWhere(inmobiliariaId: number, filters: FiltroControlInterno): Prisma.MovimientoInternoWhereInput {
+export function internalMovementWhere(inmobiliariaId: number, filters: FiltroControlInterno, ambito: AmbitoMovimientoInterno = 'INTERNO'): Prisma.MovimientoInternoWhereInput {
     const start = parseDateOnly(`${filters.periodo}-01`);
     const end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1));
     return {
         inmobiliariaId,
+        ambito,
         fecha: { gte: start, lt: end },
         ...(filters.estado === 'TODOS' ? {} : { anuladoEn: filters.estado === 'ANULADOS' ? { not: null } : null }),
         ...(filters.tipo ? { tipo: filters.tipo } : {}),

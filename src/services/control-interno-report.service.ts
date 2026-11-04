@@ -6,10 +6,10 @@ import { formatDatePdf } from './liquidacion-pdf.service';
 import { internalReportFilterLabel, internalReportMonthLabel, summarizeInternalMovements, type InternalMovementRow } from './control-interno.service';
 import type { FiltroControlInterno } from '../validation/control-interno.schemas';
 
-type InternalReport = { rows: InternalMovementRow[]; filters: FiltroControlInterno; agency: string };
+type InternalReport = { rows: InternalMovementRow[]; filters: FiltroControlInterno; agency: string; title?: string };
 const state = (row: InternalMovementRow) => row.anuladoEn ? 'Anulado' : 'Vigente';
 
-export async function buildInternalExcel({ rows, filters, agency }: InternalReport) {
+export async function buildInternalExcel({ rows, filters, agency, title = 'Control interno' }: InternalReport) {
     const book = new ExcelJS.Workbook();
     book.creator = 'PropControl';
     book.created = new Date();
@@ -22,7 +22,7 @@ export async function buildInternalExcel({ rows, filters, agency }: InternalRepo
         { width: 12 }, { width: 20 }, { width: 30 }, { width: 16 }, { width: 44 }, { width: 55 }, { width: 28 }, { width: 23 }, { width: 36 }
     ];
     sheet.mergeCells('A1:O1');
-    sheet.getCell('A1').value = `${agency} · Control interno`;
+    sheet.getCell('A1').value = `${agency} · ${title}`;
     sheet.getCell('A1').font = { size: 17, bold: true, color: { argb: 'FF4338CA' } };
     sheet.mergeCells('A2:O2');
     sheet.getCell('A2').value = internalReportFilterLabel(filters);
@@ -54,7 +54,7 @@ export async function buildInternalExcel({ rows, filters, agency }: InternalRepo
     sheet.pageSetup.printArea = `A1:O${Math.max(sheet.rowCount, 5)}`;
     const summary = book.addWorksheet('Resumen', { pageSetup: { paperSize: 9, orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 1 } });
     summary.columns = [{ width: 18 }, { width: 23 }, { width: 23 }, { width: 23 }];
-    summary.addRow(['Control interno', internalReportMonthLabel(filters.periodo)]);
+    summary.addRow([title, internalReportMonthLabel(filters.periodo)]);
     summary.addRow(['Moneda', 'Ingresos', 'Gastos', 'Diferencia']);
     summarizeInternalMovements(rows).forEach(total => summary.addRow([total.moneda, total.ingresos, total.gastos, total.diferencia]));
     summary.getRow(2).font = { bold: true };
@@ -64,7 +64,7 @@ export async function buildInternalExcel({ rows, filters, agency }: InternalRepo
     return Buffer.from(await book.xlsx.writeBuffer());
 }
 
-export function buildInternalPdf({ rows, filters, agency }: InternalReport): Promise<Buffer> {
+export function buildInternalPdf({ rows, filters, agency, title = 'Control interno' }: InternalReport): Promise<Buffer> {
     return new Promise((resolve, reject) => {
         const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 38, bufferPages: true });
         const chunks: Buffer[] = [];
@@ -77,7 +77,7 @@ export function buildInternalPdf({ rows, filters, agency }: InternalReport): Pro
         const headers = ['Fecha', 'Tipo', 'Detalle', 'Categoría', 'Medio / cuenta', 'Moneda', 'Importe', 'Cargado por', 'Estado', 'Adj.'];
         let y = 0;
         const startPage = () => {
-            doc.fillColor('#4338CA').font('Helvetica-Bold').fontSize(16).text(`${agency} · Control interno`, left, 34, { width });
+            doc.fillColor('#4338CA').font('Helvetica-Bold').fontSize(16).text(`${agency} · ${title}`, left, 34, { width });
             const filterY = doc.y + 7;
             doc.fillColor('#374151').font('Helvetica').fontSize(8).text(internalReportFilterLabel(filters), left, filterY, { width });
             y = Math.max(91, doc.y + 12);
@@ -118,7 +118,7 @@ export function buildInternalPdf({ rows, filters, agency }: InternalReport): Pro
         const pages = doc.bufferedPageRange();
         for (let index = pages.start; index < pages.start + pages.count; index++) {
             doc.switchToPage(index);
-            doc.fillColor('#6B7280').font('Helvetica').fontSize(7).text(`Control interno independiente · Anulados excluidos de totales · ${formatDatePdf(argentinaDateOnly())} · Página ${index + 1} de ${pages.count}`, left, doc.page.height - 35, { width, align: 'center', lineBreak: false });
+            doc.fillColor('#6B7280').font('Helvetica').fontSize(7).text(`${title} · Anulados excluidos de totales · ${formatDatePdf(argentinaDateOnly())} · Página ${index + 1} de ${pages.count}`, left, doc.page.height - 35, { width, align: 'center', lineBreak: false });
         }
         doc.end();
     });
