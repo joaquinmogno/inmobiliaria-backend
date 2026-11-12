@@ -1,4 +1,5 @@
 import type PDFKit from 'pdfkit';
+import { Decimal } from '@prisma/client/runtime/library';
 import { formatCurrency } from '../utils/currency';
 
 type DebtSummaryPdf = {
@@ -32,6 +33,40 @@ export const ensurePdfSpace = (doc: PDFKit.PDFDocument, y: number, requiredHeigh
     if (y + requiredHeight < doc.page.height - 70) return y;
     doc.addPage();
     return 50;
+};
+
+export const groupPdfAmountsByCurrency = (rows: Array<{ monto: number; moneda?: string }>, fallbackCurrency: string) => {
+    const totals = new Map<string, Decimal>();
+    rows.forEach(row => {
+        const currency = row.moneda || fallbackCurrency;
+        totals.set(currency, (totals.get(currency) || new Decimal(0)).plus(row.monto));
+    });
+    return [...totals].map(([moneda, monto]) => ({ moneda, monto: monto.toNumber() }));
+};
+
+export const drawCurrencyTotalsPdf = (
+    doc: PDFKit.PDFDocument,
+    initialY: number,
+    pageWidth: number,
+    title: string,
+    amounts: Array<{ monto: number; moneda: string }>,
+    { background, color, prominent = false, discount = false }: {
+        background: string; color: string; prominent?: boolean; discount?: boolean;
+    }
+) => {
+    let y = initialY;
+    amounts.forEach(amount => {
+        const label = `${title}${amounts.length > 1 ? ` (${amount.moneda})` : ''}`;
+        doc.font('Helvetica-Bold').fontSize(prominent ? 11 : 9);
+        const height = Math.max(prominent ? 36 : 22, doc.heightOfString(label, { width: pageWidth - 145 }) + 16);
+        y = ensurePdfSpace(doc, y, height + 10);
+        doc.rect(50, y, pageWidth, height).fill(background);
+        const formatted = formatCurrencyPdf(amount.monto, amount.moneda);
+        doc.fillColor(color).text(label, 58, y + 8, { width: pageWidth - 145 })
+            .text(discount ? `(${formatted})` : formatted, 50 + pageWidth - 125, y + 8, { width: 115, align: 'right' });
+        y += height;
+    });
+    return y + (prominent ? 14 : 10);
 };
 
 export const getLiquidationNoteForRecipient = (liquidacion: {
@@ -69,7 +104,7 @@ export const drawDebtSummaryPdf = (
     initialY: number,
     pageWidth: number,
     debtSummary: DebtSummaryPdf,
-    moneyPdf: (amount: number) => string,
+    moneyPdf: (amount: number, moneda?: string) => string,
     title = 'DEUDA ANTERIOR DEL CONTRATO'
 ) => {
     let y = initialY;
@@ -89,17 +124,17 @@ export const drawDebtSummaryPdf = (
         y = ensurePdfSpace(doc, y, 45);
         doc.fillColor('#111827').fontSize(9).font('Helvetica')
             .text(formatPeriodPdf(item.periodo), 58, y + 5)
-            .text(moneyPdf(item.neto), 190, y + 5, { width: 70, align: 'right' })
-            .text(moneyPdf(item.pagado), 300, y + 5, { width: 70, align: 'right' });
-        doc.fillColor('#B91C1C').font('Helvetica-Bold').text(moneyPdf(item.deuda), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
+            .text(moneyPdf(item.neto, item.moneda), 190, y + 5, { width: 70, align: 'right' })
+            .text(moneyPdf(item.pagado, item.moneda), 300, y + 5, { width: 70, align: 'right' });
+        doc.fillColor('#B91C1C').font('Helvetica-Bold').text(moneyPdf(item.deuda, item.moneda), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
         doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#FDE68A').lineWidth(0.5).stroke();
         y += 20;
     });
-    doc.rect(50, y, pageWidth, 22).fill('#FEF3C7');
-    doc.fillColor('#92400E').fontSize(9).font('Helvetica-Bold')
-        .text('TOTAL DEUDA ANTERIOR', 58, y + 7)
-        .text(moneyPdf(debtSummary.totalDeuda), 50 + pageWidth - 120, y + 7, { width: 110, align: 'right' });
-    return y + 34;
+    const amounts = groupPdfAmountsByCurrency(
+        debtSummary.detalle.length ? debtSummary.detalle.map(item => ({ monto: item.deuda, moneda: item.moneda }))
+            : [{ monto: debtSummary.totalDeuda, moneda: debtSummary.moneda }], debtSummary.moneda
+    );
+    return drawCurrencyTotalsPdf(doc, y, pageWidth, 'TOTAL DEUDA ANTERIOR', amounts, { background: '#FEF3C7', color: '#92400E' });
 };
 
 export const drawPaymentRowsPdf = (
@@ -107,7 +142,7 @@ export const drawPaymentRowsPdf = (
     initialY: number,
     pageWidth: number,
     payments: any[],
-    moneyPdf: (amount: number) => string
+    moneyPdf: (amount: number, moneda?: string) => string
 ) => {
     let y = initialY;
     const dateX = 58;
@@ -131,7 +166,7 @@ export const drawPaymentRowsPdf = (
             .text(formatDatePdf(payment.fechaPago), dateX, y + 5, { width: 70 })
             .text(methodText, methodX, y + 5, { width: 80 })
             .text(detailText, detailX, y + 5, { width: detailWidth });
-        doc.fillColor('#059669').font('Helvetica-Bold').text(moneyPdf(Number(payment.monto)), amountX, y + 5, { width: amountWidth, align: 'right' });
+        doc.fillColor('#059669').font('Helvetica-Bold').text(moneyPdf(Number(payment.monto), payment.moneda), amountX, y + 5, { width: amountWidth, align: 'right' });
         doc.moveTo(50, y + rowHeight - 2).lineTo(50 + pageWidth, y + rowHeight - 2).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
         y += rowHeight;
     });

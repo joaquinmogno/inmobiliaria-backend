@@ -38,6 +38,8 @@ import {
 } from '../services/liquidacion-financial.service';
 import { getMonthlyLiquidationPreparation } from '../services/liquidation-preparation.service';
 import {
+    drawCurrencyTotalsPdf,
+    groupPdfAmountsByCurrency,
     drawDebtSummaryPdf,
     drawLiquidationNotePdf,
     drawPaymentRowsPdf,
@@ -56,6 +58,7 @@ import { getOutstandingOwnerAdvances } from '../services/owner-advance.service';
 import {
     createLiquidationVoucherSnapshot,
     readLiquidationVoucherSnapshot,
+    restoreVoucherSnapshotCurrencies,
     voucherSnapshotToPdfData
 } from '../services/liquidation-voucher.service';
 import { calculateLiquidationAdjustment } from '../services/liquidation-adjustment.service';
@@ -1758,9 +1761,11 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
         if (req.query.version !== undefined && !comprobante) {
             return res.status(404).json({ message: 'No existe esa versión del comprobante', code: 'VOUCHER_VERSION_NOT_FOUND' });
         }
-        const snapshot = readLiquidationVoucherSnapshot(comprobante?.fotografia);
+        const storedSnapshot = readLiquidationVoucherSnapshot(comprobante?.fotografia);
+        const snapshot = storedSnapshot ? await restoreVoucherSnapshotCurrencies(storedSnapshot, prisma) : null;
         const liquidacion: any = snapshot ? voucherSnapshotToPdfData(snapshot) : liquidacionViva;
-        const moneyPdf = (amount: number) => formatCurrencyPdf(amount, liquidacion.moneda);
+        const moneyPdf = (amount: number, moneda = liquidacion.moneda) => formatCurrencyPdf(amount, moneda);
+        const currencySummaries = getLiquidationCurrencySummaries(liquidacion);
         const deudaAnterior = snapshot?.deudaAnterior || await getContractDebtSummary(liquidacion.contratoId, inmobiliariaId, Number(id));
 
         const doc = new PDFDocument({ margin: 50, size: 'A4' });
@@ -1844,21 +1849,23 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
         y += 20;
 
         liqAny.movimientos.filter((m: any) => m.tipo === 'INGRESO').forEach((m: any) => {
-            doc.fillColor('#111827').fontSize(9).font('Helvetica').text(m.concepto, 58, y + 5);
-            doc.text(moneyPdf(Number(m.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
-            doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
-            y += 20;
+            doc.fontSize(9).font('Helvetica');
+            const rowHeight = Math.max(20, doc.heightOfString(m.concepto, { width: pageWidth - 145 }) + 10);
+            y = ensurePdfSpace(doc, y, rowHeight + 10);
+            doc.fillColor('#111827').text(m.concepto, 58, y + 5, { width: pageWidth - 145 });
+            doc.text(moneyPdf(Number(m.monto), m.moneda), 50 + pageWidth - 125, y + 5, { width: 115, align: 'right' });
+            doc.moveTo(50, y + rowHeight - 2).lineTo(50 + pageWidth, y + rowHeight - 2).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
+            y += rowHeight;
         });
 
-        doc.rect(50, y, pageWidth, 20).fill('#ECFDF5');
-        doc.fillColor('#065F46').fontSize(9).font('Helvetica-Bold')
-            .text('SUBTOTAL INGRESOS', 58, y + 6)
-            .text(moneyPdf(Number(liquidacion.totalIngresos)), 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
-        y += 30;
+        y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'SUBTOTAL INGRESOS',
+            currencySummaries.map(summary => ({ moneda: summary.moneda, monto: summary.totalIngresos })),
+            { background: '#ECFDF5', color: '#065F46' });
 
         // Descuentos
         const descuentos = liquidacion.movimientos.filter((m: any) => m.tipo === 'DESCUENTO');
         if (descuentos.length > 0) {
+            y = ensurePdfSpace(doc, y, 80);
             doc.fillColor(INDIGO).fontSize(11).font('Helvetica-Bold').text('EGRESOS / DESCUENTOS', 50, y);
             doc.moveTo(50, y + 14).lineTo(50 + pageWidth, y + 14).strokeColor(INDIGO).lineWidth(1).stroke();
             y += 22;
@@ -1870,25 +1877,24 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
             y += 20;
 
             descuentos.forEach((m: any) => {
-                doc.fillColor('#111827').fontSize(9).font('Helvetica').text(m.concepto, 58, y + 5);
-                doc.fillColor('#DC2626').text(`(${moneyPdf(Number(m.monto))})`, 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
-                doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
-                y += 20;
+                doc.fontSize(9).font('Helvetica');
+                const rowHeight = Math.max(20, doc.heightOfString(m.concepto, { width: pageWidth - 145 }) + 10);
+                y = ensurePdfSpace(doc, y, rowHeight + 10);
+                doc.fillColor('#111827').text(m.concepto, 58, y + 5, { width: pageWidth - 145 });
+                doc.fillColor('#DC2626').text(`(${moneyPdf(Number(m.monto), m.moneda)})`, 50 + pageWidth - 125, y + 5, { width: 115, align: 'right' });
+                doc.moveTo(50, y + rowHeight - 2).lineTo(50 + pageWidth, y + rowHeight - 2).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
+                y += rowHeight;
             });
 
-            doc.rect(50, y, pageWidth, 20).fill('#FEF2F2');
-            doc.fillColor('#991B1B').fontSize(9).font('Helvetica-Bold')
-                .text('SUBTOTAL DESCUENTOS', 58, y + 6)
-                .text(`(${moneyPdf(Number(liquidacion.totalDescuentos))})`, 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
-            y += 30;
+            y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'SUBTOTAL DESCUENTOS',
+                currencySummaries.map(summary => ({ moneda: summary.moneda, monto: summary.totalDescuentos })),
+                { background: '#FEF2F2', color: '#991B1B', discount: true });
         }
 
         // Neto
-        doc.rect(50, y, pageWidth, 36).fill(INDIGO);
-        doc.fillColor('white').fontSize(11).font('Helvetica-Bold')
-            .text('NETO A PAGAR', 58, y + 12)
-            .text(moneyPdf(Number(liquidacion.netoACobrar)), 50 + pageWidth - 120, y + 12, { width: 110, align: 'right' });
-        y += 50;
+        y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'NETO A PAGAR',
+            currencySummaries.map(summary => ({ moneda: summary.moneda, monto: summary.netoACobrar })),
+            { background: INDIGO, color: 'white', prominent: true });
 
         y = drawVoucherCorrectionsPdf(doc, y, pageWidth, snapshot, moneyPdf, 'INQUILINO');
         y = drawLiquidationNotePdf(doc, y, pageWidth, liquidacion, 'INQUILINO');
@@ -1929,28 +1935,22 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
             y += 30;
         }
 
-        // Saldo pendiente
-        const totalPagado = (liqAny.pagos || []).reduce((acc: number, p: any) => acc + Number(p.monto), 0)
-            + creditApplications.reduce((acc: number, application: any) => acc + Number(application.monto), 0);
-        const saldoPendiente = Number(liquidacion.netoACobrar) - totalPagado;
-        if (saldoPendiente > 0) {
-            y += 10;
-            doc.fillColor('#991B1B').fontSize(9).font('Helvetica-Bold')
-                .text('SALDO PENDIENTE', 58, y)
-                .text(moneyPdf(saldoPendiente), 50 + pageWidth - 80, y, { width: 70, align: 'right' });
-            y += 18;
+        // Cada cobro cancela sólo el saldo de su moneda.
+        const pendingAmounts = currencySummaries.filter(summary => summary.saldoInquilino > 0)
+            .map(summary => ({ moneda: summary.moneda, monto: summary.saldoInquilino }));
+        if (pendingAmounts.length) {
+            y = drawCurrencyTotalsPdf(doc, y + 10, pageWidth, 'SALDO PENDIENTE', pendingAmounts,
+                { background: '#FEF2F2', color: '#991B1B' });
         }
 
         if (deudaAnterior.totalDeuda > 0) {
-            y += 12;
-            y = drawDebtSummaryPdf(doc, y, pageWidth, deudaAnterior, moneyPdf);
-
-            const totalARegularizar = Math.max(saldoPendiente, 0) + deudaAnterior.totalDeuda;
-            y = ensurePdfSpace(doc, y, 50);
-            doc.rect(50, y, pageWidth, 34).fill('#7F1D1D');
-            doc.fillColor('white').fontSize(11).font('Helvetica-Bold')
-                .text('TOTAL A REGULARIZAR', 58, y + 11)
-                .text(moneyPdf(totalARegularizar), 50 + pageWidth - 120, y + 11, { width: 110, align: 'right' });
+            y = drawDebtSummaryPdf(doc, y + 12, pageWidth, deudaAnterior, moneyPdf);
+            const previousAmounts = deudaAnterior.detalle.length
+                ? deudaAnterior.detalle.map(item => ({ moneda: item.moneda, monto: item.deuda }))
+                : [{ moneda: deudaAnterior.moneda, monto: deudaAnterior.totalDeuda }];
+            y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'TOTAL A REGULARIZAR',
+                groupPdfAmountsByCurrency([...pendingAmounts, ...previousAmounts], liquidacion.moneda),
+                { background: '#7F1D1D', color: 'white', prominent: true });
         }
 
         // Footer
@@ -2001,9 +2001,11 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
         if (req.query.version !== undefined && !comprobante) {
             return res.status(404).json({ message: 'No existe esa versión del comprobante', code: 'VOUCHER_VERSION_NOT_FOUND' });
         }
-        const snapshot = readLiquidationVoucherSnapshot(comprobante?.fotografia);
+        const storedSnapshot = readLiquidationVoucherSnapshot(comprobante?.fotografia);
+        const snapshot = storedSnapshot ? await restoreVoucherSnapshotCurrencies(storedSnapshot, prisma) : null;
         const liquidacion: any = snapshot ? voucherSnapshotToPdfData(snapshot) : liquidacionViva;
-        const moneyPdf = (amount: number) => formatCurrencyPdf(amount, liquidacion.moneda);
+        const moneyPdf = (amount: number, moneda = liquidacion.moneda) => formatCurrencyPdf(amount, moneda);
+        const currencySummaries = getLiquidationCurrencySummaries(liquidacion);
         const deudaAnterior = snapshot?.deudaAnterior || await getContractDebtSummary(liquidacion.contratoId, inmobiliariaId, Number(id));
 
         const doc = new PDFDocument({ margin: 50, size: 'A4' });
@@ -2085,7 +2087,9 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
 
         // Ingresos
         const ingresosPropietario = liqAnyProp.movimientos.filter((m: any) => m.tipo === 'INGRESO' && !m.esParaInmobiliaria);
-        const totalIngresosProp = ingresosPropietario.reduce((acc: number, m: any) => acc + Number(m.monto), 0);
+        const totalIngresosProp = groupPdfAmountsByCurrency(
+            ingresosPropietario.map((m: any) => ({ monto: Number(m.monto), moneda: m.moneda })), liquidacion.moneda
+        );
 
         doc.fillColor(INDIGO).fontSize(11).font('Helvetica-Bold').text('INGRESOS', 50, y);
         doc.moveTo(50, y + 14).lineTo(50 + pageWidth, y + 14).strokeColor(INDIGO).lineWidth(1).stroke();
@@ -2098,23 +2102,27 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
         y += 20;
 
         ingresosPropietario.forEach((m: any) => {
-            doc.fillColor('#111827').fontSize(9).font('Helvetica').text(m.concepto, 58, y + 5);
-            doc.text(moneyPdf(Number(m.monto)), 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
-            doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
-            y += 20;
+            doc.fontSize(9).font('Helvetica');
+            const rowHeight = Math.max(20, doc.heightOfString(m.concepto, { width: pageWidth - 145 }) + 10);
+            y = ensurePdfSpace(doc, y, rowHeight + 10);
+            doc.fillColor('#111827').text(m.concepto, 58, y + 5, { width: pageWidth - 145 });
+            doc.text(moneyPdf(Number(m.monto), m.moneda), 50 + pageWidth - 125, y + 5, { width: 115, align: 'right' });
+            doc.moveTo(50, y + rowHeight - 2).lineTo(50 + pageWidth, y + rowHeight - 2).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
+            y += rowHeight;
         });
 
-        doc.rect(50, y, pageWidth, 20).fill('#ECFDF5');
-        doc.fillColor('#065F46').fontSize(9).font('Helvetica-Bold')
-            .text('SUBTOTAL INGRESOS', 58, y + 6)
-            .text(moneyPdf(totalIngresosProp), 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
-        y += 30;
+        y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'SUBTOTAL INGRESOS',
+            totalIngresosProp.length ? totalIngresosProp : [{ monto: 0, moneda: liquidacion.moneda }],
+            { background: '#ECFDF5', color: '#065F46' });
 
         // Descuentos
         const descuentosPropietario = liquidacion.movimientos.filter((m: any) => m.tipo === 'DESCUENTO' && !m.esParaInmobiliaria);
-        const totalDescuentosProp = descuentosPropietario.reduce((acc: number, m: any) => acc + Number(m.monto), 0);
+        const totalDescuentosProp = groupPdfAmountsByCurrency(
+            descuentosPropietario.map((m: any) => ({ monto: Number(m.monto), moneda: m.moneda })), liquidacion.moneda
+        );
 
         if (descuentosPropietario.length > 0) {
+            y = ensurePdfSpace(doc, y, 80);
             doc.fillColor(INDIGO).fontSize(11).font('Helvetica-Bold').text('EGRESOS / DESCUENTOS', 50, y);
             doc.moveTo(50, y + 14).lineTo(50 + pageWidth, y + 14).strokeColor(INDIGO).lineWidth(1).stroke();
             y += 22;
@@ -2126,20 +2134,21 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
             y += 20;
 
             descuentosPropietario.forEach((m: any) => {
-                doc.fillColor('#111827').fontSize(9).font('Helvetica').text(m.concepto, 58, y + 5);
-                doc.fillColor('#DC2626').text(`(${moneyPdf(Number(m.monto))})`, 50 + pageWidth - 80, y + 5, { width: 70, align: 'right' });
-                doc.moveTo(50, y + 18).lineTo(50 + pageWidth, y + 18).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
-                y += 20;
+                doc.fontSize(9).font('Helvetica');
+                const rowHeight = Math.max(20, doc.heightOfString(m.concepto, { width: pageWidth - 145 }) + 10);
+                y = ensurePdfSpace(doc, y, rowHeight + 10);
+                doc.fillColor('#111827').text(m.concepto, 58, y + 5, { width: pageWidth - 145 });
+                doc.fillColor('#DC2626').text(`(${moneyPdf(Number(m.monto), m.moneda)})`, 50 + pageWidth - 125, y + 5, { width: 115, align: 'right' });
+                doc.moveTo(50, y + rowHeight - 2).lineTo(50 + pageWidth, y + rowHeight - 2).strokeColor('#E5E7EB').lineWidth(0.5).stroke();
+                y += rowHeight;
             });
 
-            doc.rect(50, y, pageWidth, 20).fill('#FEF2F2');
-            doc.fillColor('#991B1B').fontSize(9).font('Helvetica-Bold')
-                .text('SUBTOTAL DESCUENTOS', 58, y + 6)
-                .text(`(${moneyPdf(totalDescuentosProp)})`, 50 + pageWidth - 80, y + 6, { width: 70, align: 'right' });
-            y += 30;
+            y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'SUBTOTAL DESCUENTOS', totalDescuentosProp,
+                { background: '#FEF2F2', color: '#991B1B', discount: true });
         }
 
         // Honorarios inmobiliaria
+        y = ensurePdfSpace(doc, y, 80);
         const montoHonorarios = Number(liquidacion.montoHonorarios || 0);
         const porcentajeHonorarios = liquidacion.porcentajeHonorarios === null ? null : Number(liquidacion.porcentajeHonorarios);
         const pagaHonorarios: string = liquidacion.pagaHonorarios || contrato?.pagaHonorarios || 'INQUILINO';
@@ -2156,15 +2165,9 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
             .text(moneyPdf(montoHonorarios), 50 + pageWidth - 80, y + 7, { width: 70, align: 'right' });
         y += 32;
 
-        // El importe canónico se calcula al modificar el borrador y queda
-        // disponible de la misma forma para API, UI, pago y comprobante.
-        const netoParaPropietario = Number(liquidacion.montoPropietario);
-
-        doc.rect(50, y, pageWidth, 36).fill(TEAL);
-        doc.fillColor('white').fontSize(11).font('Helvetica-Bold')
-            .text('NETO A TRANSFERIR AL PROPIETARIO', 58, y + 12)
-            .text(moneyPdf(netoParaPropietario), 50 + pageWidth - 120, y + 12, { width: 110, align: 'right' });
-        y += 50;
+        y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'NETO A TRANSFERIR AL PROPIETARIO',
+            currencySummaries.map(summary => ({ moneda: summary.moneda, monto: summary.montoPropietario })),
+            { background: TEAL, color: 'white', prominent: true });
 
         y = drawVoucherCorrectionsPdf(doc, y, pageWidth, snapshot, moneyPdf, 'PROPIETARIO');
         y = drawLiquidationNotePdf(doc, y, pageWidth, liquidacion, 'PROPIETARIO');

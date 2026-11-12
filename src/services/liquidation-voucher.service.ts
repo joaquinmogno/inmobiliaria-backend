@@ -50,9 +50,9 @@ export type LiquidationVoucherSnapshot = {
         inquilinos: Array<{ id: number; esPrincipal: boolean; persona: Record<string, unknown> }>;
         propietarios: Array<{ id: number; esPrincipal: boolean; persona: Record<string, unknown> }>;
     };
-    movimientos: Array<{ id: number; tipo: string; concepto: string; monto: number; esParaInmobiliaria: boolean; observaciones: string | null }>;
-    pagos: Array<{ id: number; monto: number; fechaPago: string; metodoPago: string; comprobante: string | null; observaciones: string | null; cuenta?: string | null; imputacionesCuotas?: Array<{ cuotaId: number; monto: number; concepto: string; numeroCuota: number }> }>;
-    pagosPropietario?: Array<{ id: number; monto: number; fechaPago: string; metodoPago: string; comprobante: string | null; observaciones: string | null; cuenta: string }>;
+    movimientos: Array<{ id: number; tipo: string; concepto: string; monto: number; moneda?: string; esParaInmobiliaria: boolean; observaciones: string | null }>;
+    pagos: Array<{ id: number; monto: number; moneda?: string; fechaPago: string; metodoPago: string; comprobante: string | null; observaciones: string | null; cuenta?: string | null; imputacionesCuotas?: Array<{ cuotaId: number; monto: number; concepto: string; numeroCuota: number }> }>;
+    pagosPropietario?: Array<{ id: number; monto: number; moneda?: string; fechaPago: string; metodoPago: string; comprobante: string | null; observaciones: string | null; cuenta: string }>;
     aplicacionesCredito: Array<{ id: number; monto: number; fechaAplicacion: string; creditoInquilinoId: number; concepto: string }>;
     deudaAnterior: {
         totalDeuda: number;
@@ -257,17 +257,17 @@ export const createLiquidationVoucherSnapshot = async ({
             propietarios: liquidacion.contrato.propietarios.map(item => ({ id: item.personaId, esPrincipal: item.esPrincipal, persona: selectPersona(item.persona) }))
         },
         movimientos: liquidacion.movimientos.map(item => ({
-            id: item.id, tipo: item.tipo, concepto: item.concepto, monto: asNumber(item.monto),
+            id: item.id, tipo: item.tipo, concepto: item.concepto, monto: asNumber(item.monto), moneda: item.moneda,
             esParaInmobiliaria: item.esParaInmobiliaria, observaciones: item.observaciones || null
         })),
         pagos: liquidacion.pagos.map(item => ({
-            id: item.id, monto: asNumber(item.monto), fechaPago: asDate(item.fechaPago)!, metodoPago: item.metodoPago,
+            id: item.id, monto: asNumber(item.monto), moneda: item.moneda, fechaPago: asDate(item.fechaPago)!, metodoPago: item.metodoPago,
             comprobante: item.comprobante || null, observaciones: item.observaciones || null,
             cuenta: item.movimientoCaja?.cuentaBancaria ? `${item.movimientoCaja.cuentaBancaria.banco} · ${item.movimientoCaja.cuentaBancaria.nombre}` : item.movimientoCaja?.cuenta || null,
             imputacionesCuotas: item.imputacionesCuotas.map(allocation => ({ cuotaId: allocation.cuotaId, monto: asNumber(allocation.monto), concepto: allocation.cuota.plan.concepto, numeroCuota: allocation.cuota.numeroCuota }))
         })),
         pagosPropietario: liquidacion.pagosPropietario.map(item => ({
-            id: item.id, monto: asNumber(item.monto), fechaPago: asDate(item.fechaPago)!, metodoPago: item.metodoPago,
+            id: item.id, monto: asNumber(item.monto), moneda: item.moneda, fechaPago: asDate(item.fechaPago)!, metodoPago: item.metodoPago,
             comprobante: item.comprobante || null, observaciones: item.observaciones || null,
             cuenta: item.movimientoCaja?.cuentaBancaria ? `${item.movimientoCaja.cuentaBancaria.banco} · ${item.movimientoCaja.cuentaBancaria.nombre}` : item.cuenta
         })),
@@ -306,8 +306,40 @@ export const createLiquidationVoucherSnapshot = async ({
     });
 };
 
-// Adaptador para reutilizar los dos generadores PDF. Cuando hay fotografía no
-// se lee ningún dato vivo del contrato, de las personas ni de los movimientos.
+// Las primeras fotografías omitían la moneda de los renglones. Se recupera
+// únicamente ese dato del registro original, incluso si el pago fue anulado
+// después de emitir la versión. No se alteran la fotografía ni sus importes,
+// fechas o conceptos; una moneda ya guardada siempre tiene prioridad.
+export const restoreVoucherSnapshotCurrencies = async (
+    snapshot: LiquidationVoucherSnapshot,
+    db: Prisma.TransactionClient
+): Promise<LiquidationVoucherSnapshot> => {
+    const whereMissing = (rows: Array<{ id: number; moneda?: string }>) => ({
+        liquidacionId: snapshot.liquidacion.id,
+        id: { in: rows.filter(row => !row.moneda).map(row => row.id) }
+    });
+    const movementsWhere = whereMissing(snapshot.movimientos);
+    const paymentsWhere = whereMissing(snapshot.pagos);
+    const ownerPaymentsWhere = whereMissing(snapshot.pagosPropietario || []);
+    const select = { id: true, moneda: true } as const;
+    const [movements, payments, ownerPayments] = await Promise.all([
+        movementsWhere.id.in.length ? db.movimiento.findMany({ where: movementsWhere, select }) : [],
+        paymentsWhere.id.in.length ? db.pago.findMany({ where: paymentsWhere, select }) : [],
+        ownerPaymentsWhere.id.in.length ? db.pagoPropietario.findMany({ where: ownerPaymentsWhere, select }) : []
+    ]);
+    const restore = <T extends { id: number; moneda?: string }>(rows: T[], originals: Array<{ id: number; moneda: string }>) => {
+        const currencies = new Map(originals.map(row => [row.id, row.moneda]));
+        return rows.map(row => ({ ...row, moneda: row.moneda || currencies.get(row.id) || snapshot.liquidacion.moneda }));
+    };
+    return {
+        ...snapshot,
+        movimientos: restore(snapshot.movimientos, movements),
+        pagos: restore(snapshot.pagos, payments),
+        pagosPropietario: restore(snapshot.pagosPropietario || [], ownerPayments)
+    };
+};
+
+// Adaptador para reutilizar los dos generadores PDF con los datos históricos.
 export const voucherSnapshotToPdfData = (snapshot: LiquidationVoucherSnapshot) => ({
     id: snapshot.liquidacion.id,
     estado: snapshot.liquidacion.estado,

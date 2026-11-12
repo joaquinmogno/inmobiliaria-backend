@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   getVoucherSummary,
   readLiquidationVoucherSnapshot,
+  restoreVoucherSnapshotCurrencies,
   voucherSnapshotToPdfData,
 } = require('../dist/services/liquidation-voucher.service');
 
@@ -63,4 +64,52 @@ test('las notas se conservan en la fotografía y los comprobantes anteriores sig
   assert.equal(data.notaLiquidacion, withNote.liquidacion.notaLiquidacion);
   assert.equal(data.destinatarioNotaLiquidacion, 'PROPIETARIO');
   assert.equal(voucherSnapshotToPdfData(readLiquidationVoucherSnapshot(snapshot)).notaLiquidacion, null);
+});
+
+test('recupera sólo monedas omitidas de registros originales sin cambiar los datos históricos', async () => {
+  const legacy = structuredClone(snapshot);
+  legacy.liquidacion.moneda = 'USD';
+  legacy.movimientos = [
+    { ...legacy.movimientos[0], id: 10, monto: 1000, moneda: 'USD' },
+    { ...legacy.movimientos[0], id: 11, concepto: 'EDESUR', monto: 135760 },
+  ];
+  legacy.pagos = [{ id: 20, monto: 135760, fechaPago: '2026-10-10', observaciones: 'Dato histórico' }];
+  legacy.pagosPropietario = [{ id: 30, monto: 135760 }];
+  const before = structuredClone(legacy);
+  const original = (expectedIds, rows) => ({ findMany: async args => {
+    assert.deepEqual(args, { where: { liquidacionId: 154, id: { in: expectedIds } }, select: { id: true, moneda: true } });
+    // La consulta incluye registros anulados después de emitirse esta versión.
+    return rows;
+  } });
+  const restored = await restoreVoucherSnapshotCurrencies(legacy, {
+    movimiento: original([11], [{ id: 11, moneda: 'ARS' }]),
+    pago: original([20], [{ id: 20, moneda: 'ARS' }]),
+    pagoPropietario: original([30], [{ id: 30, moneda: 'ARS' }]),
+  });
+  assert.deepEqual(legacy, before);
+  assert.deepEqual(restored.movimientos.map(row => row.moneda), ['USD', 'ARS']);
+  assert.equal(restored.pagos[0].moneda, 'ARS');
+  assert.equal(restored.pagosPropietario[0].moneda, 'ARS');
+  assert.equal(restored.pagos[0].monto, 135760);
+  assert.equal(restored.pagos[0].observaciones, 'Dato histórico');
+  assert.deepEqual(restored.liquidacion, legacy.liquidacion);
+  assert.deepEqual(restored.contrato, legacy.contrato);
+});
+
+test('una fotografía con monedas es autosuficiente y no consulta los registros actuales', async () => {
+  const complete = structuredClone(snapshot);
+  complete.movimientos[0].moneda = 'USD';
+  complete.pagos = [{ id: 20, monto: 135760, moneda: 'ARS' }];
+  complete.pagosPropietario = [{ id: 30, monto: 135760, moneda: 'ARS' }];
+  const forbidden = { findMany: () => assert.fail('No debe leer datos actuales') };
+  assert.deepEqual(await restoreVoucherSnapshotCurrencies(complete, {
+    movimiento: forbidden, pago: forbidden, pagoPropietario: forbidden,
+  }), complete);
+});
+
+test('un comprobante antiguo sin registro original mantiene la moneda contractual como respaldo', async () => {
+  const empty = { findMany: async () => [] };
+  const restored = await restoreVoucherSnapshotCurrencies(snapshot, { movimiento: empty, pago: empty, pagoPropietario: empty });
+  assert.equal(restored.movimientos[0].moneda, 'ARS');
+  assert.equal(restored.movimientos[0].monto, 100000);
 });
