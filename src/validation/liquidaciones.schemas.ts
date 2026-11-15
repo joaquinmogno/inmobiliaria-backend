@@ -36,6 +36,11 @@ export const notaLiquidacionSchema = z.object({
     expectedVersion: optimisticVersionSchema
 });
 
+export const notaInternaContratoSchema = z.object({
+    texto: z.string().trim().max(3000, 'La nota interna no puede superar los 3000 caracteres').nullable().transform(value => value || null),
+    expectedVersion: optimisticVersionSchema
+}).strict();
+
 export const honorariosSchema = z.object({
     montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional(),
     porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional()),

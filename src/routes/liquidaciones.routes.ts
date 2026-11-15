@@ -20,6 +20,7 @@ import {
     liquidacionCreateSchema,
     movimientoSchema,
     notaLiquidacionSchema,
+    notaInternaContratoSchema,
     pagoPropietarioSchema,
     ajusteLiquidacionSchema,
     aplicarCreditoInquilinoSchema,
@@ -65,6 +66,7 @@ import { calculateLiquidationAdjustment } from '../services/liquidation-adjustme
 import { nextContractUpdateDate } from '../utils/contract-update-schedule';
 import { getLiquidationCurrencySummaries, getOwnerPaymentStateByCurrency } from '../services/liquidation-currency.service';
 import { updateLiquidationNote } from '../services/liquidation-note.service';
+import { updateContractInternalNote } from '../services/contract-internal-note.service';
 
 const router = Router();
 
@@ -799,6 +801,25 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
             resultado: 'FALLIDO', severidad: 'WARNING', detalle: error.message
         });
         res.status(error.statusCode || 500).json({ message: error.message || 'Error al confirmar liquidación', code: error.code });
+    }
+});
+
+router.patch('/:id/nota-interna', requirePermission('liquidaciones.editar'), validateBody(notaInternaContratoSchema), async (req, res) => {
+    const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
+    const liquidacionId = Number(req.params.id);
+    if (!Number.isInteger(liquidacionId) || liquidacionId <= 0) return res.status(400).json({ message: 'Liquidación inválida' });
+    try {
+        const note = await prisma.$transaction(tx => updateContractInternalNote(tx, {
+            ...req.body, liquidacionId, inmobiliariaId, usuarioId, auditMetadata: getAuditRequestMetadata(req)
+        }), { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        invalidatePerformanceCache(inmobiliariaId);
+        res.json(note);
+    } catch (error: any) {
+        const conflict = error.code === 'P2034';
+        res.status(conflict ? 409 : error.statusCode || 500).json({
+            message: conflict ? 'La nota interna cambió mientras estabas trabajando. Cerrá y volvé a abrir la ficha para ver la nota vigente.' : error.message || 'No se pudo guardar la nota interna',
+            code: conflict ? 'STALE_WRITE' : error.code
+        });
     }
 });
 

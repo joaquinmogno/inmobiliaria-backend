@@ -14,6 +14,7 @@ import { parsePagination } from '../utils/pagination';
 import { anularMovimientoInternoSchema, adjuntarMovimientoInternoSchema, editarMovimientoInternoSchema, filtroControlInternoSchema, movimientoInternoSchema } from '../validation/control-interno.schemas';
 import { internalMovementInclude, internalMovementWhere, summarizeInternalMovements } from '../services/control-interno.service';
 import { buildInternalExcel, buildInternalPdf } from '../services/control-interno-report.service';
+import { createMovementReceiptRouter } from './movement-receipt.routes';
 
 // El ámbito se fija al montar cada ruta; nunca se toma del cuerpo o de los filtros.
 const scopeConfig = {
@@ -37,6 +38,7 @@ function createMovementControlRouter(ambito: AmbitoMovimientoInterno) {
     const uploadsRoot = path.resolve(process.env.UPLOAD_DIR || path.join(__dirname, '../../uploads'));
     const reportLimit = 20000;
     router.use(authenticateToken, requirePermission(config.permissions.view));
+    router.use('/:id/recibos', createMovementReceiptRouter(ambito, { view: config.permissions.view, issue: [config.permissions.create, config.permissions.edit] }));
 
     const auth = (req: Request) => (req as AuthRequest).user!;
     const idOf = (value: unknown) => {

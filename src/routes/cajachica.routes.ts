@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { createMovementReceiptRouter } from './movement-receipt.routes';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { TipoMovimiento, MetodoPago, CuentaCaja, Prisma } from '@prisma/client';
@@ -15,6 +16,7 @@ import { getCashLedgerReport, getMonthlyReportPeriod } from '../services/financi
 import { cleanupFailedUpload, commitUploadedFile, removeUploadedFile, upload, validateUploadedFilesContent } from '../middlewares/upload.middleware';
 
 const router = Router();
+router.use('/:id/recibos', authenticateToken, createMovementReceiptRouter('CAJA', { view: 'caja_chica.ver', issue: ['caja_chica.crear'] }));
 
 const movimientoCajaSchema = z.object({
     tipo: z.enum(['INGRESO', 'DESCUENTO', 'EGRESO']),

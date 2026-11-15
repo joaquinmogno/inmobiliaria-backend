@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { parsePagination } from '../utils/pagination';
 import { logger } from './logger.service';
@@ -66,12 +67,17 @@ export const auditService = {
     entidadId: number;
     page?: number;
     limit?: number;
+    relatedRecords?: Array<{ entidad: string; entidadId: number; acciones: string[] }>;
   }) => {
     const pagination = parsePagination(params.page, params.limit, 10);
-    const where = {
+    const record = { entidad: params.entidad, entidadId: params.entidadId };
+    const where: Prisma.AuditLogWhereInput = {
       inmobiliariaId: params.inmobiliariaId,
-      entidad: params.entidad,
-      entidadId: params.entidadId
+      ...(params.relatedRecords?.length ? {
+        OR: [record, ...params.relatedRecords.map(item => ({
+          entidad: item.entidad, entidadId: item.entidadId, accion: { in: item.acciones }
+        }))]
+      } : record)
     };
     const [total, data] = await prisma.$transaction([
       prisma.auditLog.count({ where }),

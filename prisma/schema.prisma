@@ -50,6 +50,7 @@ model Inmobiliaria {
   actasRescision             ActaRescision[]
   actasEntregaLlaves         ActaEntregaLlaves[]
   movimientosInternos        MovimientoInterno[]
+  recibosMovimientos         ReciboMovimiento[]
 }
 
 enum CondicionIva {
@@ -84,6 +85,7 @@ model Usuario {
   contratosActualizados           Contrato[]                       @relation("ContratoActualizadoPor")
   contratosCreados                Contrato[]                       @relation("ContratoCreadoPor")
   contratosRescindidos            Contrato[]                       @relation("ContratoRescindidoPor")
+  notasInternasContratos          Contrato[]                       @relation("NotaInternaContratoActualizadaPor")
   actasRescisionCreadas           ActaRescision[]                  @relation("ActaRescisionCreadaPor")
   actasEntregaLlavesCreadas       ActaEntregaLlaves[]              @relation("ActaEntregaLlavesCreadaPor")
   borradoresContratoCreados       BorradorContrato[]               @relation("BorradorContratoCreadoPor")
@@ -101,6 +103,7 @@ model Usuario {
   movimientosInternosEditados     MovimientoInterno[]              @relation("MovimientoInternoEditadoPor")
   movimientosInternosAnulados     MovimientoInterno[]              @relation("MovimientoInternoAnuladoPor")
   adjuntosInternosCreados         AdjuntoMovimientoInterno[]
+  versionesRecibosCreadas         VersionReciboMovimiento[]
   transferenciasInternasCreadas   TransferenciaInterna[]
   pagosCreados                    Pago[]                           @relation("PagoCreadoPor")
   pagosAnulados                   Pago[]                           @relation("PagoAnuladoPor")
@@ -322,6 +325,11 @@ model Contrato {
   estado                       EstadoContrato               @default(ACTIVO)
   rutaArchivoContrato          String?
   observaciones                String?
+  notaInterna                  String?                      @db.Text
+  notaInternaVersion           Int                          @default(1)
+  notaInternaActualizadaEn      DateTime?
+  notaInternaActualizadaPorId   Int?
+  notaInternaActualizadaPor     Usuario?                     @relation("NotaInternaContratoActualizadaPor", fields: [notaInternaActualizadaPorId], references: [id], onDelete: SetNull)
   eliminadoEn                  DateTime?
   estadoAnteriorPapelera       EstadoContrato?
   fechaRescision               DateTime?                    @db.Date
@@ -380,6 +388,7 @@ model Contrato {
   @@index([garanteId])
   @@index([rescindidoPorId])
   @@index([inmobiliariaId, contratoAnteriorId])
+  @@index([notaInternaActualizadaPorId])
   @@index([estado])
   @@index([estado, eliminadoEn])
   @@index([inmobiliariaId, estado, fechaFin])
@@ -818,6 +827,7 @@ model MovimientoCaja {
   creditoInquilinoDevolucion CreditoInquilino?       @relation("CreditoInquilinoDevolucion")
   pagoPropietario            PagoPropietario?        @relation("PagoPropietarioMovimiento")
   adjuntos                   AdjuntoMovimientoCaja[]
+  recibo                     ReciboMovimiento?
 
   @@index([inmobiliariaId])
   @@index([fecha])
@@ -884,10 +894,41 @@ model MovimientoInterno {
   actualizadoPor     Usuario?                   @relation("MovimientoInternoEditadoPor", fields: [actualizadoPorId], references: [id], onDelete: SetNull)
   anuladoPor         Usuario?                   @relation("MovimientoInternoAnuladoPor", fields: [anuladoPorId], references: [id], onDelete: SetNull)
   adjuntos           AdjuntoMovimientoInterno[]
+  recibo             ReciboMovimiento?
 
   @@index([inmobiliariaId, ambito, fecha, id])
   @@index([inmobiliariaId, ambito, anuladoEn, moneda, tipo], map: "MovimientoInterno_ambito_totales_idx")
   @@index([inmobiliariaId, ambito, categoria])
+}
+
+// El recibo documenta un movimiento existente y nunca genera asientos.
+// La migración exige exactamente un origen; las versiones son inmutables.
+model ReciboMovimiento {
+  id                   Int                       @id @default(autoincrement())
+  inmobiliariaId       Int
+  movimientoCajaId     Int?                      @unique
+  movimientoInternoId  Int?                      @unique
+  inmobiliaria         Inmobiliaria              @relation(fields: [inmobiliariaId], references: [id], onDelete: Restrict)
+  movimientoCaja       MovimientoCaja?           @relation(fields: [movimientoCajaId], references: [id], onDelete: Restrict)
+  movimientoInterno    MovimientoInterno?        @relation(fields: [movimientoInternoId], references: [id], onDelete: Restrict)
+  versiones            VersionReciboMovimiento[]
+
+  @@index([inmobiliariaId])
+}
+
+model VersionReciboMovimiento {
+  id                Int              @id @default(autoincrement())
+  reciboId          Int
+  version           Int
+  fechaEmision      DateTime         @default(now())
+  creadoPorId       Int
+  fotografia        Json
+  huellaMovimiento  String           @db.VarChar(64)
+  motivo            String?          @db.VarChar(500)
+  recibo            ReciboMovimiento @relation(fields: [reciboId], references: [id], onDelete: Restrict)
+  creadoPor         Usuario          @relation(fields: [creadoPorId], references: [id], onDelete: Restrict)
+
+  @@unique([reciboId, version])
 }
 
 model AdjuntoMovimientoInterno {

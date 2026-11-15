@@ -12,6 +12,7 @@ import { buildOwnerPaymentHistory } from '../services/owner-payment-history.serv
 import { getAgencyAdvanceExposure, getOwnerPaymentSettlement, getTenantSettlement } from '../services/tenant-credit.service';
 import { getOutstandingOwnerAdvances } from '../services/owner-advance.service';
 import { getLiquidationCurrencySummaries } from '../services/liquidation-currency.service';
+import { getContractInternalNote, INTERNAL_CONTRACT_NOTE_ACTIONS } from '../services/contract-internal-note.service';
 
 const router = Router();
 
@@ -338,6 +339,7 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
                         inquilinos: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } },
                         propietarios: { include: { persona: true }, orderBy: { esPrincipal: 'desc' } },
                         serviciosGastos: { orderBy: { orden: 'asc' } },
+                        notaInternaActualizadaPor: { select: { id: true, nombreCompleto: true } },
                         actualizaciones: { orderBy: { fechaActualizacion: 'desc' } }
                     }
                 },
@@ -396,7 +398,8 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
         });
         if (!liquidacion) return res.status(404).json({ message: 'Liquidación no encontrada' });
         const auditLogs = await auditService.history({
-            inmobiliariaId, entidad: 'Liquidacion', entidadId: liquidationId, ...res.locals.auditPagination
+            inmobiliariaId, entidad: 'Liquidacion', entidadId: liquidationId, ...res.locals.auditPagination,
+            relatedRecords: [{ entidad: 'Contrato', entidadId: liquidacion.contratoId, acciones: INTERNAL_CONTRACT_NOTE_ACTIONS }]
         });
         const { comprobantes, pagosPropietario, ...detalleLiquidacion } = liquidacion;
         const tenantSettlement = getTenantSettlement(liquidacion);
@@ -407,6 +410,7 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
         });
         res.json({
             ...detalleLiquidacion,
+            notaInternaContrato: getContractInternalNote(liquidacion.contrato),
             montoPagadoPropietario: ownerSettlement.pagado.toNumber(),
             comprobantes: comprobantes.map(getVoucherSummary),
             historialPagosPropietario: buildOwnerPaymentHistory(liquidacion.montoPropietario, pagosPropietario, Object.fromEntries(resumenMonedas.map(summary => [summary.moneda, summary.montoPropietario]))),
