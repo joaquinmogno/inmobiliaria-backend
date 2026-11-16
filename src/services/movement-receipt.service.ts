@@ -5,6 +5,7 @@ import sharp from 'sharp';
 import { Prisma, type AmbitoMovimientoInterno } from '@prisma/client';
 import { z } from 'zod';
 import { AppError } from '../errors/app-error';
+import { getLiquidationCurrencyDecimalSummaries, liquidationCurrencyRelations, type MultiCurrencyLiquidation } from './liquidation-currency.service';
 
 export type ReceiptScope = 'CAJA' | AmbitoMovimientoInterno;
 export type ReceiptStatus = 'VIGENTE' | 'ANULADO' | 'REEMPLAZADO' | 'DESACTUALIZADO';
@@ -28,7 +29,27 @@ export type ReceiptMovement = {
 export type ReceiptSnapshot = {
     formato: 1; movimiento: ReceiptMovement; datos: ReceiptFields;
     emisor: { nombre: string; cuit: string | null; direccion: string | null; contacto: string; logo: string | null };
+    // Optional for historic snapshots. Reprints use this frozen context, never today's balances.
+    contexto?: ReceiptFinancialContext;
 };
+export type ReceiptFinancialContext = {
+    contratoId: number; liquidacionId: number; periodo: string; fechaConsulta: string;
+    operacion: 'COBRO_INQUILINO' | 'PAGO_PROPIETARIO';
+    monedas: Array<{ moneda: 'ARS' | 'USD'; total: string; registrado: string; creditoAplicado: string; pendiente: string }>;
+};
+export function receiptFinancialContext(liquidacion: MultiCurrencyLiquidation & { id: number; contratoId: number; periodo: Date }, operacion: ReceiptFinancialContext['operacion'], fechaConsulta = new Date()): ReceiptFinancialContext {
+    const tenant = operacion === 'COBRO_INQUILINO';
+    return {
+        contratoId: liquidacion.contratoId, liquidacionId: liquidacion.id,
+        periodo: liquidacion.periodo.toISOString().slice(0, 10), fechaConsulta: fechaConsulta.toISOString(), operacion,
+        monedas: getLiquidationCurrencyDecimalSummaries(liquidacion).map(row => ({
+            moneda: row.moneda, total: (tenant ? row.netoACobrar : row.montoPropietario).toFixed(2),
+            registrado: (tenant ? row.cobradoInquilino : row.pagadoPropietario).toFixed(2),
+            creditoAplicado: tenant ? row.creditoAplicadoInquilino.toFixed(2) : '0.00',
+            pendiente: (tenant ? row.saldoInquilino : row.saldoPropietario).toFixed(2)
+        }))
+    };
+}
 export const receiptNumber = (id: number) => `REC-${String(id).padStart(6, '0')}`;
 export const movementFingerprint = (movement: ReceiptMovement) => createHash('sha256').update(JSON.stringify(movement)).digest('hex');
 export const receiptStatus = (cancelled: boolean, version: number, latest: number, fingerprint: string, currentFingerprint: string): ReceiptStatus =>
@@ -41,11 +62,13 @@ export async function loadReceiptSource(tx: Prisma.TransactionClient, scope: Rec
     let anulado: boolean;
     let permitido = true;
     let inmueble = '';
+    let referencia: { liquidacionId: number; operacion: ReceiptFinancialContext['operacion'] } | undefined;
     if (scope === 'CAJA') {
         const row = await tx.movimientoCaja.findFirst({
             where: { id, inmobiliariaId },
             select: { id: true, tipo: true, fecha: true, concepto: true, monto: true, moneda: true, metodoPago: true, anuladoEn: true,
                 reversionDeId: true, transferenciaInternaId: true, reversion: { select: { id: true } },
+                pago: { select: { liquidacionId: true } }, pagoPropietario: { select: { liquidacionId: true } },
                 contrato: { select: { propiedad: { select: { direccion: true } } } } }
         });
         if (!row) throw new AppError('Movimiento no encontrado', { statusCode: 404 });
@@ -53,6 +76,9 @@ export async function loadReceiptSource(tx: Prisma.TransactionClient, scope: Rec
         anulado = Boolean(row.anuladoEn || row.reversion);
         permitido = !row.reversionDeId && !row.transferenciaInternaId && row.tipo !== 'DESCUENTO';
         inmueble = row.contrato?.propiedad.direccion || '';
+        // Only a verified payment link gives meaning to a balance. A manual cash entry does not.
+        if (row.pago && row.tipo === 'INGRESO') referencia = { liquidacionId: row.pago.liquidacionId, operacion: 'COBRO_INQUILINO' };
+        else if (row.pagoPropietario && row.tipo === 'EGRESO') referencia = { liquidacionId: row.pagoPropietario.liquidacionId, operacion: 'PAGO_PROPIETARIO' };
     } else {
         const row = await tx.movimientoInterno.findFirst({
             where: { id, inmobiliariaId, ambito: scope },
@@ -66,7 +92,7 @@ export async function loadReceiptSource(tx: Prisma.TransactionClient, scope: Rec
         where: { inmobiliariaId, ...(scope === 'CAJA' ? { movimientoCajaId: id } : { movimientoInternoId: id }) },
         include: { versiones: { orderBy: { version: 'desc' }, include: { creadoPor: { select: { nombreCompleto: true } } } } }
     });
-    return { movimiento, anulado, permitido, inmueble, recibo, huellaMovimiento: movementFingerprint(movimiento) };
+    return { movimiento, anulado, permitido, inmueble, recibo, referencia, huellaMovimiento: movementFingerprint(movimiento) };
 }
 type ReceiptSource = Awaited<ReturnType<typeof loadReceiptSource>>;
 
@@ -98,6 +124,10 @@ export function assertReceiptIssuable(source: ReceiptSource, input: ReceiptInput
 
 export async function makeReceiptSnapshot(tx: Prisma.TransactionClient, inmobiliariaId: number, source: ReceiptSource, input: ReceiptInput): Promise<ReceiptSnapshot> {
     const agency = await tx.inmobiliaria.findUniqueOrThrow({ where: { id: inmobiliariaId } });
+    const liquidation = source.referencia ? await tx.liquidacion.findFirst({
+        where: { id: source.referencia.liquidacionId, inmobiliariaId }, include: liquidationCurrencyRelations
+    }) : null;
+    const contexto = liquidation && source.referencia ? receiptFinancialContext(liquidation, source.referencia.operacion) : undefined;
     let logo: string | null = null;
     if (agency.logoArchivo) {
         const root = path.resolve(process.env.UPLOAD_DIR || path.join(__dirname, '../../uploads'));
@@ -111,6 +141,7 @@ export async function makeReceiptSnapshot(tx: Prisma.TransactionClient, inmobili
     }
     return {
         formato: 1, movimiento: source.movimiento,
+        ...(contexto ? { contexto } : {}),
         datos: { pagador: input.pagador, receptor: input.receptor, documentoReceptor: input.documentoReceptor, inmueble: input.inmueble, descripcion: input.descripcion },
         emisor: { nombre: agency.razonSocial || agency.nombre, cuit: agency.cuit, direccion: agency.domicilioFiscal || agency.direccion, contacto: [agency.telefono, agency.email].filter(Boolean).join(' · '), logo }
     };

@@ -168,11 +168,70 @@ test('recibos de movimientos: emisión, historial, acceso y efecto contable', as
             assert.equal(retried.version, issued.version); assert.equal(retried.creada, false);
             assert.match(parsePdf(await pdf(daniel, issued.version)), /135\.760,25/);
         });
+        await t.test('recibos de cobros y pagos parciales congelan contexto y saldos separados por moneda', async () => {
+            const { liquidation: sampleLiquidation } = require('./fixtures/receipt-design');
+            let property, contract, owner, liquidation;
+            try {
+                property = await prisma.propiedad.create({ data: { direccion: 'Inmueble de prueba de recibos', inmobiliariaId: agency.id } });
+                contract = await prisma.contrato.create({ data: { propiedadId: property.id, inmobiliariaId: agency.id, fechaInicio: new Date('2026-01-01'), fechaFin: new Date('2027-12-31'), montoAlquiler: '100', montoHonorarios: '0', moneda: 'USD' } });
+                owner = await prisma.persona.create({ data: { nombreCompleto: 'Propietario de prueba', inmobiliariaId: agency.id } });
+                liquidation = await prisma.liquidacion.create({ data: { contratoId: contract.id, inmobiliariaId: agency.id, periodo: new Date('2026-11-01'), estado: 'CONFIRMADA', moneda: 'USD', netoACobrar: '100', montoPropietario: '100', movimientos: { create: sampleLiquidation.movimientos.map(row => ({ ...row, concepto: 'Concepto de prueba' })) } } });
+                const shared = { inmobiliariaId: agency.id, creadoPorId: admin.id, liquidacionId: liquidation.id, fechaPago: new Date('2026-11-12'), metodoPago: 'EFECTIVO' };
+                const collection = await prisma.pago.create({ data: { ...shared, contratoId: contract.id, monto: '50000.25', moneda: 'ARS' } });
+                await prisma.pago.create({ data: { ...shared, contratoId: contract.id, monto: '100', moneda: 'USD' } });
+                const cashData = { inmobiliariaId: agency.id, creadoPorId: admin.id, contratoId: contract.id, liquidacionId: liquidation.id, fecha: shared.fechaPago, metodoPago: 'EFECTIVO', moneda: 'ARS', concepto: 'Pago parcial de prueba' };
+                const incoming = await prisma.movimientoCaja.create({ data: { ...cashData, tipo: 'INGRESO', monto: '50000.25', pagoId: collection.id } });
+                const outgoing = await prisma.movimientoCaja.create({ data: { ...cashData, tipo: 'EGRESO', monto: '50000', esPagoPropietario: true } });
+                await prisma.pagoPropietario.create({ data: { ...shared, propietarioId: owner.id, movimientoCajaId: outgoing.id, monto: '50000', moneda: 'ARS', cuenta: 'CAJA', montoFondosCobrados: '50000' } });
+                const contexts = [];
+                for (const [movement, direction, expectedPending] of [[incoming, 'COBRO_INQUILINO', '64999.75'], [outgoing, 'PAGO_PROPIETARIO', '55000.00']]) {
+                    const url = `/cajachica/${movement.id}/recibos`;
+                    const context = await json(url);
+                    const data = { ...input(context), pagador: direction === 'COBRO_INQUILINO' ? 'Inquilina de prueba' : agency.nombre, receptor: direction === 'COBRO_INQUILINO' ? agency.nombre : owner.nombreCompleto };
+                    await json(url, 'POST', data);
+                    const saved = await prisma.versionReciboMovimiento.findFirstOrThrow({ where: { recibo: { movimientoCajaId: movement.id } } });
+                    assert.equal(saved.fotografia.contexto.operacion, direction);
+                    assert.equal(saved.fotografia.contexto.contratoId, contract.id);
+                    assert.equal(saved.fotografia.contexto.monedas.find(row => row.moneda === 'ARS').pendiente, expectedPending);
+                    assert.equal(saved.fotografia.contexto.monedas.find(row => row.moneda === 'USD').pendiente, direction === 'COBRO_INQUILINO' ? '0.00' : '100.00');
+                    const beforePdf = parsePdf(await pdf({ url }));
+                    assert.match(beforePdf, /Pendiente/);
+                    assert.ok(beforePdf.includes(direction === 'COBRO_INQUILINO' ? '64.999,75' : '55.000,00'));
+                    contexts.push({ url, saved, beforePdf });
+                }
+                await prisma.pago.create({ data: { ...shared, contratoId: contract.id, monto: '64999.75', moneda: 'ARS' } });
+                await prisma.pagoPropietario.create({ data: { ...shared, propietarioId: owner.id, monto: '55000', moneda: 'ARS', cuenta: 'CAJA', montoFondosCobrados: '55000' } });
+                for (const { url, saved, beforePdf } of contexts) {
+                    assert.equal(parsePdf(await pdf({ url })), beforePdf, 'La reimpresión no debe recalcular saldos actuales');
+                    assert.deepEqual((await prisma.versionReciboMovimiento.findUniqueOrThrow({ where: { id: saved.id } })).fotografia, saved.fotografia);
+                    const context = await json(url);
+                    assert.equal(context.versiones[0].estado, 'VIGENTE');
+                    const preview = await json(`${url}/vista-previa`, 'POST', { ...input(context), motivo: 'Nueva revisión de contexto' });
+                    const text = parsePdf(Buffer.from(preview.pdf, 'base64'));
+                    assert.ok(text.includes('VISTA PREVIA'));
+                    assert.ok(!text.includes(saved.fotografia.contexto.operacion === 'COBRO_INQUILINO' ? '64.999,75' : '55.000,00'));
+                }
+            } finally {
+                if (liquidation) {
+                    const where = { movimientoCaja: { liquidacionId: liquidation.id } };
+                    await prisma.versionReciboMovimiento.deleteMany({ where: { recibo: where } });
+                    await prisma.reciboMovimiento.deleteMany({ where });
+                    await prisma.pagoPropietario.deleteMany({ where: { liquidacionId: liquidation.id } });
+                    await prisma.movimientoCaja.deleteMany({ where: { liquidacionId: liquidation.id } });
+                    await prisma.pago.deleteMany({ where: { liquidacionId: liquidation.id } });
+                    await prisma.movimiento.deleteMany({ where: { liquidacionId: liquidation.id } });
+                    await prisma.liquidacion.delete({ where: { id: liquidation.id } });
+                }
+                if (contract) await prisma.contrato.delete({ where: { id: contract.id } });
+                if (property) await prisma.propiedad.delete({ where: { id: property.id } });
+                if (owner) await prisma.persona.delete({ where: { id: owner.id } });
+            }
+        });
         await t.test('PDF extenso identifica la versión y el estado en cada hoja', async () => {
             const { buildMovementReceiptPdf } = require('../dist/services/movement-receipt-pdf.service');
             const saved = await prisma.versionReciboMovimiento.findFirstOrThrow({ where: { recibo: { movimientoInternoId: daniel.id } }, orderBy: { version: 'desc' } });
             const snapshot = saved.fotografia;
-            snapshot.datos.descripcion = 'Detalle del arreglo y materiales utilizados en el baño. '.repeat(28).slice(0, 1500);
+            snapshot.datos.descripcion = 'Detalle del arreglo y materiales del baño.\n'.repeat(35).trim();
             const bytes = await buildMovementReceiptPdf(snapshot, { numero: 'REC-123456', version: 3, fechaEmision: saved.fechaEmision, estado: 'ANULADO' });
             const pages = parsePdf(bytes).split('\f').filter(page => page.trim());
             assert.equal(pages.length, 2);

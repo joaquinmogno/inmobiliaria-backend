@@ -56,9 +56,11 @@ test('recibo PDF coincide con pantalla para emisiones de mañana, noche y cambio
   for (const [date, expected] of cases) {
     const pdf = await buildMovementReceiptPdf(snapshot, { numero: 'REC-000001', version: 1, estado: 'VIGENTE', fechaEmision: new Date(date) });
     const text = execFileSync('pdftotext', ['-layout', '-', '-'], { input: pdf }).toString();
-    assert.ok(text.includes(`Emitido: ${expected.slice(0, -3)}`), text);
+    assert.match(text, /EMITIDO/);
+    assert.ok(text.includes(`${expected.slice(0, -3)} · Hora de Buenos Aires`), text);
     assert.match(text, /Hora de Buenos Aires/);
-    assert.match(text, /Fecha del pago: 10\/11\/2026/);
+    assert.match(text, /FECHA DEL PAGO/);
+    assert.match(text, /10\/11\/2026/);
     assert.match(text, /135\.760,25/);
     assert.equal((pdf.toString('latin1').match(/\/Type \/Page\b/g) || []).length, 1);
   }
