@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { getTenantSettlement } from './tenant-credit.service';
+import { getLiquidationCurrencySummaries } from './liquidation-currency.service';
 
 type Totals = {
     totalIngresos: number;
@@ -104,8 +105,16 @@ export const readLiquidationVoucherSnapshot = (value: Prisma.JsonValue | null | 
     return snapshot.schemaVersion === 1 && snapshot.liquidacion && snapshot.contrato ? snapshot : null;
 };
 
-export const getVoucherSummary = (voucher: { id: number; version: number; fechaEmision: Date; creadoPor: { id: number; nombreCompleto: string }; fotografia: Prisma.JsonValue }) => {
-    const snapshot = readLiquidationVoucherSnapshot(voucher.fotografia);
+export const getVoucherSummary = (
+    voucher: { id: number; version: number; fechaEmision: Date; creadoPor: { id: number; nombreCompleto: string }; fotografia: Prisma.JsonValue },
+    snapshot = readLiquidationVoucherSnapshot(voucher.fotografia)
+) => {
+    const source = snapshot ? {
+        ...voucherSnapshotToPdfData(snapshot),
+        moneda: snapshot.liquidacion.moneda === 'USD' ? 'USD' as const : 'ARS' as const
+    } : null;
+    const corrected = source ? getLiquidationCurrencySummaries(source) : [];
+    const original = source && snapshot ? getLiquidationCurrencySummaries({ ...source, ...snapshot.totalesOriginales }) : [];
     return {
         id: voucher.id,
         version: voucher.version,
@@ -117,6 +126,16 @@ export const getVoucherSummary = (voucher: { id: number; version: number; fechaE
         importeCorregido: snapshot?.liquidacion.totales.netoACobrar || 0,
         importePropietarioOriginal: snapshot?.totalesOriginales.montoPropietario || 0,
         importePropietarioCorregido: snapshot?.liquidacion.totales.montoPropietario || 0,
+        importesPorMoneda: corrected.map(summary => {
+            const previous = original.find(item => item.moneda === summary.moneda)!;
+            return {
+                moneda: summary.moneda,
+                importeOriginal: previous.netoACobrar,
+                importeCorregido: summary.netoACobrar,
+                importePropietarioOriginal: previous.montoPropietario,
+                importePropietarioCorregido: summary.montoPropietario
+            };
+        }),
         ajustes: snapshot?.ajustes.map(ajuste => ({
             id: ajuste.id,
             tipo: ajuste.tipo,

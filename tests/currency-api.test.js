@@ -1,3 +1,4 @@
+require('./financial-request-fixture');
 process.env.NODE_ENV = 'test';
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
 process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'test-session-secret-for-currency-api-suite';
@@ -93,6 +94,8 @@ function resetState() {
 }
 
 function installPrismaMocks() {
+  prisma.operacionFinanciera = { findUnique: async () => null, create: async ({ data }) => data };
+  prisma.$queryRaw = async () => [];
   const allPermissions = permissionsService.MODULE_PERMISSIONS.map((clave) => ({ permiso: { clave } }));
   prisma.rolPermiso = { findMany: async () => allPermissions };
   prisma.usuarioPermiso = { findMany: async () => [] };
@@ -680,5 +683,23 @@ test('API currency: contract currency change is rejected when financial operatio
 
     assert.equal(response.status, 400);
     assert.match(response.body.message, /No se puede cambiar la moneda/);
+  });
+});
+
+test('API cash movements: persists exact cents in ARS/USD and rejects invalid amounts before writing', async () => {
+  await withServer(async (app) => {
+    for (const moneda of ['ARS', 'USD']) {
+      const form = new FormData();
+      Object.entries({ tipo: 'INGRESO', concepto: 'Centavos', monto: '1000.50', moneda, fecha: '2026-06-10', metodoPago: 'EFECTIVO' }).forEach(([key, value]) => form.append(key, value));
+      const response = await multipartRequest(app, '/api/caja-chica', form);
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      assert.equal(createdCaja.at(-1).monto.toString(), '1000.5');
+      assert.equal(createdCaja.at(-1).moneda, moneda);
+    }
+    for (const monto of ['1000,50', '1.000,50', '1000.501', 0, -1, 100000000, true]) {
+      const result = await request(app, '/api/caja-chica', { method: 'POST', body: JSON.stringify({ tipo: 'INGRESO', concepto: 'Inválido', monto, moneda: 'ARS', fecha: '2026-06-10' }) });
+      assert.equal(result.status, 400, JSON.stringify(result.body));
+    }
+    assert.equal(createdCaja.length, 2);
   });
 });

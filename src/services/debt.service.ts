@@ -1,6 +1,7 @@
 import { EstadoLiquidacion } from '@prisma/client';
 import { prisma } from '../prisma';
-import { getTenantSettlement } from './tenant-credit.service';
+import { Decimal } from '@prisma/client/runtime/library';
+import { getLiquidationCurrencyDecimalSummaries, liquidationCurrencyRelations } from './liquidation-currency.service';
 
 export async function getContractDebtSummary(
     contratoId: number,
@@ -14,33 +15,25 @@ export async function getContractDebtSummary(
             estado: EstadoLiquidacion.CONFIRMADA,
             ...(excludeLiquidacionId ? { id: { not: excludeLiquidacionId } } : {})
         },
-        include: {
-            pagos: { where: { anuladoEn: null } },
-            aplicacionesCredito: true
-        },
+        include: liquidationCurrencyRelations,
         orderBy: { periodo: 'asc' }
     });
 
-    const detalle = liquidaciones.map(liq => {
-        const { pagos, creditosAplicados, saldo } = getTenantSettlement(liq);
-
-        return {
-            id: liq.id,
-            periodo: liq.periodo,
-            neto: Number(liq.netoACobrar),
-            pagado: Number(pagos),
-            creditosAplicados: Number(creditosAplicados),
-            deuda: Number(saldo),
-            moneda: liq.moneda,
-            estado: liq.estado
-        };
-    }).filter(item => item.deuda > 0);
-
-    const totalDeuda = detalle.reduce((acc, item) => acc + item.deuda, 0);
-
+    const currencies = { ARS: new Decimal(0), USD: new Decimal(0) };
+    const detalle = liquidaciones.flatMap(liq => getLiquidationCurrencyDecimalSummaries(liq)
+        .filter(summary => summary.saldoInquilino.greaterThan(0))
+        .map(summary => {
+            currencies[summary.moneda] = currencies[summary.moneda].plus(summary.saldoInquilino);
+            return {
+                id: liq.id, periodo: liq.periodo, estado: liq.estado, moneda: summary.moneda,
+                neto: summary.netoACobrar.toNumber(), pagado: summary.cobradoInquilino.toNumber(),
+                creditosAplicados: summary.creditoAplicadoInquilino.toNumber(), deuda: summary.saldoInquilino.toNumber()
+            };
+        }));
+    const moneda = liquidaciones[0]?.moneda || 'ARS';
     return {
-        totalDeuda,
-        moneda: detalle[0]?.moneda || 'ARS',
-        detalle
+        // Compatibilidad: el escalar representa sólo la moneda contractual.
+        totalDeuda: currencies[moneda].toNumber(), moneda, detalle,
+        porMoneda: Object.entries(currencies).map(([moneda, total]) => ({ moneda, monto: total.toNumber() }))
     };
 }

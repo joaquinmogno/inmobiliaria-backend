@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { lockContractDraft } from '../services/contract-draft.service';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { cleanupFailedUpload, commitUploadedFile, removeUploadedFile, upload, validateUploadedFileContent } from '../middlewares/upload.middleware';
@@ -84,6 +85,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
 
     try {
         const contract = await prisma.$transaction(async (tx) => {
+            if (payload.borradorId) await lockContractDraft(tx, payload.borradorId, authReq.user!);
             const draft = payload.borradorId ? await tx.borradorContrato.findFirst({
                 where: {
                     id: payload.borradorId,
@@ -93,7 +95,10 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                 include: { adjuntos: { orderBy: { id: 'asc' } } }
             }) : null;
             if (payload.borradorId && !draft) {
-                throw Object.assign(new Error('El borrador no existe o ya fue utilizado.'), { statusCode: 404, code: 'DRAFT_NOT_FOUND' });
+                throw new AppError('El borrador no existe o ya fue utilizado.', { statusCode: 404, code: 'DRAFT_NOT_FOUND' });
+            }
+            if (draft && draft.version !== payload.borradorVersion) {
+                throw new AppError('El borrador cambió en otra pestaña. Tus cambios siguen en el formulario; revisá la versión actual antes de crear el contrato.', { statusCode: 409, code: 'DRAFT_CHANGED' });
             }
             const draftPrincipal = draft?.adjuntos.find(attachment => attachment.tipo === TipoDocumentoContrato.CONTRATO_PRINCIPAL);
             const principalFilePath = contractFilePath || draftPrincipal?.rutaArchivo || null;
@@ -198,6 +203,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                     contratoId: newContract.id,
                     rutaArchivo: draftPrincipal.rutaArchivo,
                     nombreArchivo: draftPrincipal.nombreArchivo,
+                    observacion: payload.observacionDocumento,
                     creadoPorId: draftPrincipal.creadoPorId || userId
                 });
             }
@@ -238,7 +244,7 @@ router.post('/', requirePermission('contratos.crear'), upload.single('pdf'), val
                     select: { id: true }
                 });
                 if (initialFeeAccount === 'BANCO' && !initialFeeBankAccount) {
-                    throw Object.assign(new Error('Seleccioná una cuenta bancaria activa y de la misma moneda para el honorario inicial.'), { statusCode: 400, code: 'BANK_ACCOUNT_REQUIRED' });
+                    throw new AppError('Seleccioná una cuenta bancaria activa y de la misma moneda para el honorario inicial.', { statusCode: 400, code: 'BANK_ACCOUNT_REQUIRED' });
                 }
                 await assertCashPeriodOpen(tx, {
                     inmobiliariaId,

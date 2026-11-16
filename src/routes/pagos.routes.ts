@@ -1,3 +1,4 @@
+import { financialOperation, financialError } from '../services/financial-operation.service';
 import { Router } from 'express';
 import { invalidatePerformanceCache } from '../services/performance-cache.service';
 import { prisma } from '../prisma';
@@ -5,7 +6,7 @@ import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../
 import { MetodoPago, EstadoLiquidacion, Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { auditService } from '../services/audit.service';
-import { validateBody, positiveDecimal, optionalDateOnlyString, optionalText, paymentMethodSchema, requiredText } from '../middlewares/validation.middleware';
+import { validateBody, positiveMoney, optionalDateOnlyString, optionalText, paymentMethodSchema, requiredText } from '../middlewares/validation.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { getContractDebtSummary } from '../services/debt.service';
 import { formatCurrency } from '../utils/currency';
@@ -25,14 +26,14 @@ const router = Router();
 const pagoSchema = z.object({
     contratoId: z.coerce.number().int().positive('Contrato inválido'),
     liquidacionId: z.coerce.number().int().positive('Liquidación inválida').optional(),
-    monto: positiveDecimal('El monto'),
+    monto: positiveMoney('El monto'),
     fechaPago: optionalDateOnlyString('La fecha de pago'),
     metodoPago: paymentMethodSchema.optional().default('EFECTIVO'),
     cuentaBancariaId: z.coerce.number().int().positive().optional(),
     moneda: z.enum(['ARS', 'USD']).optional(),
     observaciones: optionalText(1000),
     comprobante: optionalText(120),
-    cuotasImputadas: z.array(z.object({ cuotaId: z.coerce.number().int().positive(), monto: positiveDecimal('El importe de la cuota') })).optional(),
+    cuotasImputadas: z.array(z.object({ cuotaId: z.coerce.number().int().positive(), monto: positiveMoney('El importe de la cuota') })).optional(),
     expectedLiquidationVersion: z.coerce.number().int().positive().optional()
 }).superRefine((value, ctx) => {
     if (value.cuotasImputadas?.length && !value.liquidacionId) ctx.addIssue({ code: 'custom', path: ['liquidacionId'], message: 'La imputación de cuotas requiere una liquidación específica' });
@@ -208,20 +209,24 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
 
     try {
+        const result = await financialOperation(req as AuthRequest, async (tx) => {
         const paymentDate = fechaPago ? parseDateOnly(fechaPago) : argentinaTodayAsDate();
         assertOperationalDateIsNotFuture(paymentDate, 'La fecha de cobro');
-        const contrato = await prisma.contrato.findFirst({
+        const contrato = await tx.contrato.findFirst({
             where: { id: Number(contratoId), inmobiliariaId },
             include: { actasRescision: { select: { id: true }, take: 1 } }
         });
 
         if (!contrato) {
-            return res.status(404).json({ message: 'Contrato no encontrado' });
+            throw Object.assign(new Error('Contrato no encontrado'), { statusCode: 404 });
         }
-        if (contrato.actasRescision?.length) return res.status(409).json({ message: 'El contrato tiene un cierre sin reclamos emitido', code: 'CONTRACT_CLOSURE_IMMUTABLE' });
+        if (contrato.actasRescision?.length) throw Object.assign(new Error('El contrato tiene un cierre sin reclamos emitido'), { statusCode: 409, code: 'CONTRACT_CLOSURE_IMMUTABLE' });
 
         // Ejecutamos todo en una transacción para asegurar integridad
-        const result = await prisma.$transaction(async (tx) => {
+
+          const result = await (async () => {
+            // Lock parent rows before dependent payments/cash, always in ID order.
+            await tx.$queryRaw`SELECT id FROM "Liquidacion" WHERE "contratoId" = ${Number(contratoId)} AND "inmobiliariaId" = ${inmobiliariaId} ORDER BY id FOR UPDATE`;
             const paymentCurrency = moneda || contrato.moneda;
             if (!liquidacionId && paymentCurrency !== contrato.moneda) {
                 assertSameCurrency(
@@ -397,7 +402,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                 moneda: paymentCurrency,
                 modoAplicacion: liquidacionId ? 'LIQUIDACION_ESPECIFICA' : 'DEUDA_MAS_ANTIGUA'
             };
-        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        })();
 
         await auditService.log({
             usuarioId,
@@ -406,9 +411,9 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
             entidad: 'Contrato',
             entidadId: Number(contratoId),
             detalle: `Pago registrado por ${formatCurrency(monto, result.moneda)} aplicado a ${result.pagos.length} liquidaciones.`
-        });
+        }, tx);
 
-        const pagosConDetalle = await prisma.pago.findMany({
+        const pagosConDetalle = await tx.pago.findMany({
             where: { id: { in: result.pagos.map(p => p.id) } },
             include: {
                 liquidacion: {
@@ -437,7 +442,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
             entidad: 'Pago',
             entidadId: pago.id,
             detalle
-        });
+        }, tx);
         }));
 
         await Promise.all(pagosConDetalle.map((pago) => {
@@ -451,13 +456,16 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
             entidad: 'Liquidacion',
             entidadId: pago.liquidacionId,
             detalle: `Cobro de inquilino por ${formatCurrency(pago.monto.toString(), pago.moneda)} - ${propiedad} - ${periodo}`
-        });
+        }, tx);
         }));
 
+          return result;
+        });
         invalidatePerformanceCache(inmobiliariaId);
         res.status(201).json(result);
     } catch (error: any) {
         console.error(error);
+        error = financialError(error);
         await auditService.log({
             usuarioId, inmobiliariaId, accion: 'REGISTRAR_PAGO_LIQUIDACION', entidad: 'Liquidacion',
             entidadId: liquidacionId ? Number(liquidacionId) : undefined,

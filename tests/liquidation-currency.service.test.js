@@ -6,9 +6,33 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   getLiquidationCurrencySummaries,
+  getLiquidationCurrencyDecimalSummaries,
   getOwnerPaymentStateByCurrency,
   getTenantCollectionStateByCurrency,
 } = require('../dist/services/liquidation-currency.service');
+
+test('legacy rows without currency belong only to the contractual currency', () => {
+  const rows = getLiquidationCurrencySummaries(dualCurrencyLiquidation({
+    pagos: [{ monto: '0.10' }, { monto: '0.20' }, { monto: 900, anuladoEn: new Date() }],
+    pagosPropietario: [{ monto: '0.15' }], aplicacionesCredito: [{ monto: '0.05' }],
+  }));
+  assert.equal(rows[0].cobradoInquilino, 0.3);
+  assert.equal(rows[0].pagadoPropietario, 0.15);
+  assert.equal(rows[0].creditoAplicadoInquilino, 0.05);
+  assert.equal(rows[1].cobradoInquilino, 0);
+  assert.equal(rows[1].pagadoPropietario, 0);
+  assert.equal(rows[1].creditoAplicadoInquilino, 0);
+});
+
+test('decimal summaries preserve cents and credit currency before serialization', () => {
+  const rows = getLiquidationCurrencyDecimalSummaries(dualCurrencyLiquidation({
+    pagos: Array.from({ length: 1000 }, () => ({ monto: '0.01', moneda: 'ARS' })),
+    aplicacionesCredito: [{ monto: '0.05', creditoInquilino: { moneda: 'ARS' } }],
+  }));
+  assert.equal(rows[1].cobradoInquilino.toString(), '10');
+  assert.equal(rows[1].saldoInquilino.toString(), '479324.95');
+  assert.equal(rows[0].creditoAplicadoInquilino.toString(), '0');
+});
 
 const dualCurrencyLiquidation = (overrides = {}) => ({
   moneda: 'USD',
@@ -63,4 +87,22 @@ test('el resumen conserva las notas de crédito aplicadas a los totales del comp
   assert.equal(summaries[0].netoACobrar, 1300);
   assert.equal(summaries[0].montoPropietario, 1230);
   assert.equal(summaries[1].netoACobrar, 479335);
+});
+
+test('el cobrado separa USD 1.000 y ARS 135.760, conserva centavos y excluye anulados', () => {
+  const summaries = getLiquidationCurrencySummaries(dualCurrencyLiquidation({
+    pagos: [
+      { monto: '1000.00', moneda: 'USD' },
+      { monto: '135760.00', moneda: 'ARS' },
+      { monto: '0.25', moneda: 'ARS' },
+      { monto: '9000', moneda: 'USD', anuladoEn: new Date() },
+    ],
+    aplicacionesCredito: [{ monto: 100 }],
+  }));
+  assert.equal(summaries[0].cobradoInquilino, 1000);
+  assert.equal(summaries[1].cobradoInquilino, 135760.25);
+  assert.equal(summaries[0].creditoAplicadoInquilino, 100);
+  assert.equal(summaries[1].creditoAplicadoInquilino, 0);
+  assert.equal(summaries[0].saldoInquilino, 300);
+  assert.equal(summaries[1].saldoInquilino, 343574.75);
 });

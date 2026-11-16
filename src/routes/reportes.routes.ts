@@ -1,3 +1,5 @@
+import { Decimal } from '@prisma/client/runtime/library';
+import { getLiquidationCurrencyDecimalSummaries, liquidationCurrencyRelations } from '../services/liquidation-currency.service';
 import { Router } from 'express';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest } from '../middlewares/auth.middleware';
@@ -46,7 +48,7 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
         ]);
 
         // 2. Estadísticas de Contratos
-        const [contratosActivos, contratosPorVencer, liquidacionesVencidas, cobrosPendientes, pagosPropietarioPendientes] = await Promise.all([
+        const [contratosActivos, contratosPorVencer, operationalLiquidations] = await Promise.all([
             prisma.contrato.count({ where: { inmobiliariaId, estado: 'ACTIVO' } }),
             prisma.contrato.count({
                 where: {
@@ -57,10 +59,18 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
                     }
                 }
             })
-            , canViewLiquidations ? prisma.liquidacion.count({ where: { inmobiliariaId, estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['PENDIENTE', 'PARCIAL'] }, fechaVencimiento: { lt: today } } }) : Promise.resolve(0)
-            , canViewLiquidations ? prisma.liquidacion.count({ where: { inmobiliariaId, estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['PENDIENTE', 'PARCIAL'] } } }) : Promise.resolve(0)
-            , canViewLiquidations ? prisma.liquidacion.count({ where: { inmobiliariaId, estado: 'CONFIRMADA', estadoPagoPropietario: { in: ['PENDIENTE', 'PARCIAL'] } } }) : Promise.resolve(0)
+            , canViewLiquidations ? prisma.liquidacion.findMany({ where: { inmobiliariaId, estado: 'CONFIRMADA' }, include: liquidationCurrencyRelations }) : Promise.resolve([])
         ]);
+
+        let liquidacionesVencidas = 0, cobrosPendientes = 0, pagosPropietarioPendientes = 0;
+        for (const row of operationalLiquidations) {
+            const currencies = getLiquidationCurrencyDecimalSummaries(row);
+            if (currencies.some(item => item.saldoInquilino.greaterThan(0))) {
+                cobrosPendientes++;
+                if (row.fechaVencimiento && row.fechaVencimiento < today) liquidacionesVencidas++;
+            }
+            if (currencies.some(item => item.saldoPropietario.greaterThan(0))) pagosPropietarioPendientes++;
+        }
 
         const emptyMetrics = {
             recaudadoTotal: 0,
@@ -92,8 +102,8 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
                 recaudadoTotal: cash.cobrosInquilinos,
                 gananciaBruta: accrued.honorariosDevengados,
                 gastosAgencia,
-                utilidadNeta: accrued.honorariosDevengados - gastosAgencia,
-                fondoCustodia: Math.max(0, cash.cobrosInquilinos - cash.pagosPropietarios),
+                utilidadNeta: new Decimal(accrued.honorariosDevengados).minus(gastosAgencia).toNumber(),
+                fondoCustodia: Decimal.max(0, new Decimal(cash.cobrosInquilinos).minus(cash.pagosPropietarios)).toNumber(),
                 morosidad: accrued.facturado > 0 ? (accrued.saldoPendienteInquilinos / accrued.facturado) * 100 : 0
             };
             return result;

@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
-import { argentinaDateOnly } from '../utils/argentina-date';
+import { argentinaDateOnly, formatArgentinaDateTime } from '../utils/argentina-date';
 import { formatCurrency } from '../utils/currency';
 import { formatDatePdf } from './liquidacion-pdf.service';
 import { internalReportFilterLabel, internalReportMonthLabel, summarizeInternalMovements, type InternalMovementRow } from './control-interno.service';
@@ -29,7 +29,7 @@ export async function buildInternalExcel({ rows, filters, agency, title = 'Contr
     sheet.getCell('A2').alignment = { wrapText: true };
     sheet.getRow(2).height = 35;
     sheet.mergeCells('A3:O3');
-    sheet.getCell('A3').value = `Emitido: ${formatDatePdf(argentinaDateOnly())}. Los anulados se muestran para consulta y se excluyen de los totales. Importes separados por moneda.`;
+    sheet.getCell('A3').value = `Emitido: ${formatArgentinaDateTime(book.created)} (hora de Buenos Aires, 24 h). Los anulados se excluyen de los totales. Importes separados por moneda.`;
     sheet.getCell('A3').alignment = { wrapText: true };
     sheet.getRow(3).height = 30;
     const header = sheet.getRow(5);
@@ -46,7 +46,7 @@ export async function buildInternalExcel({ rows, filters, agency, title = 'Contr
         ]);
         added.getCell(2).numFmt = 'dd/mm/yyyy';
         added.getCell(8).numFmt = '#,##0.00';
-        added.getCell(14).value = row.fechaCreacion.toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+        added.getCell(14).value = formatArgentinaDateTime(row.fechaCreacion, true);
         added.alignment = { vertical: 'top', wrapText: true };
         if (row.anuladoEn) added.font = { color: { argb: 'FF6B7280' } };
     }
@@ -64,6 +64,30 @@ export async function buildInternalExcel({ rows, filters, agency, title = 'Contr
     return Buffer.from(await book.xlsx.writeBuffer());
 }
 
+// Wrap before drawing so a cell cannot trigger PDFKit's automatic pagination
+// independently of the other cells in its row. Long unbroken references and
+// explicit newlines are supported without clipping or dropping text.
+function wrapReportText(doc: PDFKit.PDFDocument, value: string, width: number): string[] {
+    const lines: string[] = [];
+    for (const paragraph of value.replace(/\r\n?/g, '\n').split('\n')) {
+        let line = '';
+        for (const word of paragraph.split(/\s+/).filter(Boolean)) {
+            const candidate = line ? `${line} ${word}` : word;
+            if (doc.widthOfString(candidate) <= width) { line = candidate; continue; }
+            if (line) { lines.push(line); line = ''; }
+            for (const character of word) {
+                if (line && doc.widthOfString(line + character) > width) {
+                    lines.push(line);
+                    line = '';
+                }
+                line += character;
+            }
+        }
+        lines.push(line);
+    }
+    return lines;
+}
+
 export function buildInternalPdf({ rows, filters, agency, title = 'Control interno' }: InternalReport): Promise<Buffer> {
     return new Promise((resolve, reject) => {
         const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 38, bufferPages: true });
@@ -72,53 +96,108 @@ export function buildInternalPdf({ rows, filters, agency, title = 'Control inter
         doc.on('end', () => resolve(Buffer.concat(chunks)));
         doc.on('error', reject);
         const left = 38;
-        const width = doc.page.width - 76;
-        const columns = [52, 42, 160, 65, 125, 35, 82, 86, 62, 44];
+        const width = doc.page.width - 2 * left;
+        // Column widths must add up to the printable width, including Adj.
+        const weights = [56, 42, 151, 65, 120, 42, 101, 98, 57, 33];
+        const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+        const columns = weights.map(value => width * value / totalWeight);
         const headers = ['Fecha', 'Tipo', 'Detalle', 'Categoría', 'Medio / cuenta', 'Moneda', 'Importe', 'Cargado por', 'Estado', 'Adj.'];
+        const contentBottom = doc.page.height - 60;
+        const rowLineHeight = 10;
+        const cellPadding = 4;
         let y = 0;
+        let bodyTop = 0;
+        const drawLines = (lines: string[], x: number, top: number, cellWidth: number, lineHeight: number, align: 'left' | 'right' = 'left') => {
+            lines.forEach((line, index) => {
+                doc.text(line, x, top + index * lineHeight, { width: cellWidth, height: lineHeight, align, lineBreak: false });
+            });
+        };
         const startPage = () => {
-            doc.fillColor('#4338CA').font('Helvetica-Bold').fontSize(16).text(`${agency} · ${title}`, left, 34, { width });
-            const filterY = doc.y + 7;
-            doc.fillColor('#374151').font('Helvetica').fontSize(8).text(internalReportFilterLabel(filters), left, filterY, { width });
-            y = Math.max(91, doc.y + 12);
-            doc.rect(left, y, width, 23).fill('#4338CA');
+            doc.fillColor('#4338CA').font('Helvetica-Bold').fontSize(16);
+            const heading = wrapReportText(doc, `${agency} · ${title}`.replace(/\s+/g, ' '), width);
+            drawLines(heading, left, 34, width, 20);
+            const filterY = 34 + heading.length * 20 + 7;
+            doc.fillColor('#374151').font('Helvetica').fontSize(8);
+            const filterLines = wrapReportText(doc, internalReportFilterLabel(filters).replace(/\s+/g, ' '), width);
+            drawLines(filterLines, left, filterY, width, 10);
+            y = Math.max(91, filterY + filterLines.length * 10 + 12);
+            doc.font('Helvetica-Bold').fontSize(7);
+            const headerLines = headers.map((header, index) => wrapReportText(doc, header, columns[index] - 2 * cellPadding));
+            const headerHeight = Math.max(23, Math.max(...headerLines.map(lines => lines.length)) * 9 + 12);
+            doc.rect(left, y, width, headerHeight).fill('#4338CA');
             let x = left;
-            headers.forEach((header, index) => {
-                doc.fillColor('white').font('Helvetica-Bold').fontSize(7).text(header, x + 4, y + 8, { width: columns[index] - 8 });
+            headerLines.forEach((lines, index) => {
+                doc.fillColor('white');
+                drawLines(lines, x + cellPadding, y + 6, columns[index] - 2 * cellPadding, 9, index === 6 ? 'right' : 'left');
                 x += columns[index];
             });
-            y += 27;
+            y += headerHeight + 4;
+            bodyTop = y;
         };
+        const nextPage = () => { doc.addPage(); startPage(); };
         startPage();
         for (const row of rows) {
             const paymentDetails = [row.metodoPago || 'Medio sin especificar', row.cuentaPago ? `Cuenta: ${row.cuentaPago}` : null].filter(Boolean).join('\n');
             const values = [formatDatePdf(row.fecha), row.tipo === 'GASTO' ? 'Gasto' : 'Ingreso', row.detalle, row.categoria || '—', paymentDetails, row.moneda,
                 formatCurrency(Number(row.monto), row.moneda), row.creadoPor.nombreCompleto, state(row), String(row.adjuntos.length)];
             doc.font('Helvetica').fontSize(8);
-            const height = Math.max(25, ...values.map((value, index) => doc.heightOfString(value, { width: columns[index] - 8 }) + 12));
-            if (y + height > doc.page.height - 55) { doc.addPage(); startPage(); }
-            doc.rect(left, y, width, height).fill(row.anuladoEn ? '#F3F4F6' : '#FAFAFF');
-            let x = left;
-            values.forEach((value, index) => {
-                doc.fillColor(row.anuladoEn ? '#6B7280' : '#111827').font('Helvetica').fontSize(8)
-                    .text(value, x + 4, y + 6, { width: columns[index] - 8, align: index === 6 ? 'right' : 'left' });
-                x += columns[index];
-            });
-            y += height + 3;
+            const cells = values.map((value, index) => wrapReportText(doc, value, columns[index] - 2 * cellPadding));
+            const lineCount = Math.max(...cells.map(lines => lines.length));
+            const fullHeight = Math.max(25, lineCount * rowLineHeight + 12);
+            // Keep normal rows together; only rows taller than a whole page
+            // are split, with an explicit continuation label on each new page.
+            if (y + fullHeight > contentBottom && y > bodyTop) nextPage();
+            let offset = 0;
+            while (offset < lineCount) {
+                const continuationHeight = offset > 0 ? 14 : 0;
+                if (contentBottom - y < continuationHeight + 25) nextPage();
+                const capacity = Math.floor((contentBottom - y - continuationHeight - 12) / rowLineHeight);
+                const count = Math.min(lineCount - offset, capacity);
+                const height = continuationHeight + Math.max(25, count * rowLineHeight + 12);
+                doc.rect(left, y, width, height).fill(row.anuladoEn ? '#F3F4F6' : '#FAFAFF');
+                if (offset > 0) {
+                    doc.font('Helvetica-Bold').fontSize(7).fillColor('#4B5563');
+                    drawLines([`Movimiento #${row.id} · continuación`], left + cellPadding, y + 4, width - 2 * cellPadding, 9);
+                }
+                doc.font('Helvetica').fontSize(8).fillColor(row.anuladoEn ? '#6B7280' : '#111827');
+                let x = left;
+                cells.forEach((lines, index) => {
+                    drawLines(lines.slice(offset, offset + count), x + cellPadding, y + continuationHeight + 6, columns[index] - 2 * cellPadding, rowLineHeight, index === 6 ? 'right' : 'left');
+                    x += columns[index];
+                });
+                y += height + 3;
+                offset += count;
+                if (offset < lineCount) nextPage();
+            }
         }
-        if (!rows.length) { doc.fillColor('#4B5563').fontSize(10).text('No hay movimientos para los filtros seleccionados.', left, y + 8); y += 30; }
-        if (y + 93 > doc.page.height - 55) { doc.addPage(); startPage(); }
+        if (!rows.length) {
+            doc.fillColor('#4B5563').font('Helvetica').fontSize(10);
+            drawLines(['No hay movimientos para los filtros seleccionados.'], left, y + 8, width, 12);
+            y += 30;
+        }
+        doc.font('Helvetica').fontSize(10);
+        const totals = summarizeInternalMovements(rows).map(total => wrapReportText(doc,
+            `${total.moneda}     Ingresos: ${formatCurrency(total.ingresos, total.moneda)}     Gastos: ${formatCurrency(total.gastos, total.moneda)}     Diferencia: ${formatCurrency(total.diferencia, total.moneda)}`, width));
+        const totalsHeight = 12 + 18 + totals.reduce((height, lines) => height + lines.length * 12 + 6, 0);
+        if (y + totalsHeight > contentBottom) nextPage();
         y += 12;
-        doc.fillColor('#4338CA').font('Helvetica-Bold').fontSize(10).text('TOTALES DE MOVIMIENTOS VIGENTES', left, y);
+        doc.fillColor('#4338CA').font('Helvetica-Bold').fontSize(10);
+        drawLines(['TOTALES DE MOVIMIENTOS VIGENTES'], left, y, width, 12);
         y += 18;
-        summarizeInternalMovements(rows).forEach(total => {
-            doc.fillColor('#111827').font('Helvetica').fontSize(10).text(`${total.moneda}     Ingresos: ${formatCurrency(total.ingresos, total.moneda)}     Gastos: ${formatCurrency(total.gastos, total.moneda)}     Diferencia: ${formatCurrency(total.diferencia, total.moneda)}`, left, y, { width });
-            y += 18;
+        doc.fillColor('#111827').font('Helvetica').fontSize(10);
+        totals.forEach(lines => {
+            drawLines(lines, left, y, width, 12);
+            y += lines.length * 12 + 6;
         });
         const pages = doc.bufferedPageRange();
         for (let index = pages.start; index < pages.start + pages.count; index++) {
             doc.switchToPage(index);
-            doc.fillColor('#6B7280').font('Helvetica').fontSize(7).text(`${title} · Anulados excluidos de totales · ${formatDatePdf(argentinaDateOnly())} · Página ${index + 1} de ${pages.count}`, left, doc.page.height - 35, { width, align: 'center', lineBreak: false });
+            // The footer is intentionally inside the bottom margin. Temporarily
+            // relax it, as in movement receipts, to avoid an implicit new page.
+            const bottomMargin = doc.page.margins.bottom;
+            doc.page.margins.bottom = 0;
+            doc.fillColor('#6B7280').font('Helvetica').fontSize(7).text(`${title} · Anulados excluidos de totales · ${formatDatePdf(argentinaDateOnly())} · Página ${index + 1} de ${pages.count}`, left, doc.page.height - 35, { width, height: 10, align: 'center', lineBreak: false });
+            doc.page.margins.bottom = bottomMargin;
         }
         doc.end();
     });

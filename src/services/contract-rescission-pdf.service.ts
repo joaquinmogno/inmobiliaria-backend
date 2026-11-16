@@ -1,3 +1,4 @@
+import { formatArgentinaDateTime } from '../utils/argentina-date';
 import PDFDocument from 'pdfkit';
 import type { Response } from 'express';
 import type { KeyDeliverySnapshot, RescissionSnapshot } from './contract-rescission.service';
@@ -38,7 +39,7 @@ export function sendKeyDeliveryPdf(res: Response, snapshot: KeyDeliverySnapshot,
     doc.pipe(res);
     doc.font('Helvetica-Bold').fontSize(16).text('ACTA DE ENTREGA DE INMUEBLE Y LLAVES', { align: 'center' });
     doc.moveDown().font('Helvetica').fontSize(10)
-        .text(`Acta v${version} · Contrato N.º ${contrato.id} · Emitida el ${issuedAt.toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}`);
+        .text(`Acta v${version} · Contrato N.º ${contrato.id} · Emitida el ${formatArgentinaDateTime(issuedAt)} (Buenos Aires)`);
     doc.moveDown().text(`Inmueble: ${propertyAddress(contrato)}`);
     doc.text(`Contrato: ${dateEs(contrato.fechaInicio)} al ${dateEs(contrato.fechaFin)}`);
     doc.text(`Propietario/s: ${personList(contrato.propietarios)}`);
@@ -72,9 +73,9 @@ export function sendRescissionPdf(res: Response, snapshot: RescissionSnapshot, v
     res.setHeader('Content-Disposition', `attachment; filename="acta-rescision-contrato-${contrato.id}-v${version}.pdf"`);
     doc.pipe(res);
     doc.font('Helvetica-Bold').fontSize(15).text(wording.title, { align: 'center' });
-    doc.moveDown(0.5).font('Helvetica').fontSize(9).text(`Acta v${version} · Contrato N.º ${contrato.id} · Emitida el ${issuedAt.toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: 'numeric', month: 'long', year: 'numeric' })}`, { align: 'center' });
+    doc.moveDown(0.5).font('Helvetica').fontSize(9).text(`Acta v${version} · Contrato N.º ${contrato.id} · Emitida el ${formatArgentinaDateTime(issuedAt)} (Buenos Aires)`, { align: 'center' });
     doc.moveDown(1.2).fontSize(10);
-    line('Fecha', issuedAt.toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' }));
+    line('Fecha de emisión (Buenos Aires)', formatArgentinaDateTime(issuedAt));
     line('Dirección del inmueble', propertyAddress(contrato));
     doc.moveDown().text(wording.introduction, { lineGap: 3, align: 'justify' });
     section('LAS PARTES DEJAN CONSTANCIA DE QUE');

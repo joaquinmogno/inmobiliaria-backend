@@ -1,5 +1,6 @@
 import { EstadoLiquidacion, Moneda, Prisma, TipoMovimiento } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
+import { getLiquidationCurrencyDecimalSummaries, liquidationCurrencyRelations, type MultiCurrencyLiquidation } from './liquidation-currency.service';
 import { parseDateOnly } from '../utils/argentina-date';
 
 export const REPORT_CURRENCIES = ['ARS', 'USD'] as const satisfies readonly Moneda[];
@@ -179,14 +180,7 @@ export async function getCashLedgerReport(
   return calculateCashLedger(movements, period);
 }
 
-type AccruedLiquidationRow = {
-  estado: EstadoLiquidacion;
-  moneda: Moneda;
-  netoACobrar: Prisma.Decimal | Decimal | number | string;
-  montoPropietario: Prisma.Decimal | Decimal | number | string;
-  pagos?: Array<{ monto: Prisma.Decimal | Decimal | number | string }>;
-  aplicacionesCredito?: Array<{ monto: Prisma.Decimal | Decimal | number | string }>;
-};
+type AccruedLiquidationRow = MultiCurrencyLiquidation & { estado: EstadoLiquidacion };
 
 type AccruedTotals = {
   facturado: Decimal;
@@ -194,6 +188,10 @@ type AccruedTotals = {
   importePropietariosDevengado: Decimal;
   cobradoAplicado: Decimal;
   saldoPendienteInquilinos: Decimal;
+  cobradoInquilinos: Decimal;
+  creditoAplicadoInquilinos: Decimal;
+  pagadoPropietarios: Decimal;
+  saldoPendientePropietarios: Decimal;
 };
 
 export const calculateAccruedReport = (liquidations: AccruedLiquidationRow[], period: ReportPeriod) => {
@@ -202,22 +200,29 @@ export const calculateAccruedReport = (liquidations: AccruedLiquidationRow[], pe
     honorariosDevengados: new Decimal(0),
     importePropietariosDevengado: new Decimal(0),
     cobradoAplicado: new Decimal(0),
-    saldoPendienteInquilinos: new Decimal(0)
+    saldoPendienteInquilinos: new Decimal(0),
+    cobradoInquilinos: new Decimal(0),
+    creditoAplicadoInquilinos: new Decimal(0),
+    pagadoPropietarios: new Decimal(0),
+    saldoPendientePropietarios: new Decimal(0)
   }])) as Record<ReportCurrency, AccruedTotals>;
 
   liquidations.forEach(liquidacion => {
     // El devengado representa documentos emitidos: ni borradores internos ni
     // liquidaciones anuladas pueden modificar facturación, deuda u honorarios.
     if (liquidacion.estado !== EstadoLiquidacion.CONFIRMADA) return;
-    const neto = new Decimal(liquidacion.netoACobrar.toString());
-    const propietario = new Decimal(liquidacion.montoPropietario.toString());
-    totals[liquidacion.moneda].facturado = totals[liquidacion.moneda].facturado.plus(neto);
-    totals[liquidacion.moneda].importePropietariosDevengado = totals[liquidacion.moneda].importePropietariosDevengado.plus(propietario);
-    totals[liquidacion.moneda].honorariosDevengados = totals[liquidacion.moneda].honorariosDevengados.plus(neto.minus(propietario));
-    const aplicado = [...(liquidacion.pagos || []), ...(liquidacion.aplicacionesCredito || [])]
-      .reduce((sum, item) => sum.plus(item.monto), new Decimal(0));
-    totals[liquidacion.moneda].cobradoAplicado = totals[liquidacion.moneda].cobradoAplicado.plus(Decimal.min(neto, aplicado));
-    totals[liquidacion.moneda].saldoPendienteInquilinos = totals[liquidacion.moneda].saldoPendienteInquilinos.plus(Decimal.max(new Decimal(0), neto.minus(aplicado)));
+    for (const summary of getLiquidationCurrencyDecimalSummaries(liquidacion)) {
+      const total = totals[summary.moneda];
+      total.facturado = total.facturado.plus(summary.netoACobrar);
+      total.importePropietariosDevengado = total.importePropietariosDevengado.plus(summary.montoPropietario);
+      total.honorariosDevengados = total.honorariosDevengados.plus(summary.netoACobrar.minus(summary.montoPropietario));
+      total.cobradoAplicado = total.cobradoAplicado.plus(Decimal.min(summary.netoACobrar, summary.cobradoInquilino.plus(summary.creditoAplicadoInquilino)));
+      total.saldoPendienteInquilinos = total.saldoPendienteInquilinos.plus(summary.saldoInquilino);
+      total.cobradoInquilinos = total.cobradoInquilinos.plus(summary.cobradoInquilino);
+      total.creditoAplicadoInquilinos = total.creditoAplicadoInquilinos.plus(summary.creditoAplicadoInquilino);
+      total.pagadoPropietarios = total.pagadoPropietarios.plus(summary.pagadoPropietario);
+      total.saldoPendientePropietarios = total.saldoPendientePropietarios.plus(summary.saldoPropietario);
+    }
   });
 
   return {
@@ -247,8 +252,9 @@ export async function getAccruedFinancialReport(
       moneda: true,
       netoACobrar: true,
       montoPropietario: true,
-      pagos: { where: { anuladoEn: null }, select: { monto: true } },
-      aplicacionesCredito: { select: { monto: true } }
+      montoHonorarios: true,
+      pagaHonorarios: true,
+      ...liquidationCurrencyRelations
     }
   });
   return calculateAccruedReport(liquidations, period);

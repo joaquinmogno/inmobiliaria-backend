@@ -1,3 +1,4 @@
+import { financialOperation, financialError } from '../services/financial-operation.service';
 import { Router } from 'express';
 import { invalidatePerformanceCache } from '../services/performance-cache.service';
 import { prisma } from '../prisma';
@@ -655,6 +656,7 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
 
     try {
         const actualizada = await prisma.$transaction(async tx => {
+            await tx.$queryRaw`SELECT id FROM "Liquidacion" WHERE id = ${Number(id)} AND "inmobiliariaId" = ${inmobiliariaId} FOR UPDATE`;
             const liquidacion = await tx.liquidacion.findFirst({
                 where: { id: Number(id), inmobiliariaId },
                 include: {
@@ -758,6 +760,14 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
             // La respuesta de confirmación se usa inmediatamente para actualizar
             // el detalle. Incluimos los componentes del saldo para que nunca se
             // informe $0 mientras la liquidación ya está confirmada.
+        await auditService.log({
+            usuarioId: (req as AuthRequest).user!.id,
+            inmobiliariaId,
+            accion: 'CONFIRMAR_LIQUIDACION',
+            entidad: 'Liquidacion',
+            entidadId: Number(id),
+            detalle: 'Liquidación confirmada y pasada a pendiente de pago'
+        }, tx);
             return tx.liquidacion.findUniqueOrThrow({
                 where: { id: liquidacion.id },
                 include: {
@@ -772,14 +782,7 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
         const tenantSettlement = getTenantSettlement(actualizada);
         const ownerSettlement = getOwnerPaymentSettlement(actualizada);
 
-        await auditService.log({
-            usuarioId: (req as AuthRequest).user!.id,
-            inmobiliariaId,
-            accion: 'CONFIRMAR_LIQUIDACION',
-            entidad: 'Liquidacion',
-            entidadId: Number(id),
-            detalle: 'Liquidación confirmada y pasada a pendiente de pago'
-        });
+
 
         invalidatePerformanceCache(inmobiliariaId);
         res.json({
@@ -795,6 +798,7 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
             }
         });
     } catch (error: any) {
+        error = financialError(error);
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id, inmobiliariaId,
             accion: 'CONFIRMAR_LIQUIDACION', entidad: 'Liquidacion', entidadId: Number(id),
@@ -1322,7 +1326,9 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
     try {
         const paymentDate = fechaPago ? parseDateOnly(fechaPago) : argentinaTodayAsDate();
         assertOperationalDateIsNotFuture(paymentDate, 'La fecha de pago al propietario');
-        const result = await prisma.$transaction(async (tx) => {
+        const result = await financialOperation(req as AuthRequest, async (tx) => {
+          const result = await (async () => {
+            await tx.$queryRaw`SELECT id FROM "Liquidacion" WHERE id = ${Number(id)} AND "inmobiliariaId" = ${inmobiliariaId} FOR UPDATE`;
             const liquidacion = await tx.liquidacion.findFirst({
                 where: { id: Number(id), inmobiliariaId },
                 include: {
@@ -1340,7 +1346,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
             });
 
             if (!liquidacion) {
-                throw new Error('Liquidación no encontrada');
+                throw Object.assign(new Error('Liquidación no encontrada'), { statusCode: 404 });
             }
 
             if (liquidacion.estado !== EstadoLiquidacion.CONFIRMADA) {
@@ -1494,7 +1500,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
                 periodoTexto: new Date(liquidacion.periodo).toLocaleDateString('es-AR', { month: 'long', year: 'numeric', timeZone: 'UTC' }),
                 destinoBancario
             };
-        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        })();
 
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id,
@@ -1503,12 +1509,15 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
             entidad: 'Liquidacion',
             entidadId: Number(id),
             detalle: `${result.esAdelanto ? 'Adelanto' : 'Pago'} a ${result.propietarioNombre} por ${formatCurrency(monto, result.moneda)}; pendiente para propietario: ${formatCurrency(result.saldoPropietario, result.moneda)} - ${result.propiedadDireccion} - ${result.periodoTexto}${result.destinoBancario ? ` - ${result.destinoBancario}` : ''}`
+        }, tx);
+          return result;
         });
 
         invalidatePerformanceCache(inmobiliariaId);
         res.json(result);
     } catch (error: any) {
         console.error(error);
+        error = financialError(error);
         await auditService.log({
             usuarioId: (req as AuthRequest).user!.id, inmobiliariaId,
             accion: 'PAGO_PROPIETARIO', entidad: 'Liquidacion', entidadId: Number(id),

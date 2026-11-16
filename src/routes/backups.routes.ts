@@ -1,3 +1,5 @@
+import { prisma } from '../prisma';
+import { assertBackupClientVersion } from '../services/backup-compatibility.service';
 import { NextFunction, Router } from 'express';
 import { authenticateToken, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { AuthRequest } from '../middlewares/auth.middleware';
@@ -127,6 +129,12 @@ router.post('/db', requireRecentAuthentication, async (req, res) => {
             throw new Error('DATABASE_URL no está definida');
         }
 
+        const [{ stdout: clientVersion }, server] = await Promise.all([
+            execFilePromise('pg_dump', ['--version']),
+            prisma.$queryRaw<Array<{ version: string }>>`SELECT current_setting('server_version_num') AS version`
+        ]);
+        assertBackupClientVersion(clientVersion, server[0].version);
+
         console.log(`Ejecutando backup manual de DB: ${filename}`);
         const pgDumpUrl = getPgDumpUrl(dbUrl);
         const { stderr } = await execFilePromise('pg_dump', ['-f', filepath, pgDumpUrl], {
@@ -160,7 +168,7 @@ router.post('/db', requireRecentAuthentication, async (req, res) => {
             ipAddress: getClientIp(req), userAgent: getUserAgent(req), severidad: 'CRITICAL'
         });
         const status = Number(error?.statusCode) || 500;
-        res.status(status).json({ message: status === 500 ? 'Error al generar backup' : error.message });
+        res.status(status).json({ message: status === 500 ? 'Error al generar backup' : error.message, code: error.code });
     } finally {
         if (generationAcquired) endGeneration();
         await fs.promises.unlink(filepath).catch(() => undefined);

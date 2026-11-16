@@ -1,4 +1,5 @@
-import { EstadoLiquidacion, Prisma } from '@prisma/client';
+import { getInstallmentOutstanding } from '../services/installment-plan.service';
+import { EstadoLiquidacion } from '@prisma/client';
 import { Router } from 'express';
 import { AuthRequest } from '../middlewares/auth.middleware';
 import { withPagination } from '../middlewares/pagination.middleware';
@@ -7,11 +8,11 @@ import { prisma } from '../prisma';
 import { auditService } from '../services/audit.service';
 import { argentinaTodayAsDate, parseDateOnly } from '../utils/argentina-date';
 import { getMonthlyLiquidationPreparation } from '../services/liquidation-preparation.service';
-import { getVoucherSummary } from '../services/liquidation-voucher.service';
+import { getVoucherSummary, readLiquidationVoucherSnapshot, restoreVoucherSnapshotCurrencies } from '../services/liquidation-voucher.service';
 import { buildOwnerPaymentHistory } from '../services/owner-payment-history.service';
 import { getAgencyAdvanceExposure, getOwnerPaymentSettlement, getTenantSettlement } from '../services/tenant-credit.service';
 import { getOutstandingOwnerAdvances } from '../services/owner-advance.service';
-import { getLiquidationCurrencySummaries } from '../services/liquidation-currency.service';
+import { getLiquidationCurrencySummaries, getTenantCollectionStateByCurrency, getOwnerPaymentStateByCurrency, findLiquidationFinancialMatches } from '../services/liquidation-currency.service';
 import { getContractInternalNote, INTERNAL_CONTRACT_NOTE_ACTIONS } from '../services/contract-internal-note.service';
 
 const router = Router();
@@ -34,23 +35,14 @@ router.get('/', requirePermission('liquidaciones.ver'), withPagination(50), asyn
             inmobiliariaId,
             ...(contratoId ? { contratoId: Number(contratoId) } : {}),
             ...(estado && Object.values(EstadoLiquidacion).includes(String(estado) as EstadoLiquidacion) ? { estado: String(estado) as EstadoLiquidacion } : {}),
-            ...(estadoCobro ? { estadoCobroInquilino: String(estadoCobro) } : {}),
-            ...(estadoPagoPropietario ? { estadoPagoPropietario: String(estadoPagoPropietario) } : {}),
             ...(periodo ? { periodo: parseDateOnly(String(periodo).slice(0, 10)) } : {}),
-            ...(moneda ? { moneda: String(moneda) } : {}),
+            ...(moneda ? { OR: [{ moneda: String(moneda) }, { movimientos: { some: { moneda: String(moneda) } } }] } : {}),
             ...(propiedadId ? { contrato: { propiedadId: Number(propiedadId) } } : {}),
-            ...(vencidas === 'true' ? { estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['PENDIENTE', 'PARCIAL'] }, fechaVencimiento: { lt: argentinaTodayAsDate() } } : {}),
-            ...(pendientePropietario === 'true' ? { estado: 'CONFIRMADA', estadoPagoPropietario: { in: ['PENDIENTE', 'PARCIAL'] } } : {}),
+            ...(vencidas === 'true' ? { estado: 'CONFIRMADA', fechaVencimiento: { lt: argentinaTodayAsDate() } } : {}),
+            ...(pendientePropietario === 'true' ? { estado: 'CONFIRMADA' } : {}),
             ...(conCuotas === 'true' ? { cuotas: { some: {} } } : {})
         };
         const today = argentinaTodayAsDate();
-        const operationalWhere: Record<string, any> = {
-            PENDIENTE_COBRO: { estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['PENDIENTE', 'PARCIAL'] }, OR: [{ fechaVencimiento: { gte: today } }, { fechaVencimiento: null }] },
-            EN_MORA: { estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['PENDIENTE', 'PARCIAL'] }, fechaVencimiento: { lt: today } },
-            PENDIENTE_PAGO_PROPIETARIO: { estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['COBRADO', 'NO_APLICA'] }, estadoPagoPropietario: { in: ['PENDIENTE', 'PARCIAL'] } },
-            FINALIZADA: { estado: 'CONFIRMADA', estadoCobroInquilino: { in: ['COBRADO', 'NO_APLICA'] }, estadoPagoPropietario: { in: ['PAGADO', 'NO_APLICA'] } }
-        };
-        if (estado && operationalWhere[String(estado)]) where.AND = [operationalWhere[String(estado)]];
         const contractFilters: any[] = [];
         if (search) contractFilters.push({ OR: [
             { propiedad: { direccion: { contains: String(search), mode: 'insensitive' } } },
@@ -68,17 +60,24 @@ router.get('/', requirePermission('liquidaciones.ver'), withPagination(50), asyn
             where.id = { in: advanceIds };
         }
 
-        if (soloDeuda === 'true') {
-            const debtRows = await prisma.$queryRaw<{ id: number }[]>(Prisma.sql`
-                SELECT l.id
-                FROM "Liquidacion" l
-                WHERE l."inmobiliariaId" = ${inmobiliariaId}
-                  AND l."netoACobrar" >
-                    COALESCE((SELECT SUM(p.monto) FROM "Pago" p WHERE p."liquidacionId" = l.id AND p."anuladoEn" IS NULL), 0)
-                    + COALESCE((SELECT SUM(ac.monto) FROM "AplicacionCreditoInquilino" ac WHERE ac."liquidacionId" = l.id), 0)
-            `);
-            const debtIds = debtRows.map(row => row.id);
-            where.id = where.id ? { in: where.id.in.filter((id: number) => debtIds.includes(id)) } : { in: debtIds };
+        if (soloDeuda === 'true' || vencidas === 'true' || pendientePropietario === 'true' || operationalStates.includes(String(estado)) || estadoCobro || estadoPagoPropietario) {
+            if (soloDeuda === 'true' || operationalStates.includes(String(estado))) where.AND = [{ estado: 'CONFIRMADA' }];
+            const ids = await findLiquidationFinancialMatches(prisma, where, row => {
+                const tenant = getTenantCollectionStateByCurrency(row);
+                const owner = getOwnerPaymentStateByCurrency(row);
+                const owesTenant = tenant === 'PENDIENTE' || tenant === 'PARCIAL';
+                const owesOwner = owner === 'PENDIENTE' || owner === 'PARCIAL';
+                const overdue = Boolean(row.fechaVencimiento && row.fechaVencimiento < today);
+                return (!(soloDeuda === 'true' || vencidas === 'true') || owesTenant)
+                    && (pendientePropietario !== 'true' || owesOwner)
+                    && (!estadoCobro || tenant === estadoCobro)
+                    && (!estadoPagoPropietario || owner === estadoPagoPropietario)
+                    && (estado !== 'PENDIENTE_COBRO' || (owesTenant && !overdue))
+                    && (estado !== 'EN_MORA' || (owesTenant && overdue))
+                    && (estado !== 'PENDIENTE_PAGO_PROPIETARIO' || (!owesTenant && owesOwner))
+                    && (estado !== 'FINALIZADA' || (!owesTenant && !owesOwner));
+            });
+            where.id = { in: ids };
         }
 
         const [total, liquidaciones] = await prisma.$transaction([
@@ -95,6 +94,7 @@ router.get('/', requirePermission('liquidaciones.ver'), withPagination(50), asyn
                     },
                     pagos: { where: { anuladoEn: null } },
                     aplicacionesCredito: true,
+                    movimientos: { select: { tipo: true, monto: true, moneda: true, esParaInmobiliaria: true } },
                     pagosPropietario: { where: { anuladoEn: null }, select: { monto: true, moneda: true } }
                 },
                 orderBy: [{ periodo: 'desc' }, { id: 'desc' }],
@@ -110,6 +110,9 @@ router.get('/', requirePermission('liquidaciones.ver'), withPagination(50), asyn
             const ownerSettlement = getOwnerPaymentSettlement(liquidacion);
             return {
                 ...liquidacion,
+                estadoCobroInquilino: getTenantCollectionStateByCurrency(liquidacion),
+                estadoPagoPropietario: getOwnerPaymentStateByCurrency(liquidacion),
+                resumenMonedas: getLiquidationCurrencySummaries(liquidacion),
                 montoPagadoPropietario: ownerSettlement.pagado.toNumber(),
                 resumenOperativo: {
                     cobradoInquilino: tenantSettlement.pagos.toNumber(),
@@ -243,7 +246,7 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
                     pagos: { where: { anuladoEn: null }, select: { monto: true, moneda: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true } },
                     aplicacionesCredito: { select: { monto: true } },
                     pagosPropietario: { where: { anuladoEn: null }, select: { monto: true, moneda: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true } },
-                    movimientos: { select: { concepto: true, observaciones: true } },
+                    movimientos: { select: { concepto: true, observaciones: true, tipo: true, monto: true, moneda: true, esParaInmobiliaria: true } },
                     cuotas: { include: { plan: { select: { concepto: true, _count: { select: { cuotas: true } } } }, imputacionesPago: { where: { pago: { anuladoEn: null } }, select: { monto: true } } } },
                     ajustes: { select: { id: true, tipo: true, concepto: true, motivo: true, fechaCreacion: true } }
                 },
@@ -264,11 +267,14 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
         const decision = contrato.decisionesLiquidacion.find(item => item.periodo.toISOString().slice(0, 7) === key);
         const tenant = liquidacion ? getTenantSettlement(liquidacion) : null;
         const owner = liquidacion ? getOwnerPaymentSettlement(liquidacion) : null;
+        const currencies = liquidacion ? getLiquidationCurrencySummaries(liquidacion) : [];
+        const tenantPending = currencies.some(item => item.saldoInquilino > 0);
+        const ownerPending = currencies.some(item => item.saldoPropietario > 0);
         const estado = liquidacion?.estado === 'ANULADA' ? 'ANULADA'
             : liquidacion?.estado === 'BORRADOR' ? 'BORRADOR'
-                : liquidacion && tenant && tenant.saldo.greaterThan(0) && liquidacion.fechaVencimiento && liquidacion.fechaVencimiento < today ? 'EN_MORA'
-                    : liquidacion && tenant && tenant.saldo.greaterThan(0) ? 'PENDIENTE_COBRO'
-                        : liquidacion && owner && owner.saldo.greaterThan(0) ? 'PENDIENTE_PAGO_PROPIETARIO'
+                : liquidacion && tenantPending && liquidacion.fechaVencimiento && liquidacion.fechaVencimiento < today ? 'EN_MORA'
+                    : liquidacion && tenantPending ? 'PENDIENTE_COBRO'
+                        : liquidacion && ownerPending ? 'PENDIENTE_PAGO_PROPIETARIO'
                             : liquidacion ? 'FINALIZADA'
                                 : decision ? 'OMITIDA'
                                     : !contrato.administrado || (contrato.estado !== 'ACTIVO' && !(contrato.fechaEntregaLlaves && ['EN_CIERRE', 'FINALIZADO'].includes(contrato.estado) && !contrato.actasRescision.length && cursor <= new Date(Date.UTC(contrato.fechaEntregaLlaves.getUTCFullYear(), contrato.fechaEntregaLlaves.getUTCMonth(), 1)))) || contrato.inquilinos.length !== 1 || contrato.propietarios.length !== 1 || Number(contrato.montoAlquiler) <= 0 ? 'REQUIERE_REVISION'
@@ -276,6 +282,12 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
         periodos.push({
             periodo: cursor.toISOString().slice(0, 10), estado,
             liquidacionId: liquidacion?.id || null,
+            estadoLiquidacion: liquidacion?.estado || null,
+            estadoCobroInquilino: liquidacion ? getTenantCollectionStateByCurrency(liquidacion) : null,
+            estadoPagoPropietario: liquidacion ? getOwnerPaymentStateByCurrency(liquidacion) : null,
+            fechaLiquidacion: liquidacion?.fechaLiquidacion || null,
+            cerradoPorId: liquidacion?.cerradoPorId || null,
+            resumenMonedas: liquidacion ? getLiquidationCurrencySummaries(liquidacion) : [],
             total: liquidacion ? Number(liquidacion.netoACobrar) : null,
             cobrado: tenant ? tenant.pagos.toNumber() : 0,
             saldoInquilino: tenant ? tenant.saldo.toNumber() : 0,
@@ -287,7 +299,7 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
             cuotas: liquidacion?.cuotas.map(cuota => ({
                 id: cuota.id, concepto: cuota.plan.concepto, numeroCuota: cuota.numeroCuota,
                 cantidadCuotas: cuota.plan._count.cuotas, monto: Number(cuota.monto), estado: cuota.estado,
-                saldo: Math.max(0, Number(cuota.monto) - cuota.imputacionesPago.reduce((sum, item) => sum + Number(item.monto), 0))
+                saldo: getInstallmentOutstanding(cuota).toNumber()
             })) || [],
             ajustes: liquidacion?.ajustes || [],
             observacion: decision?.motivo || null,
@@ -408,11 +420,20 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
             ...liquidacion,
             pagosPropietario: pagosPropietario.filter(payment => !payment.anuladoEn)
         });
+        const resumenComprobantes = await Promise.all(comprobantes.map(async comprobante => {
+            const snapshot = readLiquidationVoucherSnapshot(comprobante.fotografia);
+            // La tarjeta usa la misma recuperación de monedas que el PDF, sin
+            // modificar la fotografía ni tomar importes de la liquidación actual.
+            const restored = snapshot ? await restoreVoucherSnapshotCurrencies(snapshot, prisma) : null;
+            return getVoucherSummary(comprobante, restored);
+        }));
         res.json({
             ...detalleLiquidacion,
+            estadoCobroInquilino: getTenantCollectionStateByCurrency(liquidacion),
+            estadoPagoPropietario: getOwnerPaymentStateByCurrency(liquidacion),
             notaInternaContrato: getContractInternalNote(liquidacion.contrato),
             montoPagadoPropietario: ownerSettlement.pagado.toNumber(),
-            comprobantes: comprobantes.map(getVoucherSummary),
+            comprobantes: resumenComprobantes,
             historialPagosPropietario: buildOwnerPaymentHistory(liquidacion.montoPropietario, pagosPropietario, Object.fromEntries(resumenMonedas.map(summary => [summary.moneda, summary.montoPropietario]))),
             resumenMonedas,
             resumenOperativo: {

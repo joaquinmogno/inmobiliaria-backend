@@ -1347,3 +1347,18 @@ enum TipoDocumentoContrato {
   ACTA_RESCISION_FIRMADA
   ACTA_LLAVES_FIRMADA
 }
+
+// Persistent replay receipts. Retained independently of audit retention.
+model OperacionFinanciera {
+  id             Int      @id @default(autoincrement())
+  inmobiliariaId Int
+  usuarioId      Int
+  clave          String   @db.VarChar(100)
+  alcance        String   @db.VarChar(200)
+  hashSolicitud  String   @db.VarChar(64)
+  respuesta      Json
+  fechaCreacion  DateTime @default(now())
+
+  @@unique([inmobiliariaId, clave])
+  @@index([usuarioId])
+}

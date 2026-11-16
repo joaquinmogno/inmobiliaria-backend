@@ -26,10 +26,10 @@ export const getAuditRequestMetadata = (req: Request & { requestId?: string }) =
 });
 
 export const auditService = {
-  log: async (params: AuditLogParams): Promise<boolean> => {
+  log: async (params: AuditLogParams, tx?: Prisma.TransactionClient): Promise<boolean> => {
     const requestContext = getRequestAuditContext();
     try {
-      await prisma.auditLog.create({
+      await (tx || prisma).auditLog.create({
         data: {
           usuarioId: params.usuarioId ?? null,
           inmobiliariaId: params.inmobiliariaId,
@@ -46,6 +46,7 @@ export const auditService = {
       });
       return true;
     } catch (error) {
+      if (tx) throw error;
       logger.error('AUDIT_SINK_FAILURE', {
         alert: true,
         requestId: params.requestId || requestContext?.requestId,

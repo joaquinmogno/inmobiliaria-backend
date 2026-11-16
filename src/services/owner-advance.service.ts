@@ -30,26 +30,30 @@ export async function getOutstandingOwnerAdvances(db: Database, inmobiliariaId: 
                     id: true,
                     contratoId: true,
                     moneda: true,
-                    pagos: { where: { anuladoEn: null }, select: { monto: true } }
+                    pagos: { where: { anuladoEn: null }, select: { monto: true, moneda: true } }
                 }
             }
         },
         orderBy: [{ fechaPago: 'asc' }, { id: 'asc' }]
     });
-    const grouped = new Map<number, { ownerTotal: Decimal; tenantTotal: Decimal; moneda: string; fechaOrigen: Date }>();
+    const grouped = new Map<string, { liquidacionId: number; ownerTotal: Decimal; tenantTotal: Decimal; moneda: string; fechaOrigen: Date }>();
     for (const payment of ownerPayments) {
-        const current = grouped.get(payment.liquidacionId) || {
+        const currency = payment.moneda || payment.liquidacion.moneda;
+        const key = `${payment.liquidacionId}:${currency}`;
+        const current = grouped.get(key) || {
+            liquidacionId: payment.liquidacionId,
             ownerTotal: new Decimal(0),
-            tenantTotal: payment.liquidacion.pagos.reduce((sum: Decimal, tenantPayment: { monto: Decimal }) => sum.plus(tenantPayment.monto), new Decimal(0)),
-            moneda: payment.liquidacion.moneda,
+            tenantTotal: payment.liquidacion.pagos.filter((row: { moneda?: string }) => (row.moneda || payment.liquidacion.moneda) === currency).reduce((sum: Decimal, tenantPayment: { monto: Decimal }) => sum.plus(tenantPayment.monto), new Decimal(0)),
+            moneda: currency,
             fechaOrigen: payment.fechaPago
         };
         current.ownerTotal = current.ownerTotal.plus(payment.monto);
         if (payment.fechaPago < current.fechaOrigen) current.fechaOrigen = payment.fechaPago;
-        grouped.set(payment.liquidacionId, current);
+        grouped.set(key, current);
     }
     const today = argentinaTodayAsDate();
-    return [...grouped.entries()].flatMap(([liquidacionId, summary]) => {
+    return [...grouped.entries()].flatMap(([, summary]) => {
+        const { liquidacionId } = summary;
         const monto = Decimal.max(new Decimal(0), summary.ownerTotal.minus(summary.tenantTotal));
         if (monto.isZero()) return [];
         const antiguedadDias = Math.max(0, Math.floor((today.getTime() - summary.fechaOrigen.getTime()) / 86_400_000));
@@ -58,15 +62,21 @@ export async function getOutstandingOwnerAdvances(db: Database, inmobiliariaId: 
     });
 }
 
-export const summarizeOwnerAdvanceAging = (advances: OwnerAdvance[]) => ({
-    cantidad: advances.length,
-    porAntiguedad: {
-        '0_15': advances.filter(item => item.antiguedadDias <= 15).length,
-        '16_30': advances.filter(item => item.antiguedadDias >= 16 && item.antiguedadDias <= 30).length,
-        '31_mas': advances.filter(item => item.antiguedadDias >= 31).length
-    },
-    porMoneda: advances.reduce<Record<string, number>>((result, item) => {
-        result[item.moneda] = (result[item.moneda] || 0) + item.monto.toNumber();
-        return result;
-    }, {})
-});
+export const summarizeOwnerAdvanceAging = (advances: OwnerAdvance[]) => {
+    const ages = new Map<number, number>();
+    const totals: Record<string, Decimal> = {};
+    for (const item of advances) {
+        ages.set(item.liquidacionId, Math.max(ages.get(item.liquidacionId) || 0, item.antiguedadDias));
+        totals[item.moneda] = (totals[item.moneda] || new Decimal(0)).plus(item.monto);
+    }
+    const days = [...ages.values()];
+    return {
+        cantidad: ages.size,
+        porAntiguedad: {
+            '0_15': days.filter(age => age <= 15).length,
+            '16_30': days.filter(age => age >= 16 && age <= 30).length,
+            '31_mas': days.filter(age => age >= 31).length
+        },
+        porMoneda: Object.fromEntries(Object.entries(totals).map(([currency, amount]) => [currency, amount.toNumber()]))
+    };
+};

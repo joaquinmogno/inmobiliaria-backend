@@ -113,3 +113,22 @@ test('un comprobante antiguo sin registro original mantiene la moneda contractua
   assert.equal(restored.movimientos[0].moneda, 'ARS');
   assert.equal(restored.movimientos[0].monto, 100000);
 });
+
+test('la tarjeta separa monedas y correcciones usando sólo su fotografía', () => {
+  const mixed = structuredClone(snapshot);
+  mixed.liquidacion.moneda = 'USD';
+  mixed.liquidacion.pagaHonorarios = 'PROPIETARIO';
+  mixed.totalesOriginales = { ...mixed.totalesOriginales, netoACobrar: 1000, montoPropietario: 950, montoHonorarios: 50 };
+  mixed.liquidacion.totales = { ...mixed.liquidacion.totales, netoACobrar: 900, montoPropietario: 850, montoHonorarios: 50 };
+  mixed.movimientos = [
+    { ...mixed.movimientos[0], monto: 1000, moneda: 'USD' },
+    { ...mixed.movimientos[0], id: 2, monto: 135760.25, moneda: 'ARS' },
+  ];
+  const before = structuredClone(mixed);
+  const result = getVoucherSummary({ id: 88, version: 2, fotografia: mixed });
+  assert.deepEqual(result.importesPorMoneda, [
+    { moneda: 'USD', importeOriginal: 1000, importeCorregido: 900, importePropietarioOriginal: 950, importePropietarioCorregido: 850 },
+    { moneda: 'ARS', importeOriginal: 135760.25, importeCorregido: 135760.25, importePropietarioOriginal: 135760.25, importePropietarioCorregido: 135760.25 },
+  ]);
+  assert.deepEqual(mixed, before);
+});

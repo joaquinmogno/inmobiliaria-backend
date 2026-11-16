@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
     dateOnlyString,
     nonNegativeDecimal,
+    nonNegativeMoney,
     optionalBooleanFromForm,
     optionalCuit,
     optionalDateOnlyString,
@@ -11,7 +12,7 @@ import {
     optionalPhone,
     optionalText,
     paymentMethodSchema,
-    positiveDecimal,
+    positiveMoney,
     requiredText
 } from '../middlewares/validation.middleware';
 import { parseDateOnly } from '../utils/argentina-date';
@@ -103,13 +104,14 @@ const contractCreateSchemaBase = z.object({
     propiedadId: z.coerce.number().int().positive('Propiedad inválida').optional(),
     contratoAnteriorId: z.preprocess(value => value === '' || value === null ? undefined : value, z.coerce.number().int().positive('Contrato anterior inválido').optional()),
     borradorId: z.preprocess(value => value === '' || value === null ? undefined : value, z.coerce.number().int().positive('Borrador inválido').optional()),
+    borradorVersion: z.coerce.number().int().positive().optional(),
     propiedad: parseJsonField(propertyCandidateSchema).optional(),
     propietarioIds: idListFromForm.optional(),
     inquilinoIds: idListFromForm.optional(),
     propietarios: parseJsonField(z.array(personCandidateSchema).min(1, 'Debe seleccionar al menos un propietario')).optional(),
     inquilinos: parseJsonField(z.array(personCandidateSchema).min(1, 'Debe seleccionar al menos un inquilino')).optional(),
-    montoAlquiler: positiveDecimal('El monto de alquiler'),
-    montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional().default(0),
+    montoAlquiler: positiveMoney('El monto de alquiler'),
+    montoHonorarios: nonNegativeMoney('El monto de honorarios').optional().default(0),
     moneda: z.enum(['ARS', 'USD']).optional().default('ARS'),
     porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional().default(5)),
     pagaHonorarios: z.literal('PROPIETARIO').optional().default('PROPIETARIO'),
@@ -121,7 +123,7 @@ const contractCreateSchemaBase = z.object({
     tipoAjuste: optionalText(80),
     administrado: optionalBooleanFromForm.default(true),
     requiereActualizacion: optionalBooleanFromForm.default(true),
-    honorarioInicial: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El honorario inicial').optional()),
+    honorarioInicial: z.preprocess(value => value === '' ? undefined : value, nonNegativeMoney('El honorario inicial').optional()),
     // Se mantiene opcional para que las integraciones existentes conserven la
     // moneda del contrato cuando todavía no envían esta nueva selección.
     monedaHonorarioInicial: z.enum(['ARS', 'USD']).optional(),
@@ -172,7 +174,7 @@ export const contractCreateSchema = contractCreateSchemaBase.superRefine((value,
 });
 
 export const contractUpdateSchema = contractCreateSchemaBase
-    .omit({ propiedadId: true, contratoAnteriorId: true, borradorId: true, propietarioIds: true, inquilinoIds: true, honorarioInicial: true, monedaHonorarioInicial: true, honorarioInicialMetodoPago: true, honorarioInicialCuentaBancariaId: true })
+    .omit({ propiedadId: true, contratoAnteriorId: true, borradorId: true, borradorVersion: true, propietarioIds: true, inquilinoIds: true, honorarioInicial: true, monedaHonorarioInicial: true, honorarioInicialMetodoPago: true, honorarioInicialCuentaBancariaId: true })
     .partial()
     .extend({
         administrado: optionalBooleanFromForm,
@@ -241,7 +243,7 @@ export const contractRescissionRevisionSchema = rescissionFields.safeExtend({ mo
 export type ContractRescissionInput = z.infer<typeof contractRescissionSchema>;
 
 export const contractRentUpdateSchema = z.object({
-    montoNuevo: positiveDecimal('El monto nuevo'),
+    montoNuevo: positiveMoney('El monto nuevo'),
     fechaProximaNueva: dateOnlyString('La próxima fecha'),
     observaciones: optionalText(1000),
     version: optimisticVersionSchema

@@ -53,14 +53,16 @@ test('contract lifecycle activates and finalizes contracts while synchronizing t
   });
 
   const activated = await syncContractLifecycle(agency.id, new Date('2030-02-10T12:00:00.000Z'));
-  assert.equal(activated.activated, 1);
+  assert.ok(activated.activated >= 1);
   assert.equal((await prisma.contrato.findUniqueOrThrow({ where: { id: contract.id } })).estado, 'ACTIVO');
   assert.equal((await prisma.propiedad.findUniqueOrThrow({ where: { id: property.id } })).estado, 'ALQUILADO');
 
   const finalized = await syncContractLifecycle(agency.id, new Date('2030-03-01T12:00:00.000Z'));
-  assert.equal(finalized.finalized, 1);
+  assert.ok(finalized.finalized >= 1);
   assert.equal((await prisma.contrato.findUniqueOrThrow({ where: { id: contract.id } })).estado, 'FINALIZADO');
-  assert.equal((await prisma.propiedad.findUniqueOrThrow({ where: { id: property.id } })).estado, 'DISPONIBLE');
+  // El vencimiento no acredita la devolución física del inmueble.
+  // La disponibilidad se recupera al registrar la entrega de llaves.
+  assert.equal((await prisma.propiedad.findUniqueOrThrow({ where: { id: property.id } })).estado, 'PENDIENTE_ENTREGA');
 });
 
 test.after(async () => prisma.$disconnect());

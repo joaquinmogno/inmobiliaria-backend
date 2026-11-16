@@ -2,10 +2,11 @@ import { z } from 'zod';
 import {
     dateOnlyString,
     nonNegativeDecimal,
+    nonNegativeMoney,
     optionalDateOnlyString,
     optionalText,
     paymentMethodSchema,
-    positiveDecimal,
+    positiveMoney,
     requiredText
 } from '../middlewares/validation.middleware';
 import { optimisticVersionSchema } from '../utils/optimistic-lock';
@@ -15,7 +16,7 @@ export const liquidacionCreateSchema = z.object({
     periodo: dateOnlyString('El período').refine(value => value.endsWith('-01'), {
         message: 'El período debe comenzar el día 01'
     }),
-    montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional(),
+    montoHonorarios: nonNegativeMoney('El monto de honorarios').optional(),
     porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional()),
     cuotasIds: z.array(z.coerce.number().int().positive()).optional()
 });
@@ -23,7 +24,7 @@ export const liquidacionCreateSchema = z.object({
 export const movimientoSchema = z.object({
     tipo: z.enum(['INGRESO', 'DESCUENTO', 'EGRESO']),
     concepto: requiredText('El concepto', 255),
-    monto: positiveDecimal('El monto'),
+    monto: positiveMoney('El monto'),
     moneda: z.enum(['ARS', 'USD']).optional(),
     observaciones: optionalText(1000),
     esParaInmobiliaria: z.boolean().optional().default(false),
@@ -42,7 +43,7 @@ export const notaInternaContratoSchema = z.object({
 }).strict();
 
 export const honorariosSchema = z.object({
-    montoHonorarios: nonNegativeDecimal('El monto de honorarios').optional(),
+    montoHonorarios: nonNegativeMoney('El monto de honorarios').optional(),
     porcentajeHonorarios: z.preprocess(value => value === '' ? undefined : value, nonNegativeDecimal('El porcentaje de honorarios').max(100).optional()),
     motivo: requiredText('El motivo del cambio', 1000).refine(value => value.length >= 5, { message: 'El motivo debe tener al menos 5 caracteres' }),
     expectedVersion: z.coerce.number().int().positive().optional()
@@ -53,7 +54,7 @@ export const honorariosSchema = z.object({
 });
 
 export const alquilerBorradorSchema = z.object({
-    montoNuevo: positiveDecimal('El nuevo alquiler'),
+    montoNuevo: positiveMoney('El nuevo alquiler'),
     alcance: z.enum(['SOLO_PERIODO', 'DESDE_PERIODO']),
     motivo: requiredText('El motivo del cambio', 1000).refine(value => value.length >= 5, { message: 'El motivo debe tener al menos 5 caracteres' }),
     fechaProximaNueva: optionalDateOnlyString('La próxima actualización'),
@@ -67,7 +68,7 @@ export const alquilerBorradorSchema = z.object({
 });
 
 export const pagoPropietarioSchema = z.object({
-    monto: positiveDecimal('El monto a pagar'),
+    monto: positiveMoney('El monto a pagar'),
     moneda: z.enum(['ARS', 'USD']).optional(),
     fechaPago: optionalDateOnlyString('La fecha de pago'),
     metodoPago: paymentMethodSchema.optional().default('EFECTIVO'),
@@ -85,8 +86,8 @@ export const ajusteLiquidacionSchema = z.object({
     motivo: requiredText('El motivo', 1000).refine(value => value.length >= 5, { message: 'El motivo debe tener al menos 5 caracteres' }),
     // El operador informa importes positivos. El backend define el signo según
     // el tipo para impedir que el comprobante y los saldos se contradigan.
-    montoInquilino: nonNegativeDecimal('El importe del inquilino').optional().default(0),
-    montoPropietario: nonNegativeDecimal('El importe del propietario').optional().default(0),
+    montoInquilino: nonNegativeMoney('El importe del inquilino').optional().default(0),
+    montoPropietario: nonNegativeMoney('El importe del propietario').optional().default(0),
     destinoCredito: z.enum(['DEVOLUCION', 'SALDO_A_FAVOR', 'COMPENSACION']).optional(),
     liquidacionDestinoId: z.coerce.number().int().positive('Liquidación destino inválida').optional(),
     fechaDevolucion: optionalDateOnlyString('La fecha de devolución'),
@@ -112,7 +113,7 @@ export const ajusteLiquidacionSchema = z.object({
 
 export const aplicarCreditoInquilinoSchema = z.object({
     liquidacionDestinoId: z.coerce.number().int().positive('Liquidación destino inválida'),
-    monto: positiveDecimal('El monto a aplicar')
+    monto: positiveMoney('El monto a aplicar')
 });
 
 export const anulacionPagoPropietarioSchema = z.object({

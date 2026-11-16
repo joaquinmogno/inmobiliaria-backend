@@ -1,3 +1,4 @@
+require('./financial-request-fixture');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { prisma } = require('../dist/prisma');

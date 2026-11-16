@@ -3,56 +3,55 @@ import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { TipoMovimiento, EstadoPlanCuotas, EstadoCuota } from '@prisma/client';
 import { auditService } from '../services/audit.service';
-import { validateBody, requiredText, positiveDecimal, booleanFromForm, dateOnlyString } from '../middlewares/validation.middleware';
+import { validateBody, requiredText, positiveMoney, booleanFromForm, dateOnlyString } from '../middlewares/validation.middleware';
 import { z } from 'zod';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { formatCurrency } from '../utils/currency';
 import { Decimal } from '@prisma/client/runtime/library';
-import { distributeInstallmentAmounts } from '../services/installment-plan.service';
+import { buildInstallmentSchedule, summarizeInstallments } from '../services/installment-plan.service';
+import { installmentScheduleSchema } from '../validation/installment-plan.schemas';
 
 const router = Router();
 
 router.use(authenticateToken);
 
-const planCuotasSchema = z.object({
+const planCuotasSchema = installmentScheduleSchema.safeExtend({
     contratoId: z.coerce.number().int().positive('Contrato inválido'),
     concepto: requiredText('El concepto', 255),
-    montoTotal: positiveDecimal('El monto total').refine(value => new Decimal(value).decimalPlaces() <= 2, {
-        message: 'El monto total admite como máximo dos decimales'
-    }),
-    cantidadCuotas: z.coerce.number().int().min(1, 'Debe tener al menos una cuota').max(120, 'Máximo 120 cuotas'),
-    fechaPrimeraCuota: dateOnlyString('El período de la primera cuota').refine(value => value.endsWith('-01'), {
-        message: 'El período de la primera cuota debe comenzar el día 01'
-    }),
     tipoMovimiento: z.enum(['INGRESO', 'DESCUENTO', 'EGRESO']),
     esParaInmobiliaria: booleanFromForm.optional().default(false)
-}).superRefine((value, ctx) => {
-    const totalCents = new Decimal(value.montoTotal).times(100).toNumber();
-    if (totalCents < value.cantidadCuotas) {
-        ctx.addIssue({
-            code: 'custom',
-            path: ['montoTotal'],
-            message: 'El monto total debe permitir cuotas de al menos 0,01'
-        });
-    }
 });
 
 const planLifecycleSchema = z.object({
     motivo: requiredText('El motivo', 1000).refine(value => value.trim().length >= 5, { message: 'El motivo debe tener al menos 5 caracteres' })
 });
+const reprogramarPlanSchema = installmentScheduleSchema.safeExtend({
+    motivo: planLifecycleSchema.shape.motivo,
+    montoPendienteEsperado: positiveMoney('El pendiente revisado').optional()
+});
+const previewSchema = installmentScheduleSchema.safeExtend({
+    contratoId: z.coerce.number().int().positive(),
+    planId: z.coerce.number().int().positive().optional()
+});
 
-const reprogramarPlanSchema = planLifecycleSchema.extend({
-    montoTotal: positiveDecimal('El monto total').refine(value => new Decimal(value).decimalPlaces() <= 2, {
-        message: 'El monto total admite como máximo dos decimales'
-    }),
-    cantidadCuotas: z.coerce.number().int().min(1, 'Debe tener al menos una cuota').max(120, 'Máximo 120 cuotas'),
-    fechaPrimeraCuota: dateOnlyString('El período de la primera cuota').refine(value => value.endsWith('-01'), {
-        message: 'El período de la primera cuota debe comenzar el día 01'
-    })
-}).superRefine((value, ctx) => {
-    if (new Decimal(value.montoTotal).times(100).lessThan(value.cantidadCuotas)) {
-        ctx.addIssue({ code: 'custom', path: ['montoTotal'], message: 'El monto total debe permitir cuotas de al menos 0,01' });
-    }
+// Read-only quote: uses exactly the schedule persisted by create/reschedule.
+router.post('/vista-previa', requirePermission('liquidaciones.editar'), validateBody(previewSchema), async (req, res, next) => {
+    const { inmobiliariaId } = (req as AuthRequest).user!;
+    const { contratoId, planId, montoTotal, cantidadCuotas, fechaPrimeraCuota } = req.body;
+    try {
+        const contract = await prisma.contrato.findFirst({ where: { id: contratoId, inmobiliariaId }, select: { moneda: true } });
+        if (!contract) return res.status(404).json({ message: 'Contrato no encontrado' });
+        const plan = planId ? await prisma.planCuotas.findFirst({ where: { id: planId, contratoId, inmobiliariaId }, include: { cuotas: true } }) : null;
+        if (planId && !plan) return res.status(404).json({ message: 'Plan no encontrado' });
+        const cuotas = buildInstallmentSchedule(montoTotal, cantidadCuotas, fechaPrimeraCuota);
+        res.json({
+            moneda: plan?.moneda || contract.moneda,
+            montoTotal: new Decimal(montoTotal).toFixed(2),
+            sumaCuotas: cuotas.reduce((sum, item) => sum.plus(item.monto), new Decimal(0)).toFixed(2),
+            cuotas,
+            ...(plan ? { resumen: summarizeInstallments(plan.cuotas), estadoPlan: plan.estado } : {})
+        });
+    } catch (error) { next(error); }
 });
 
 const assertPlanHasAvailableInstallments = (plan: { estado: EstadoPlanCuotas; cuotas: Array<{ id: number; estado: EstadoCuota; liquidacionId: number | null; movimientoId: number | null }> }) => {
@@ -90,8 +89,7 @@ router.post('/', requirePermission('liquidaciones.editar'), validateBody(planCuo
             return res.status(404).json({ message: 'Contrato no encontrado' });
         }
 
-        const installmentAmounts = distributeInstallmentAmounts(montoTotal, cantidadCuotas);
-        const [firstYear, firstMonth] = fechaPrimeraCuota.split('-').map(Number);
+        const schedule = buildInstallmentSchedule(montoTotal, cantidadCuotas, fechaPrimeraCuota);
 
         const plan = await prisma.$transaction(async (tx) => {
             const newPlan = await tx.planCuotas.create({
@@ -107,20 +105,12 @@ router.post('/', requirePermission('liquidaciones.editar'), validateBody(planCuo
                 }
             });
 
-            const cuotasData = [];
-            for (let i = 1; i <= cantidadCuotas; i++) {
-                cuotasData.push({
-                    planId: newPlan.id,
-                    numeroCuota: i,
-                    fechaVencimiento: new Date(Date.UTC(firstYear, firstMonth - 1 + (i - 1), 1)),
-                    monto: installmentAmounts[i - 1],
-                    moneda: contrato.moneda,
-                    estado: EstadoCuota.PENDIENTE
-                });
-            }
-
             await tx.cuotaPlan.createMany({
-                data: cuotasData
+                data: schedule.map(item => ({
+                    planId: newPlan.id, numeroCuota: item.numeroCuota,
+                    fechaVencimiento: new Date(`${item.fechaVencimiento}T00:00:00.000Z`),
+                    monto: item.monto, moneda: contrato.moneda, estado: EstadoCuota.PENDIENTE
+                }))
             });
 
             return newPlan;
@@ -170,7 +160,7 @@ router.get('/contrato/:contratoId', requirePermission('liquidaciones.ver'), asyn
             }
         });
 
-        res.json(planes);
+        res.json(planes.map(plan => ({ ...plan, resumen: summarizeInstallments(plan.cuotas) })));
     } catch (error) {
         console.error('Error in GET /contrato/:contratoId:', error);
         res.status(500).json({ message: 'Error al obtener planes de cuotas' });
@@ -276,14 +266,17 @@ router.post('/:id/condonar', requirePermission('liquidaciones.editar'), requireR
 router.post('/:id/reprogramar', requirePermission('liquidaciones.editar'), requireRecentAuthentication, validateBody(reprogramarPlanSchema), async (req, res) => {
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
     const planId = Number(req.params.id);
-    const { motivo, montoTotal, cantidadCuotas, fechaPrimeraCuota } = req.body;
+    const { motivo, montoTotal, cantidadCuotas, fechaPrimeraCuota, montoPendienteEsperado } = req.body;
     try {
         const result = await prisma.$transaction(async tx => {
             const current = await tx.planCuotas.findFirst({ where: { id: planId, inmobiliariaId }, include: { cuotas: true } });
             if (!current) throw Object.assign(new Error('Plan no encontrado'), { statusCode: 404, code: 'INSTALLMENT_PLAN_NOT_FOUND' });
             const pendientes = assertPlanHasAvailableInstallments(current);
-            const amounts = distributeInstallmentAmounts(montoTotal, cantidadCuotas);
-            const [year, month] = fechaPrimeraCuota.split('-').map(Number);
+            const previousSummary = summarizeInstallments(current.cuotas);
+            if (montoPendienteEsperado !== undefined && !new Decimal(montoPendienteEsperado).equals(previousSummary.montoPendienteDisponible)) {
+                throw Object.assign(new Error('El pendiente del plan cambió. Volvé a abrir la reprogramación para revisar los importes actuales.'), { statusCode: 409, code: 'INSTALLMENT_BALANCE_CHANGED' });
+            }
+            const schedule = buildInstallmentSchedule(montoTotal, cantidadCuotas, fechaPrimeraCuota);
             const successor = await tx.planCuotas.create({
                 data: {
                     concepto: current.concepto,
@@ -298,11 +291,11 @@ router.post('/:id/reprogramar', requirePermission('liquidaciones.editar'), requi
                 }
             });
             await tx.cuotaPlan.createMany({
-                data: amounts.map((amount, index) => ({
+                data: schedule.map(item => ({
                     planId: successor.id,
-                    numeroCuota: index + 1,
-                    fechaVencimiento: new Date(Date.UTC(year, month - 1 + index, 1)),
-                    monto: amount,
+                    numeroCuota: item.numeroCuota,
+                    fechaVencimiento: new Date(`${item.fechaVencimiento}T00:00:00.000Z`),
+                    monto: item.monto,
                     moneda: current.moneda,
                     estado: EstadoCuota.PENDIENTE
                 }))
@@ -312,11 +305,11 @@ router.post('/:id/reprogramar', requirePermission('liquidaciones.editar'), requi
                 where: { id: current.id },
                 data: { estado: EstadoPlanCuotas.REPROGRAMADO, motivoCierre: motivo, fechaCierre: new Date(), cerradoPorId: usuarioId }
             });
-            return { original, successor };
+            return { original, successor, resumenAnterior: previousSummary };
         }, { isolationLevel: 'Serializable' });
         await auditService.log({
             usuarioId, inmobiliariaId, accion: 'REPROGRAMAR_PLAN_CUOTAS', entidad: 'PlanCuotas', entidadId: planId, severidad: 'WARNING',
-            detalle: JSON.stringify({ motivo, planSucesorId: result.successor.id, montoTotal, cantidadCuotas, fechaPrimeraCuota })
+            detalle: JSON.stringify({ motivo, planSucesorId: result.successor.id, montoTotal, cantidadCuotas, fechaPrimeraCuota, pendienteAnterior: result.resumenAnterior.montoPendienteDisponible, variacionTotal: new Decimal(montoTotal).minus(result.resumenAnterior.montoPendienteDisponible).toFixed(2), importeCuotasPagadas: result.resumenAnterior.montoCuotasPagadas })
         });
         res.status(201).json({ message: 'Plan reprogramado; se creó un plan sucesor y se conservó el anterior', ...result });
     } catch (error: any) {

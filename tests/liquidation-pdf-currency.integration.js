@@ -1,3 +1,4 @@
+require('./financial-request-fixture');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
@@ -75,6 +76,21 @@ async function latestVoucher(id) {
   return prisma.comprobanteLiquidacion.findFirstOrThrow({ where: { liquidacionId: id }, orderBy: { version: 'desc' } });
 }
 
+async function assertHistoryAmounts(fixture, expected) {
+  const detail = await json(`/liquidaciones/${fixture.liq.id}`);
+  const list = await json(`/liquidaciones?contratoId=${fixture.contract.id}`);
+  const row = list.data.find(item => item.id === fixture.liq.id);
+  const timeline = await json(`/liquidaciones/contrato/${fixture.contract.id}/periodos`);
+  const period = timeline.periodos.find(item => item.liquidacionId === fixture.liq.id);
+  assert.deepEqual(row.resumenMonedas, detail.resumenMonedas);
+  assert.deepEqual(period.resumenMonedas, detail.resumenMonedas);
+  assert.deepEqual(detail.resumenMonedas.map(item => [item.moneda, item.cobradoInquilino]), expected);
+  for (const voucher of detail.comprobantes) {
+    assert.deepEqual(voucher.importesPorMoneda.map(item => [item.moneda, item.importeCorregido]), expected);
+    assert.deepEqual(voucher.importesPorMoneda.map(item => [item.moneda, item.importePropietarioCorregido]), expected);
+  }
+}
+
 function assertMixedAmounts(text, recipient, ownerUsd = '1.000,00', ars = '135.760,00') {
   assert.match(text, /Alquiler Mensual\s+US\$1\.000,00/);
   assert.match(text, /EDESUR\s+\$135\.760,00/);
@@ -117,6 +133,7 @@ test('el PDF de borrador y cada versión separan alquiler USD, servicio ARS y sa
   await pay(fixture, 'USD', 1000);
   await payOwner(fixture, 'ARS', 135760);
   await payOwner(fixture, 'USD', 1000);
+  await assertHistoryAmounts(fixture, [['USD', 1000], ['ARS', 135760]]);
   const full = await latestVoucher(fixture.liq.id);
   assert.deepEqual(full.fotografia.pagos.map(row => row.moneda), ['ARS', 'USD']);
   assert.deepEqual(full.fotografia.pagosPropietario.map(row => row.moneda), ['ARS', 'USD']);
@@ -184,6 +201,7 @@ for (const moneda of ['ARS', 'USD']) test(`un comprobante sólo en ${moneda} con
   await confirm(fixture.liq);
   await pay(fixture, moneda, 1000);
   await payOwner(fixture, moneda, 1000);
+  await assertHistoryAmounts(fixture, [[moneda, 1000]]);
   const voucher = await latestVoucher(fixture.liq.id);
   for (const recipient of ['INQUILINO', 'PROPIETARIO']) {
     const text = await pdf(fixture.liq.id, recipient, voucher.version);

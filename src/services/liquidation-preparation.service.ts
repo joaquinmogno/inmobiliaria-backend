@@ -1,3 +1,4 @@
+import { getLiquidationCurrencySummaries, getTenantCollectionStateByCurrency, getOwnerPaymentStateByCurrency, liquidationCurrencyRelations } from './liquidation-currency.service';
 import { Decimal } from '@prisma/client/runtime/library';
 import { EstadoContrato } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -66,7 +67,7 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
                 where: { periodo: period },
                 take: 1,
                 include: {
-                    pagos: { where: { anuladoEn: null }, select: { monto: true } },
+                    ...liquidationCurrencyRelations,
                     propietarioPago: { select: { id: true, nombreCompleto: true } }
                 }
             },
@@ -87,12 +88,11 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
     const overdueContracts = await prisma.liquidacion.findMany({
         where: {
             inmobiliariaId, estado: 'CONFIRMADA', fechaVencimiento: { lt: argentinaTodayAsDate() },
-            estadoCobroInquilino: { in: ['PENDIENTE', 'PARCIAL'] },
             contrato: { administrado: true, eliminadoEn: null }
         },
-        select: { contratoId: true }, distinct: ['contratoId']
+        include: liquidationCurrencyRelations
     });
-    const overdueContractIds = new Set(overdueContracts.map(item => item.contratoId));
+    const overdueContractIds = new Set(overdueContracts.filter(item => hasTenantCollectionPending(getTenantCollectionStateByCurrency(item))).map(item => item.contratoId));
 
     const rows = contracts.map(contract => {
         const existing = contract.liquidaciones[0];
@@ -174,8 +174,10 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             if (problemas.length) status = 'REVISAR';
         }
 
-        const paid = existing?.pagos.reduce((sum, payment) => sum.plus(payment.monto), new Decimal(0)) || new Decimal(0);
-        const remaining = existing ? Decimal.max(new Decimal(existing.netoACobrar.toString()).minus(paid), 0) : new Decimal(0);
+        const resumenMonedas = existing ? getLiquidationCurrencySummaries(existing) : [];
+        const principal = resumenMonedas.find(item => item.moneda === contract.moneda);
+        const tenantState = existing ? getTenantCollectionStateByCurrency(existing) : null;
+        const ownerState = existing ? getOwnerPaymentStateByCurrency(existing) : null;
         const onlyOverdueInstallments = status === 'REVISAR'
             && problemas.every(problem => problem.codigo === 'OVERDUE_INSTALLMENTS');
 
@@ -200,11 +202,13 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             puedeGenerarseAlResolverCuotas: onlyOverdueInstallments,
             liquidacionId: existing?.id || null,
             estadoLiquidacion: existing?.estado || null,
-            estadoCobroInquilino: existing?.estadoCobroInquilino || null,
-            estadoPagoPropietario: existing?.estadoPagoPropietario || null,
+            fechaLiquidacion: existing?.fechaLiquidacion || null,
+            cerradoPorId: existing?.cerradoPorId || null,
+            estadoCobroInquilino: tenantState,
+            estadoPagoPropietario: ownerState,
             proximaAccion: existing?.estado === 'BORRADOR' ? 'Revisar borrador'
-                : existing?.estado === 'CONFIRMADA' && hasTenantCollectionPending(existing.estadoCobroInquilino) ? 'Registrar cobro del inquilino'
-                    : existing?.estado === 'CONFIRMADA' && hasOwnerPaymentPending(existing.estadoPagoPropietario) ? `Pagar a ${existing.propietarioNombre || contract.propietarios[0]?.persona.nombreCompleto || 'propietario'}`
+                : existing?.estado === 'CONFIRMADA' && hasTenantCollectionPending(tenantState) ? 'Registrar cobro del inquilino'
+                    : existing?.estado === 'CONFIRMADA' && hasOwnerPaymentPending(ownerState) ? `Pagar a ${existing.propietarioNombre || contract.propietarios[0]?.persona.nombreCompleto || 'propietario'}`
                         : existing?.estado === 'CONFIRMADA' ? 'Ver comprobantes'
                             : status === 'LISTA' && contract.fechaEntregaLlaves ? 'Generar liquidación final y cargar alquiler manual'
                                 : status === 'LISTA' ? 'Generar borrador'
@@ -214,9 +218,10 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             montoAlquiler: effectiveRent.toString(),
             montoHonorarios: fee.toString(),
             totalLiquidacion: existing?.netoACobrar.toString() || null,
-            pagado: paid.toString(),
-            pendiente: remaining.toString(),
-            vencida: Boolean(existing?.estado === 'CONFIRMADA' && hasTenantCollectionPending(existing.estadoCobroInquilino) && existing.fechaVencimiento && existing.fechaVencimiento < argentinaTodayAsDate()),
+            resumenMonedas,
+            pagado: String(principal?.cobradoInquilino ?? 0),
+            pendiente: String(principal?.saldoInquilino ?? 0),
+            vencida: Boolean(existing?.estado === 'CONFIRMADA' && hasTenantCollectionPending(tenantState) && existing.fechaVencimiento && existing.fechaVencimiento < argentinaTodayAsDate()),
             moraHoy: overdueContractIds.has(contract.id),
             cuotasPeriodo: currentInstallments.map(mapInstallment),
             cuotasVencidas: overdueInstallments.map(mapInstallment),

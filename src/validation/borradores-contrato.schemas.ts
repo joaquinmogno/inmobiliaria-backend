@@ -31,6 +31,14 @@ const formSchema = z.object({
     porcentajeActualizacion: text(10),
     pagaHonorarios: z.enum(['INQUILINO', 'PROPIETARIO']),
     diaVencimiento: text(2),
+    modalidadCobroInquilino: z.enum(['', 'EFECTIVO', 'TRANSFERENCIA', 'CHEQUE']).default(''),
+    modalidadPagoPropietario: z.enum(['', 'EFECTIVO', 'TRANSFERENCIA', 'CHEQUE']).default(''),
+    cuentaCobroAcordadaId: z.string().max(20).regex(/^(?:[1-9]\d*)?$/).default(''),
+    serviciosGastos: z.array(z.object({
+        id: optionalId,
+        concepto: text(120),
+        responsable: z.enum(['INQUILINO', 'PROPIETARIO'])
+    }).strict()).max(30).default([]),
     tipoAjuste: text(80),
     observacionDocumento: text(1000),
     observations: text(2000),

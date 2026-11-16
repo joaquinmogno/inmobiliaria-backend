@@ -1,5 +1,6 @@
 import PDFDocument from 'pdfkit';
 import type { ReceiptSnapshot, ReceiptStatus } from './movement-receipt.service';
+import { formatArgentinaDateTime } from '../utils/argentina-date';
 
 const dateLabel = (value: string) => value.slice(0, 10).split('-').reverse().join('/');
 const amountLabel = (value: string, currency: string) => `${currency === 'USD' ? 'US$' : '$'} ${Number(value).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${currency})`;
@@ -25,8 +26,8 @@ export function buildMovementReceiptPdf(snapshot: ReceiptSnapshot, identity: { n
             doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(23).text('RECIBO DE PAGO');
             doc.moveDown(0.35).fontSize(11).text(identity.estado === 'BORRADOR' ? 'VISTA PREVIA · SIN EMITIR' : `${identity.numero} · Versión ${identity.version}`);
             doc.moveDown(0.5).font('Helvetica').fontSize(10).fillColor('#475569').text(`Fecha del pago: ${dateLabel(movimiento.fecha)}`);
-            const issued = identity.fechaEmision.toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', dateStyle: 'short', timeStyle: 'short' });
-            doc.text(`${identity.estado === 'BORRADOR' ? 'Vista previa' : 'Emitido'}: ${issued}`);
+            const issued = formatArgentinaDateTime(identity.fechaEmision);
+            doc.text(`${identity.estado === 'BORRADOR' ? 'Vista previa' : 'Emitido'}: ${issued} · Hora de Buenos Aires`);
             doc.moveDown(1.2);
             const statusText = {
                 VIGENTE: '', BORRADOR: 'VISTA PREVIA — SIN EMITIR', ANULADO: 'ANULADO — EL MOVIMIENTO FUE ANULADO',

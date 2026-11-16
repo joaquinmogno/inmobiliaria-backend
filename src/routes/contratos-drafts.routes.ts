@@ -1,4 +1,7 @@
 import { Router } from 'express';
+import { createHash } from 'crypto';
+import { createReadStream } from 'fs';
+import path from 'path';
 import { TipoDocumentoContrato } from '@prisma/client';
 import { prisma } from '../prisma';
 import { AuthRequest } from '../middlewares/auth.middleware';
@@ -11,6 +14,8 @@ import {
     contractDraftWriteSchema
 } from '../validation/borradores-contrato.schemas';
 import { auditService } from '../services/audit.service';
+import { draftScope, lockContractDraft } from '../services/contract-draft.service';
+import { AppError } from '../errors/app-error';
 
 const router = Router();
 
@@ -19,10 +24,12 @@ const draftInclude = {
     creadoPor: { select: { id: true, nombreCompleto: true } }
 };
 
-const draftScope = (user: NonNullable<AuthRequest['user']>) => ({
-    inmobiliariaId: user.inmobiliariaId,
-    ...(user.tipo === 'ADMIN' ? {} : { creadoPorId: user.id })
-});
+const fileHash = async (filePath: string) => {
+    const hash = createHash('sha256');
+    for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+    return hash.digest('hex');
+};
+const uploadRoot = process.env.UPLOAD_DIR || path.join(__dirname, '../../uploads');
 
 const draftSummary = (datos: unknown) => {
     const data = datos as { form?: { address?: string }; selectedProperty?: { direccion?: string } | null; owners?: Array<{ nombreCompleto?: string }>; tenants?: Array<{ nombreCompleto?: string }> };
@@ -51,15 +58,17 @@ router.get('/', requirePermission('contratos.crear'), async (req, res) => {
     }
 });
 
-router.get('/:id', requirePermission('contratos.crear'), async (req, res) => {
+router.get('/:id', requirePermission('contratos.crear'), async (req, res, next) => {
     const user = (req as AuthRequest).user!;
     const id = Number(req.params.id);
-    const draft = await prisma.borradorContrato.findFirst({
-        where: { id, ...draftScope(user) },
-        include: draftInclude
-    });
-    if (!draft) return res.status(404).json({ message: 'Borrador no encontrado' });
-    res.json(withSummary(draft));
+    try {
+        const draft = await prisma.borradorContrato.findFirst({
+            where: { id, ...draftScope(user) },
+            include: draftInclude
+        });
+        if (!draft) return res.status(404).json({ message: 'Borrador no encontrado' });
+        res.json(withSummary(draft));
+    } catch (error) { next(error); }
 });
 
 router.post('/', requirePermission('contratos.crear'), validateBody(contractDraftWriteSchema), async (req, res) => {
@@ -93,16 +102,18 @@ router.put('/:id', requirePermission('contratos.crear'), validateBody(contractDr
     const user = (req as AuthRequest).user!;
     const id = Number(req.params.id);
     try {
-        const existing = await prisma.borradorContrato.findFirst({ where: { id, ...draftScope(user) } });
-        if (!existing) return res.status(404).json({ message: 'Borrador no encontrado' });
-        if (existing.version !== req.body.version) {
-            return res.status(409).json({ message: 'El borrador cambió mientras lo estabas editando. Actualizá la pantalla.', code: 'DRAFT_CHANGED' });
-        }
-        const draft = await prisma.borradorContrato.update({
-            where: { id },
-            data: { datos: req.body.datos, actualizadoPorId: user.id, version: { increment: 1 } },
-            include: draftInclude
+        const draft = await prisma.$transaction(async tx => {
+            const updated = await tx.borradorContrato.updateMany({
+                where: { id, ...draftScope(user), version: req.body.version },
+                data: { datos: req.body.datos, actualizadoPorId: user.id, version: { increment: 1 } }
+            });
+            return updated.count ? tx.borradorContrato.findFirstOrThrow({ where: { id, ...draftScope(user) }, include: draftInclude }) : null;
         });
+        if (!draft) {
+            const exists = await prisma.borradorContrato.findFirst({ where: { id, ...draftScope(user) }, select: { id: true } });
+            if (!exists) return res.status(404).json({ message: 'Borrador no encontrado' });
+            return res.status(409).json({ message: 'Otra pestaña guardó una versión nueva. Tus cambios siguen en el formulario. Copialos antes de cerrar y volver a continuar el borrador actualizado.', code: 'DRAFT_CHANGED' });
+        }
         await auditService.log({
             usuarioId: user.id,
             inmobiliariaId: user.inmobiliariaId,
@@ -124,23 +135,37 @@ router.post('/:id/adjuntos', requirePermission('contratos.crear'), upload.single
     if (!req.file) return res.status(400).json({ message: 'No se subió ningún archivo' });
 
     const filePath = await commitUploadedFile(req.file, user.inmobiliariaId);
+    let persisted = false;
     try {
-        const draft = await prisma.borradorContrato.findFirst({ where: { id: draftId, ...draftScope(user) } });
-        if (!draft) {
-            await removeUploadedFile(filePath);
-            return res.status(404).json({ message: 'Borrador no encontrado' });
-        }
-
         const tipo = req.body.tipo as TipoDocumentoContrato;
-        const replaced = tipo === TipoDocumentoContrato.CONTRATO_PRINCIPAL
-            ? await prisma.adjuntoBorradorContrato.findMany({ where: { borradorId: draftId, tipo }, select: { rutaArchivo: true } })
-            : [];
-        const attachment = await prisma.$transaction(async tx => {
+        const incomingHash = await fileHash(req.file.path);
+        const result = await prisma.$transaction(async tx => {
+            await lockContractDraft(tx, draftId, user);
+            const existing = await tx.adjuntoBorradorContrato.findMany({ where: { borradorId: draftId, tipo } });
+            // A response can be lost after commit. Retrying the same file must
+            // return its existing attachment, even from another tab.
+            for (const item of existing.filter(item => item.nombreArchivo === req.file!.originalname)) {
+                if (await fileHash(path.join(uploadRoot, item.rutaArchivo)) === incomingHash) {
+                    return { attachment: item, duplicate: true, replaced: [] };
+                }
+            }
+            const replaced = tipo === TipoDocumentoContrato.CONTRATO_PRINCIPAL ? existing : [];
             if (replaced.length) await tx.adjuntoBorradorContrato.deleteMany({ where: { borradorId: draftId, tipo } });
-            return tx.adjuntoBorradorContrato.create({
+            const attachment = await tx.adjuntoBorradorContrato.create({
                 data: { borradorId: draftId, rutaArchivo: filePath!, nombreArchivo: req.file!.originalname, tipo, creadoPorId: user.id }
             });
+            await tx.borradorContrato.update({ where: { id: draftId }, data: { fechaActualizacion: new Date() } });
+            return { attachment, duplicate: false, replaced };
         });
+        const { attachment, replaced, duplicate } = result;
+        if (duplicate) {
+            await removeUploadedFile(filePath);
+            return res.status(200).json(attachment);
+        }
+        persisted = true;
+        // From now on the file belongs to a committed row, even if a later
+        // response fails. The generic failed-request cleanup must leave it.
+        req.file = undefined;
         await Promise.all(replaced.map(item => removeUploadedFile(item.rutaArchivo)));
         await auditService.log({
             usuarioId: user.id,
@@ -152,7 +177,8 @@ router.post('/:id/adjuntos', requirePermission('contratos.crear'), upload.single
         });
         res.status(201).json(attachment);
     } catch (error) {
-        await removeUploadedFile(filePath);
+        if (!persisted) await removeUploadedFile(filePath);
+        if (error instanceof AppError) return res.status(error.statusCode).json({ message: error.message, code: error.code });
         console.error('Error uploading contract draft attachment:', error);
         res.status(500).json({ message: 'No se pudo guardar el archivo del borrador' });
     }
@@ -163,14 +189,20 @@ router.delete('/:id/adjuntos/:adjuntoId', requirePermission('contratos.crear'), 
     const draftId = Number(req.params.id);
     const attachmentId = Number(req.params.adjuntoId);
     try {
-        const attachment = await prisma.adjuntoBorradorContrato.findFirst({
-            where: { id: attachmentId, borradorId: draftId, borrador: draftScope(user) }
+        const attachment = await prisma.$transaction(async tx => {
+            await lockContractDraft(tx, draftId, user);
+            const item = await tx.adjuntoBorradorContrato.findFirst({ where: { id: attachmentId, borradorId: draftId } });
+            if (item) {
+                await tx.adjuntoBorradorContrato.delete({ where: { id: item.id } });
+                await tx.borradorContrato.update({ where: { id: draftId }, data: { fechaActualizacion: new Date() } });
+            }
+            return item;
         });
         if (!attachment) return res.status(404).json({ message: 'Archivo del borrador no encontrado' });
-        await prisma.adjuntoBorradorContrato.delete({ where: { id: attachmentId } });
         await removeUploadedFile(attachment.rutaArchivo);
         res.status(204).send();
     } catch (error) {
+        if (error instanceof AppError) return res.status(error.statusCode).json({ message: error.message, code: error.code });
         console.error('Error deleting contract draft attachment:', error);
         res.status(500).json({ message: 'No se pudo eliminar el archivo del borrador' });
     }
@@ -180,12 +212,14 @@ router.delete('/:id', requirePermission('contratos.crear'), async (req, res) => 
     const user = (req as AuthRequest).user!;
     const id = Number(req.params.id);
     try {
-        const draft = await prisma.borradorContrato.findFirst({
-            where: { id, ...draftScope(user) },
-            include: { adjuntos: { select: { rutaArchivo: true } } }
+        const draft = await prisma.$transaction(async tx => {
+            await lockContractDraft(tx, id, user);
+            const item = await tx.borradorContrato.findFirstOrThrow({
+                where: { id, ...draftScope(user) }, include: { adjuntos: { select: { rutaArchivo: true } } }
+            });
+            await tx.borradorContrato.delete({ where: { id } });
+            return item;
         });
-        if (!draft) return res.status(404).json({ message: 'Borrador no encontrado' });
-        await prisma.borradorContrato.delete({ where: { id } });
         await Promise.all(draft.adjuntos.map(item => removeUploadedFile(item.rutaArchivo)));
         await auditService.log({
             usuarioId: user.id,
@@ -197,6 +231,7 @@ router.delete('/:id', requirePermission('contratos.crear'), async (req, res) => 
         });
         res.status(204).send();
     } catch (error) {
+        if (error instanceof AppError) return res.status(error.statusCode).json({ message: error.message, code: error.code });
         console.error('Error deleting contract draft:', error);
         res.status(500).json({ message: 'No se pudo eliminar el borrador' });
     }

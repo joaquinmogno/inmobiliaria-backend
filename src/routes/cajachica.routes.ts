@@ -4,7 +4,7 @@ import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { TipoMovimiento, MetodoPago, CuentaCaja, Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
-import { validateBody, requiredText, positiveDecimal, dateOnlyString, optionalText, paymentMethodSchema } from '../middlewares/validation.middleware';
+import { validateBody, requiredText, positiveMoney, dateOnlyString, optionalText, paymentMethodSchema } from '../middlewares/validation.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
@@ -21,7 +21,7 @@ router.use('/:id/recibos', authenticateToken, createMovementReceiptRouter('CAJA'
 const movimientoCajaSchema = z.object({
     tipo: z.enum(['INGRESO', 'DESCUENTO', 'EGRESO']),
     concepto: requiredText('El concepto', 255),
-    monto: positiveDecimal('El monto'),
+    monto: positiveMoney('El monto'),
     moneda: z.enum(['ARS', 'USD']).optional().default('ARS'),
     fecha: dateOnlyString('La fecha'),
     metodoPago: paymentMethodSchema.optional().default('EFECTIVO'),
@@ -32,7 +32,7 @@ const movimientoCajaSchema = z.object({
 const transferenciaInternaSchema = z.object({
     fecha: dateOnlyString('La fecha'),
     moneda: z.enum(['ARS', 'USD']),
-    monto: positiveDecimal('El monto'),
+    monto: positiveMoney('El monto'),
     cuentaOrigenId: z.coerce.number().int().positive('La cuenta de origen es inválida'),
     cuentaDestinoId: z.coerce.number().int().positive('La cuenta de destino es inválida'),
     concepto: requiredText('El concepto', 255),

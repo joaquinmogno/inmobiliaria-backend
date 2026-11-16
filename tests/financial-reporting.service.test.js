@@ -8,6 +8,42 @@ const {
   getMonthlyReportPeriod,
 } = require('../dist/services/financial-reporting.service');
 
+test('the report includes secondary currencies, adjustments, credits and owner balances without counting void payments', () => {
+  const report = calculateAccruedReport([{
+    estado: 'CONFIRMADA', moneda: 'ARS', montoHonorarios: 10000, pagaHonorarios: 'PROPIETARIO',
+    netoACobrar: 115000, montoPropietario: 105000,
+    movimientos: [
+      { tipo: 'INGRESO', monto: 120000, moneda: 'ARS', esParaInmobiliaria: false },
+      { tipo: 'DESCUENTO', monto: 5000, moneda: 'ARS', esParaInmobiliaria: false },
+      { tipo: 'INGRESO', monto: 100, moneda: 'USD', esParaInmobiliaria: false },
+    ],
+    pagos: [{ monto: 115000, moneda: 'ARS' }, { monto: 100, moneda: 'USD' }, { monto: 9000, moneda: 'USD', anuladoEn: new Date() }],
+    pagosPropietario: [{ monto: 50000, moneda: 'ARS' }],
+  }], getMonthlyReportPeriod(2026, 11));
+  assert.equal(report.porMoneda.ARS.facturado, 115000);
+  assert.equal(report.porMoneda.USD.facturado, 100);
+  assert.equal(report.porMoneda.ARS.cobradoInquilinos, 115000);
+  assert.equal(report.porMoneda.USD.cobradoInquilinos, 100);
+  assert.equal(report.porMoneda.ARS.saldoPendienteInquilinos, 0);
+  assert.equal(report.porMoneda.USD.saldoPendienteInquilinos, 0);
+  assert.equal(report.porMoneda.ARS.saldoPendientePropietarios, 55000);
+  assert.equal(report.porMoneda.USD.saldoPendientePropietarios, 100);
+});
+
+test('accrued aggregation keeps cents, recognizes adjusted persisted totals and separates credits from cash', () => {
+  const report = calculateAccruedReport(Array.from({ length: 1000 }, () => ({
+    estado: 'CONFIRMADA', moneda: 'USD', netoACobrar: '0.03', montoPropietario: '0.02',
+    movimientos: [{ tipo: 'INGRESO', monto: 10, moneda: 'USD', esParaInmobiliaria: false }],
+    pagos: [{ monto: '0.01' }], aplicacionesCredito: [{ monto: '0.01' }],
+  })), getMonthlyReportPeriod(2026, 11));
+  assert.equal(report.porMoneda.USD.facturado, 30);
+  assert.equal(report.porMoneda.USD.cobradoAplicado, 20);
+  assert.equal(report.porMoneda.USD.cobradoInquilinos, 10);
+  assert.equal(report.porMoneda.USD.creditoAplicadoInquilinos, 10);
+  assert.equal(report.porMoneda.USD.saldoPendienteInquilinos, 10);
+  assert.equal(report.porMoneda.ARS.facturado, 0);
+});
+
 test('cash ledger excludes future movements from a historical closing and records reversals in their own month', () => {
   const august = getMonthlyReportPeriod(2026, 8);
   const september = getMonthlyReportPeriod(2026, 9);

@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { z, ZodTypeAny } from 'zod';
+import { Decimal } from '@prisma/client/runtime/library';
 import { parsePhoneNumberFromString } from 'libphonenumber-js/min';
 import { parseDateOnly } from '../utils/argentina-date';
 import { normalizePersonDni } from '../utils/person-dni';
@@ -113,6 +114,22 @@ export const positiveDecimal = (field: string) =>
 export const nonNegativeDecimal = (field: string) =>
     z.coerce.number({ error: `${field} debe ser numérico` })
         .min(0, `${field} no puede ser negativo`);
+
+// The API accepts canonical decimals, not locale-formatted strings. All money
+// columns used by these operations are Decimal(10, 2); reject instead of
+// silently rounding excess precision or overflowing when persisted.
+const moneyAmount = (field: string) => z.union([
+    z.number().finite(),
+    z.string().trim().regex(/^-?\d+(?:\.\d{1,2})?$/, `${field} debe usar punto decimal, sin separadores de miles y hasta dos decimales`)
+]).transform(Number).pipe(z.number()
+    .max(99_999_999.99, `${field} no puede superar 99.999.999,99`)
+    .refine(value => new Decimal(value).decimalPlaces() <= 2, `${field} admite hasta dos decimales`));
+
+export const positiveMoney = (field: string) => moneyAmount(field)
+    .refine(value => value > 0, `${field} debe ser mayor a cero`);
+
+export const nonNegativeMoney = (field: string) => moneyAmount(field)
+    .refine(value => value >= 0, `${field} no puede ser negativo`);
 
 export const dateOnlyString = (field: string) =>
     z.string({ error: `${field} es obligatorio` })
