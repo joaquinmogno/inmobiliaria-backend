@@ -9,8 +9,11 @@ const colors = { ink: '#182235', muted: '#526073', violet: '#55418b', line: '#d9
 
 export function buildMovementReceiptPdf(snapshot: ReceiptSnapshot, identity: { numero: string; version: number; fechaEmision: Date; estado: ReceiptStatus | 'BORRADOR' }): Promise<Buffer> {
     return new Promise((resolve, reject) => {
+        // The installation's default application name is not the agency's identity.
+        // Only presentation changes: retain the saved participants and snapshot verbatim.
+        const agencyName = /^prop\s*control$/i.test(snapshot.emisor.nombre.trim()) ? '' : snapshot.emisor.nombre;
         // Subsequent pages reserve space for a compact identification header.
-        const doc = new PDFDocument({ size: 'A4', margins: { top: 94, left: 42, right: 42, bottom: 70 }, bufferPages: true, info: { Title: `Recibo ${identity.numero} · v${identity.version}`, Author: snapshot.emisor.nombre } });
+        const doc = new PDFDocument({ size: 'A4', margins: { top: 94, left: 42, right: 42, bottom: 70 }, bufferPages: true, info: { Title: `Recibo ${identity.numero} · v${identity.version}`, Author: agencyName } });
         const chunks: Buffer[] = [];
         doc.on('data', chunk => chunks.push(chunk));
         doc.on('end', () => resolve(Buffer.concat(chunks)));
@@ -75,20 +78,25 @@ export function buildMovementReceiptPdf(snapshot: ReceiptSnapshot, identity: { n
 
             // Agency identity and document identity share one header, without a large empty band.
             const agencyWidth = width - 174;
-            let logoOffset = 0;
+            let agencyEnd = y;
+            let hasLogo = false;
             if (emisor.logo) {
-                try { doc.image(Buffer.from(emisor.logo, 'base64'), left, y, { fit: [64, 48] }); logoOffset = 76; }
+                try {
+                    doc.image(Buffer.from(emisor.logo, 'base64'), left, y, { fit: [168, 64] });
+                    agencyEnd = y + 72;
+                    hasLogo = true;
+                }
                 catch { /* Historic missing/corrupt logos retain the textual agency identity. */ }
             }
-            let agencyEnd = text(emisor.nombre, left + logoOffset, y, agencyWidth - logoOffset, 15, true, colors.violet);
+            if (agencyName) agencyEnd = text(agencyName, left, agencyEnd, agencyWidth, hasLogo ? 10 : 15, !hasLogo, hasLogo ? colors.muted : colors.ink);
             for (const line of [emisor.cuit ? `CUIT ${emisor.cuit}` : '', emisor.direccion, emisor.contacto].filter(Boolean)) {
-                agencyEnd = text(line!, left + logoOffset, agencyEnd + 4, agencyWidth - logoOffset, 9, false, colors.muted);
+                agencyEnd = text(line!, left, agencyEnd + 4, agencyWidth, 9, false, colors.muted);
             }
             const identityX = right - 158;
             let identityEnd = text('RECIBO DE PAGO', identityX, y, 158, 15, true, colors.ink, 'right');
             identityEnd = text(documentRef, identityX, identityEnd + 8, 158, 12, true, colors.violet, 'right');
             identityEnd = text(`${draft ? 'Versión propuesta' : 'Versión'} ${identity.version}`, identityX, identityEnd + 4, 158, 9, false, colors.muted, 'right');
-            y = Math.max(agencyEnd, identityEnd, logoOffset ? 90 : 0) + 16;
+            y = Math.max(agencyEnd, identityEnd) + 16;
             rule(y); y += 12;
             if (status) {
                 const h = height(status, width - 20, 9, true) + 16;
