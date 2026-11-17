@@ -1,3 +1,5 @@
+import { updateContractPhones } from '../services/contract-phones.service';
+import { isPersonIdentityUniqueConflict, PERSON_IDENTITY_DUPLICATE_CODE, PERSON_IDENTITY_DUPLICATE_MESSAGE } from '../utils/person-identity';
 import { Router } from 'express';
 import { lockContractDraft } from '../services/contract-draft.service';
 import { prisma } from '../prisma';
@@ -499,7 +501,10 @@ router.delete('/:id/permanente', requirePermission('contratos.eliminar'), async 
 });
 
 // Update contract
-router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), validateUploadedFileContent, cleanupFailedUpload, validateBody(contractUpdateSchema), async (req, res) => {
+router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), validateUploadedFileContent, cleanupFailedUpload, validateBody(contractUpdateSchema), (req, res, next) => {
+    if (req.body.telefonosPersonas?.length) return requirePermission('personas.editar')(req, res, next);
+    next();
+}, async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
     const {
@@ -523,6 +528,7 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         moneda,
         serviciosGastos,
         observacionDocumento,
+        telefonosPersonas,
         version
     } = req.body;
 
@@ -701,6 +707,17 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
                 ? (await tx.contrato.findFirst({ where: { id: Number(id), inmobiliariaId }, select: { version: true } }))?.version
                 : undefined;
             assertOptimisticUpdate(claim.count, version, currentVersion);
+            const phoneChanges = await updateContractPhones(tx, {
+                contratoId: contract.id, inmobiliariaId,
+                usuarioId: (req as AuthRequest).user!.id,
+                updates: telefonosPersonas || []
+            });
+            if (phoneChanges.length) {
+                changes.telefonosPersonas = {
+                    anterior: phoneChanges.map(change => ({ personaId: change.personaId, telefono: change.anterior })),
+                    nuevo: phoneChanges.map(change => ({ personaId: change.personaId, telefono: change.nuevo }))
+                };
+            }
             if (rentChanged) {
                 await tx.actualizacionContrato.create({
                     data: {
@@ -770,6 +787,12 @@ router.put('/:id', requirePermission('contratos.editar'), upload.single('pdf'), 
         if (uploadedFilePath) await removeUploadedFile(uploadedFilePath);
         if (error instanceof AppError) {
             return res.status(error.statusCode).json({ message: error.message, code: error.code, details: error.details });
+        }
+        if (isPersonIdentityUniqueConflict(error)) {
+            return res.status(409).json({ message: PERSON_IDENTITY_DUPLICATE_MESSAGE, code: PERSON_IDENTITY_DUPLICATE_CODE });
+        }
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+            return res.status(409).json({ message: 'Otro usuario modificó el contrato o sus contactos. Cerrá y volvé a abrir la ficha para revisar los datos.', code: 'STALE_WRITE' });
         }
         console.error(error);
         res.status(500).json({ message: 'Error al actualizar contrato' });

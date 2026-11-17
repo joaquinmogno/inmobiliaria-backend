@@ -5,7 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const ExcelJS = require('exceljs');
 const { Prisma } = require('@prisma/client');
-const { movimientoInternoSchema, filtroControlInternoSchema } = require('../dist/validation/control-interno.schemas');
+const { movimientoInternoSchema, editarMovimientoInternoSchema, filtroControlInternoSchema } = require('../dist/validation/control-interno.schemas');
 const { internalMovementWhere, summarizeInternalMovements, internalReportMonthLabel, internalReportFilterLabel } = require('../dist/services/control-interno.service');
 const { buildInternalExcel, buildInternalPdf } = require('../dist/services/control-interno-report.service');
 
@@ -32,6 +32,34 @@ test('la cuenta del pago es una referencia opcional que conserva el nombre y se 
   assert.equal(movimientoInternoSchema.parse({ ...valid, cuentaPago: '  Nación · Cuenta personal (ARS)  ' }).cuentaPago, 'Nación · Cuenta personal (ARS)');
   for (const cuentaPago of ['', '   ', null]) assert.equal(movimientoInternoSchema.parse({ ...valid, cuentaPago }).cuentaPago, null);
   for (const cuentaPago of ['a'.repeat(221), 123, {}]) assert.equal(movimientoInternoSchema.safeParse({ ...valid, cuentaPago }).success, false);
+});
+
+test('crear y editar transferencias exige banco/cuenta, incluso con espacios o variantes del medio', () => {
+  const valid = { fecha: '2026-11-17', detalle: 'Reparación del baño', monto: '300000', version: 1 };
+  for (const schema of [movimientoInternoSchema, editarMovimientoInternoSchema]) {
+    for (const tipo of ['GASTO', 'INGRESO']) {
+      for (const metodoPago of ['Transferencia', ' TRANSFERENCIA ', 'transferencia bancaria', 'TRANSFERENCIA_BANCARIA', 'Transferencia  Bancaria']) {
+        for (const cuentaPago of [undefined, null, '', '   ']) {
+          const result = schema.safeParse({ ...valid, tipo, metodoPago, cuentaPago });
+          assert.equal(result.success, false, `${metodoPago}: ${String(cuentaPago)}`);
+          assert.ok(result.error.issues.some(issue => issue.path.join('.') === 'cuentaPago' && issue.message.includes(tipo === 'GASTO' ? 'origen' : 'destino')));
+        }
+        const data = schema.parse({ ...valid, tipo, metodoPago, cuentaPago: '  Banco Nación · Cuenta personal  ' });
+        assert.equal(data.cuentaPago, 'Banco Nación · Cuenta personal');
+      }
+    }
+  }
+});
+
+test('los otros medios siguen admitiendo una cuenta vacía al crear o editar', () => {
+  const valid = { fecha: '2026-11-17', detalle: 'Reparación del baño', monto: '300000', version: 1 };
+  for (const schema of [movimientoInternoSchema, editarMovimientoInternoSchema]) {
+    for (const metodoPago of [undefined, null, '', 'Efectivo', 'Cheque', 'Tarjeta', 'Otro']) {
+      for (const cuentaPago of [undefined, null, '', '   ']) {
+        assert.equal(schema.safeParse({ ...valid, metodoPago, cuentaPago }).success, true, String(metodoPago));
+      }
+    }
+  }
 });
 
 test('la consulta mensual usa límites civiles exactos y siempre pertenece a una inmobiliaria', () => {

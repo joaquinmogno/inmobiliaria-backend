@@ -173,12 +173,30 @@ export const contractCreateSchema = contractCreateSchemaBase.superRefine((value,
     }
 });
 
+const contractPhoneUpdateSchema = z.object({
+    personaId: z.number().int().positive(),
+    version: optimisticVersionSchema,
+    telefono: z.union([z.string(), z.null()]).transform((value, ctx) => {
+        const result = optionalPhone().safeParse(value);
+        if (!result.success) {
+            ctx.addIssue({ code: 'custom', message: result.error.issues[0].message });
+            return z.NEVER;
+        }
+        return result.data ?? null;
+    })
+}).strict();
+
+export type ContractPhoneUpdate = z.infer<typeof contractPhoneUpdateSchema>;
+
 export const contractUpdateSchema = contractCreateSchemaBase
     .omit({ propiedadId: true, contratoAnteriorId: true, borradorId: true, borradorVersion: true, propietarioIds: true, inquilinoIds: true, honorarioInicial: true, monedaHonorarioInicial: true, honorarioInicialMetodoPago: true, honorarioInicialCuentaBancariaId: true })
     .partial()
     .extend({
         administrado: optionalBooleanFromForm,
         requiereActualizacion: optionalBooleanFromForm,
+        telefonosPersonas: parseJsonField(z.array(contractPhoneUpdateSchema).max(100)
+            .refine(updates => new Set(updates.map(update => update.personaId)).size === updates.length,
+                'No se puede repetir una persona al actualizar los teléfonos')).optional(),
         version: optimisticVersionSchema
     });
 

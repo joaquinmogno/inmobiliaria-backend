@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { dateOnlyString, optionalText } from '../middlewares/validation.middleware';
 import { argentinaDateOnly } from '../utils/argentina-date';
 
-export const movimientoInternoSchema = z.object({
+const movimientoInternoBaseSchema = z.object({
     fecha: dateOnlyString('La fecha'),
     tipo: z.enum(['INGRESO', 'GASTO']).default('GASTO'),
     detalle: z.string().trim().min(1, 'Ingresá el detalle').max(255),
@@ -17,7 +17,18 @@ export const movimientoInternoSchema = z.object({
     observaciones: optionalText(2000)
 });
 
-export const editarMovimientoInternoSchema = movimientoInternoSchema.extend({ version: z.coerce.number().int().positive() });
+const requireTransferAccount = (data: z.output<typeof movimientoInternoBaseSchema>, context: z.RefinementCtx) => {
+    const method = data.metodoPago?.trim().replace(/[_\s]+/g, ' ').toLowerCase();
+    if ((method === 'transferencia' || method === 'transferencia bancaria') && !data.cuentaPago?.trim()) {
+        context.addIssue({
+            code: 'custom', path: ['cuentaPago'],
+            message: data.tipo === 'GASTO' ? 'Indicá el banco o la cuenta de origen de la transferencia.' : 'Indicá el banco o la cuenta de destino de la transferencia.'
+        });
+    }
+};
+
+export const movimientoInternoSchema = movimientoInternoBaseSchema.superRefine(requireTransferAccount);
+export const editarMovimientoInternoSchema = movimientoInternoBaseSchema.extend({ version: z.coerce.number().int().positive() }).superRefine(requireTransferAccount);
 export const anularMovimientoInternoSchema = z.object({
     version: z.coerce.number().int().positive(),
     motivo: z.string().trim().min(5, 'Explicá el motivo de anulación').max(1000)
