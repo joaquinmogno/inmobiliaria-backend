@@ -19,7 +19,7 @@ type OwnerPaymentRecord = {
     creadoPor: { id: number; nombreCompleto: string } | null;
     anuladoPor: { id: number; nombreCompleto: string } | null;
     propietario: { id: number; nombreCompleto: string };
-    movimientoCaja: { id: number; reversion: { id: number; fecha: Date; fechaCreacion: Date } | null } | null;
+    movimientoCaja: { tarjetaId?: number | null; tarjetaDescripcion?: string | null; id: number; reversion: { id: number; fecha: Date; fechaCreacion: Date } | null } | null;
 };
 
 // Lectura compatible para movimientos anteriores a PagoPropietario. No se usa
@@ -98,6 +98,8 @@ export function buildOwnerPaymentHistory(
             fechaCreacion: event.date,
             metodoPago: event.payment.metodoPago,
             cuenta: event.payment.cuenta,
+            tarjetaId: event.payment.movimientoCaja?.tarjetaId,
+            tarjetaDescripcion: event.payment.movimientoCaja?.tarjetaDescripcion,
             comprobante: event.payment.comprobante || `Entrega #${event.payment.id}`,
             observaciones: event.payment.observaciones,
             motivoAdelanto: event.payment.motivoAdelanto,

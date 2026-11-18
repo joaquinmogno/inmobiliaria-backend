@@ -1,3 +1,4 @@
+import { isCreditCardMethod, resolvePaymentCard } from '../services/credit-card.service';
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import path from 'path';
 import { Prisma, type AmbitoMovimientoInterno } from '@prisma/client';
@@ -19,7 +20,7 @@ import { createMovementReceiptRouter } from './movement-receipt.routes';
 // El ámbito se fija al montar cada ruta; nunca se toma del cuerpo o de los filtros.
 const scopeConfig = {
     INTERNO: {
-        title: 'Control interno', slug: 'control-interno', auditSuffix: 'INTERNO', entity: 'MovimientoInterno', reportEntity: 'ControlInterno', exportAction: 'EXPORTAR_CONTROL_INTERNO',
+        title: 'Finanzas Ricardo', slug: 'finanzas-ricardo', auditSuffix: 'INTERNO', entity: 'MovimientoInterno', reportEntity: 'ControlInterno', exportAction: 'EXPORTAR_CONTROL_INTERNO',
         permissions: { view: 'control_interno.ver', create: 'control_interno.crear', edit: 'control_interno.editar', cancel: 'control_interno.anular', report: 'control_interno.reportes' }
     },
     TEODORO: {
@@ -157,23 +158,27 @@ function createMovementControlRouter(ambito: AmbitoMovimientoInterno) {
         const moved: string[] = [];
         try {
             const files = await attachmentData(req, moved);
-            const { fecha, monto, categoria, metodoPago, cuentaPago, observaciones, ...rest } = req.body;
-            const record = await prisma.movimientoInterno.create({
-                data: { ...rest, ambito, fecha: parseDateOnly(fecha), monto: new Prisma.Decimal(monto), categoria: categoria || null, metodoPago: metodoPago || null, cuentaPago: cuentaPago || null, observaciones: observaciones || null, inmobiliariaId: auth(req).inmobiliariaId, creadoPorId: auth(req).id, adjuntos: { create: files } },
-                include: internalMovementInclude
+            const { fecha, monto, categoria, metodoPago, tarjetaId, cuentaPago, observaciones, ...rest } = req.body;
+            const record = await prisma.$transaction(async tx => {
+                const card = await resolvePaymentCard(tx, { inmobiliariaId: auth(req).inmobiliariaId, ambito, metodoPago, tarjetaId });
+                return tx.movimientoInterno.create({
+                    data: { ...rest, ...card, ambito, fecha: parseDateOnly(fecha), monto: new Prisma.Decimal(monto), categoria: categoria || null, metodoPago: isCreditCardMethod(metodoPago) ? 'Tarjeta de crédito' : metodoPago || null, cuentaPago: card.tarjetaId ? null : cuentaPago || null, observaciones: observaciones || null, inmobiliariaId: auth(req).inmobiliariaId, creadoPorId: auth(req).id, adjuntos: { create: files } },
+                    include: internalMovementInclude
+                });
             });
-            await auditWrite(req, 'CREAR_MOVIMIENTO_INTERNO', record.id, JSON.stringify({ tipo: record.tipo, detalle: record.detalle, monto: record.monto, moneda: record.moneda, cuentaPago: record.cuentaPago }));
+            await auditWrite(req, 'CREAR_MOVIMIENTO_INTERNO', record.id, JSON.stringify({ tipo: record.tipo, detalle: record.detalle, monto: record.monto, moneda: record.moneda, cuentaPago: record.cuentaPago, tarjetaId: record.tarjetaId, tarjetaDescripcion: record.tarjetaDescripcion }));
             res.status(201).json(record);
         } catch (error) { await Promise.all(moved.map(removeUploadedFile)); throw error; }
     });
 
     router.put('/:id', requirePermission(config.permissions.edit), validateBody(editarMovimientoInternoSchema), async (req, res) => {
         const original = await ensureRecord(req);
-        const { version, fecha, monto, categoria, metodoPago, cuentaPago, observaciones, ...rest } = req.body;
+        const { version, fecha, monto, categoria, metodoPago, tarjetaId, cuentaPago, observaciones, ...rest } = req.body;
         const updated = await prisma.$transaction(async tx => {
+            const card = await resolvePaymentCard(tx, { inmobiliariaId: auth(req).inmobiliariaId, ambito, metodoPago, tarjetaId, previousCardId: original.tarjetaId });
             const claimed = await tx.movimientoInterno.updateMany({
                 where: { id: original.id, inmobiliariaId: auth(req).inmobiliariaId, ambito, version, anuladoEn: null },
-                data: { ...rest, ambito, fecha: parseDateOnly(fecha), monto: new Prisma.Decimal(monto), categoria: categoria || null, metodoPago: metodoPago || null, ...(cuentaPago === undefined ? {} : { cuentaPago: cuentaPago || null }), observaciones: observaciones || null, actualizadoPorId: auth(req).id, version: { increment: 1 } }
+                data: { ...rest, ...card, ambito, fecha: parseDateOnly(fecha), monto: new Prisma.Decimal(monto), categoria: categoria || null, metodoPago: isCreditCardMethod(metodoPago) ? 'Tarjeta de crédito' : metodoPago || null, ...(card.tarjetaId ? { cuentaPago: null } : cuentaPago === undefined ? {} : { cuentaPago: cuentaPago || null }), observaciones: observaciones || null, actualizadoPorId: auth(req).id, version: { increment: 1 } }
             });
             if (claimed.count !== 1) throw claimError();
             return tx.movimientoInterno.findUniqueOrThrow({ where: { id: original.id }, include: internalMovementInclude });

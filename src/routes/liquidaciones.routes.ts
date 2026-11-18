@@ -1,3 +1,4 @@
+import { resolvePaymentCard } from '../services/credit-card.service';
 import { financialOperation, financialError } from '../services/financial-operation.service';
 import { Router } from 'express';
 import { invalidatePerformanceCache } from '../services/performance-cache.service';
@@ -1120,7 +1121,7 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
     const {
         tipo, concepto, motivo, montoInquilino, montoPropietario,
-        destinoCredito, liquidacionDestinoId, fechaDevolucion, metodoDevolucion, cuentaBancariaIdDevolucion, observacionesDevolucion
+        destinoCredito, liquidacionDestinoId, fechaDevolucion, metodoDevolucion, tarjetaIdDevolucion, cuentaBancariaIdDevolucion, observacionesDevolucion
     } = req.body;
     try {
         const result = await prisma.$transaction(async tx => {
@@ -1213,8 +1214,9 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
                 if (destinoCredito === 'DEVOLUCION') {
                     const refundDate = fechaDevolucion ? parseDateOnly(fechaDevolucion) : argentinaTodayAsDate();
                     assertOperationalDateIsNotFuture(refundDate, 'La fecha de devolución');
-                    const refundAccount = metodoDevolucion === 'EFECTIVO' ? 'CAJA' : 'BANCO';
-                    const cuentaBancariaDevolucion = refundAccount === 'CAJA' ? null : await tx.cuentaBancaria.findFirst({
+                    const refundCard = await resolvePaymentCard(tx, { inmobiliariaId, ambito: 'CAJA', metodoPago: metodoDevolucion, tarjetaId: req.body.tarjetaIdDevolucion });
+                    const refundAccount = metodoDevolucion === 'EFECTIVO' ? 'CAJA' : metodoDevolucion === 'TARJETA_CREDITO' ? 'TARJETA' : 'BANCO';
+                    const cuentaBancariaDevolucion = refundAccount !== 'BANCO' ? null : await tx.cuentaBancaria.findFirst({
                         where: { id: cuentaBancariaIdDevolucion, inmobiliariaId, activa: true, moneda: liquidation.moneda },
                         select: { id: true }
                     });
@@ -1232,6 +1234,7 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
                             fecha: refundDate,
                             metodoPago: metodoDevolucion,
                             cuenta: refundAccount,
+                            ...refundCard,
                             cuentaBancariaId: cuentaBancariaDevolucion?.id,
                             observaciones: observacionesDevolucion || `Nota de crédito #${adjustment.id}: ${concepto}`,
                             creadoPorId: usuarioId,
@@ -1321,7 +1324,7 @@ router.post('/creditos-inquilino/:id/aplicar', requirePermission('liquidaciones.
 router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_propietario'), validateBody(pagoPropietarioSchema), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
     const { id } = req.params;
-    const { fechaPago, metodoPago, cuentaBancariaId, comprobante, observaciones, motivoAdelanto, propietarioId, monto, moneda, expectedVersion } = req.body;
+    const { fechaPago, metodoPago, tarjetaId, cuentaBancariaId, comprobante, observaciones, motivoAdelanto, propietarioId, monto, moneda, expectedVersion } = req.body;
 
     try {
         const paymentDate = fechaPago ? parseDateOnly(fechaPago) : argentinaTodayAsDate();
@@ -1413,8 +1416,9 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
             const destinoBancario = metodoPago === 'TRANSFERENCIA'
                 ? maskedBankDestination(validCbu ? principalOwner.cbu : null, validAlias ? principalOwner.aliasBancario : null)
                 : null;
-            const cuentaPago = (metodoPago === 'EFECTIVO') ? 'CAJA' : 'BANCO';
-            const cuentaBancaria = cuentaPago === 'CAJA' ? null : await tx.cuentaBancaria.findFirst({ where: { id: cuentaBancariaId, inmobiliariaId, activa: true, moneda: paymentCurrency }, select: { id: true } });
+            const card = await resolvePaymentCard(tx, { inmobiliariaId, ambito: 'CAJA', metodoPago, tarjetaId });
+            const cuentaPago = metodoPago === 'EFECTIVO' ? 'CAJA' : metodoPago === 'TARJETA_CREDITO' ? 'TARJETA' : 'BANCO';
+            const cuentaBancaria = cuentaPago !== 'BANCO' ? null : await tx.cuentaBancaria.findFirst({ where: { id: cuentaBancariaId, inmobiliariaId, activa: true, moneda: paymentCurrency }, select: { id: true } });
             if (cuentaPago === 'BANCO' && !cuentaBancaria) throw Object.assign(new Error('Seleccioná una cuenta bancaria activa para la transferencia o cheque.'), { statusCode: 400, code: 'BANK_ACCOUNT_REQUIRED' });
             await assertCashPeriodOpen(tx, { inmobiliariaId, fecha: paymentDate, cuenta: cuentaPago, moneda: paymentCurrency, cuentaBancariaId: cuentaBancaria?.id });
 
@@ -1428,6 +1432,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
                     fecha: paymentDate,
                     metodoPago: metodoPago || 'EFECTIVO',
                     cuenta: cuentaPago,
+                    ...card,
                     cuentaBancariaId: cuentaBancaria?.id,
                     comprobante: comprobante || undefined,
                     observaciones: observaciones || undefined,
@@ -1597,6 +1602,8 @@ router.post(
                         metodoPago: original.metodoPago,
                         cuenta: original.cuenta,
                         cuentaBancariaId: original.cuentaBancariaId,
+                        tarjetaId: original.tarjetaId,
+                        tarjetaDescripcion: original.tarjetaDescripcion,
                         observaciones: motivo,
                         creadoPorId: usuarioId,
                         contratoId: liquidacion.contratoId,
@@ -1707,6 +1714,8 @@ router.post(
                         metodoPago: pago.metodoPago,
                         cuenta: pago.cuenta,
                         cuentaBancariaId: pago.movimientoCaja.cuentaBancariaId,
+                        tarjetaId: pago.movimientoCaja.tarjetaId,
+                        tarjetaDescripcion: pago.movimientoCaja.tarjetaDescripcion,
                         observaciones: motivo,
                         creadoPorId: usuarioId,
                         contratoId: pago.liquidacion.contratoId,

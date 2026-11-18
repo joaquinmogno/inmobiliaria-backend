@@ -153,7 +153,7 @@ export const drawPaymentRowsPdf = (
     const detailWidth = amountX - detailX - 12;
     payments.forEach(payment => {
         const detailText = [payment.comprobante, payment.cuenta, payment.observaciones].filter(Boolean).join(' · ') || '-';
-        const methodText = payment.metodoPago || '-';
+        const methodText = payment.metodoPago === 'TARJETA_CREDITO' ? 'Tarjeta de crédito' : payment.metodoPago || '-';
         doc.fontSize(9).font('Helvetica');
         const contentHeight = Math.max(
             doc.heightOfString(formatDatePdf(payment.fechaPago), { width: 70 }),

@@ -132,7 +132,7 @@ test('recibos de movimientos: emisión, historial, acceso y efecto contable', as
         });
         await t.test('corregir el movimiento invalida el PDF anterior; reemitir conserva las fotografías y exige motivo', async () => {
             const stale = input(await json(teodoro.url));
-            const changed = await json(`/teodoro/${teodoro.id}`, 'PUT', { version: 1, fecha: '2026-10-12', tipo: 'GASTO', detalle: 'Reparación ampliada del baño', monto: '145760.50', moneda: 'ARS', metodoPago: 'TRANSFERENCIA', observaciones: 'PRIVADA NUEVA' });
+            const changed = await json(`/teodoro/${teodoro.id}`, 'PUT', { version: 1, fecha: '2026-10-12', tipo: 'GASTO', detalle: 'Reparación ampliada del baño', monto: '145760.50', moneda: 'ARS', metodoPago: 'TRANSFERENCIA', cuentaPago: teodoro.cuentaPago, observaciones: 'PRIVADA NUEVA' });
             assert.equal(changed.version, 2);
             const context = await json(teodoro.url);
             assert.equal(context.versiones[0].estado, 'DESACTUALIZADO');

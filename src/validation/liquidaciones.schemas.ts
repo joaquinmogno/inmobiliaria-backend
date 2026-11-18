@@ -1,3 +1,4 @@
+import { outgoingPaymentMethodSchema, optionalCardId } from '../services/credit-card.service';
 import { z } from 'zod';
 import {
     dateOnlyString,
@@ -5,7 +6,6 @@ import {
     nonNegativeMoney,
     optionalDateOnlyString,
     optionalText,
-    paymentMethodSchema,
     positiveMoney,
     requiredText
 } from '../middlewares/validation.middleware';
@@ -71,7 +71,8 @@ export const pagoPropietarioSchema = z.object({
     monto: positiveMoney('El monto a pagar'),
     moneda: z.enum(['ARS', 'USD']).optional(),
     fechaPago: optionalDateOnlyString('La fecha de pago'),
-    metodoPago: paymentMethodSchema.optional().default('EFECTIVO'),
+    metodoPago: outgoingPaymentMethodSchema.optional().default('EFECTIVO'),
+    tarjetaId: optionalCardId,
     cuentaBancariaId: z.coerce.number().int().positive().optional(),
     propietarioId: z.coerce.number().int().positive('Propietario inválido'),
     comprobante: optionalText(120),
@@ -91,7 +92,8 @@ export const ajusteLiquidacionSchema = z.object({
     destinoCredito: z.enum(['DEVOLUCION', 'SALDO_A_FAVOR', 'COMPENSACION']).optional(),
     liquidacionDestinoId: z.coerce.number().int().positive('Liquidación destino inválida').optional(),
     fechaDevolucion: optionalDateOnlyString('La fecha de devolución'),
-    metodoDevolucion: paymentMethodSchema.optional().default('EFECTIVO'),
+    metodoDevolucion: outgoingPaymentMethodSchema.optional().default('EFECTIVO'),
+    tarjetaIdDevolucion: optionalCardId,
     cuentaBancariaIdDevolucion: z.coerce.number().int().positive().optional(),
     observacionesDevolucion: optionalText(1000)
 }).refine(data => data.montoInquilino > 0 || data.montoPropietario > 0, {
@@ -106,7 +108,7 @@ export const ajusteLiquidacionSchema = z.object({
     if (data.destinoCredito !== 'COMPENSACION' && data.liquidacionDestinoId) {
         ctx.addIssue({ code: 'custom', path: ['liquidacionDestinoId'], message: 'Sólo indicá una liquidación destino al compensar un crédito' });
     }
-    if (data.destinoCredito === 'DEVOLUCION' && data.metodoDevolucion !== 'EFECTIVO' && !data.cuentaBancariaIdDevolucion) {
+    if (data.destinoCredito === 'DEVOLUCION' && ['TRANSFERENCIA', 'CHEQUE'].includes(data.metodoDevolucion) && !data.cuentaBancariaIdDevolucion) {
         ctx.addIssue({ code: 'custom', path: ['cuentaBancariaIdDevolucion'], message: 'Seleccioná una cuenta bancaria para la devolución.' });
     }
 });

@@ -28,7 +28,7 @@ type CashMovementRow = {
   tipo: TipoMovimiento;
   monto: Prisma.Decimal | Decimal | number | string;
   moneda: Moneda;
-  cuenta: 'CAJA' | 'BANCO';
+  cuenta: 'CAJA' | 'BANCO' | 'TARJETA';
   cuentaBancariaId?: number | null;
   fecha: Date;
   pagoId: number | null;
@@ -42,6 +42,7 @@ type CashMovementRow = {
 };
 
 type CashTotals = {
+  gastosTarjeta: Decimal;
   ingresos: Decimal;
   egresos: Decimal;
   saldo: Decimal;
@@ -54,6 +55,7 @@ type CashTotals = {
 };
 
 const zeroTotals = (): CashTotals => ({
+  gastosTarjeta: new Decimal(0),
   ingresos: new Decimal(0),
   egresos: new Decimal(0),
   saldo: new Decimal(0),
@@ -69,6 +71,7 @@ const zeroTotals = (): CashTotals => ({
 });
 
 const serializeCashTotals = (totals: CashTotals) => ({
+  gastosTarjeta: totals.gastosTarjeta.toNumber(),
   ingresos: totals.ingresos.toNumber(),
   egresos: totals.egresos.toNumber(),
   saldo: totals.saldo.toNumber(),
@@ -98,6 +101,10 @@ const accumulateCashMovement = (totals: CashTotals, movement: CashMovementRow) =
   if (movement.tipo === TipoMovimiento.DESCUENTO) return;
 
   const monto = new Decimal(movement.monto.toString());
+  if (movement.cuenta === 'TARJETA') {
+    totals.gastosTarjeta = totals.gastosTarjeta.plus(movement.tipo === TipoMovimiento.INGRESO ? monto.negated() : monto);
+    return;
+  }
   const cuenta = totals.cuentas[movement.cuenta];
   const cuentaBancaria = movement.cuenta === 'BANCO' && movement.cuentaBancariaId
     ? (totals.cuentasBancarias[String(movement.cuentaBancariaId)] ||= { ingresos: new Decimal(0), egresos: new Decimal(0), saldo: new Decimal(0) })

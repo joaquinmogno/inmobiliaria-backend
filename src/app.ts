@@ -1,3 +1,4 @@
+import creditCardRoutes from './routes/credit-card.routes';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
@@ -93,6 +94,7 @@ app.use('/api/pagos', ...sessionRateLimit, pagosRoutes);
 app.use('/api/backups', ...sessionRateLimit, expensiveApiLimiter, backupsRoutes);
 app.use('/api/inmobiliaria', ...sessionRateLimit, inmobiliariaRoutes);
 app.use('/api/reportes', ...sessionRateLimit, expensiveApiLimiter, reportesRoutes);
+app.use('/api/tarjetas', ...sessionRateLimit, creditCardRoutes);
 app.use('/api/cajachica', ...sessionRateLimit, cajachicaRoutes);
 app.use('/api/control-interno', ...sessionRateLimit, controlInternoRoutes);
 app.use('/api/teodoro', ...sessionRateLimit, teodoroRoutes);

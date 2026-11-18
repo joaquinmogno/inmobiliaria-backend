@@ -27,8 +27,9 @@ export function internalMovementWhere(inmobiliariaId: number, filters: FiltroCon
         ...(filters.moneda ? { moneda: filters.moneda } : {}),
         ...(filters.categoria ? { categoria: filters.categoria } : {}),
         ...(filters.metodoPago ? { metodoPago: filters.metodoPago } : {}),
+        ...(filters.tarjetaId ? { tarjetaId: filters.tarjetaId } : {}),
         ...(filters.creadoPorId ? { creadoPorId: filters.creadoPorId } : {}),
-        ...(filters.search ? { OR: ['detalle', 'observaciones', 'cuentaPago'].map(field => ({ [field]: { contains: filters.search, mode: 'insensitive' } })) } : {})
+        ...(filters.search ? { OR: ['detalle', 'observaciones', 'cuentaPago', 'tarjetaDescripcion'].map(field => ({ [field]: { contains: filters.search, mode: 'insensitive' } })) } : {})
     };
 }
 
@@ -52,5 +53,6 @@ export const internalReportFilterLabel = (filters: FiltroControlInterno) => [
     internalReportMonthLabel(filters.periodo), `Estado: ${filters.estado}`, filters.tipo && `Tipo: ${filters.tipo}`,
     filters.moneda && `Moneda: ${filters.moneda}`, filters.categoria && `Categoría: ${filters.categoria}`,
     filters.metodoPago && `Medio: ${filters.metodoPago}`, filters.search && `Búsqueda: ${filters.search}`,
+    filters.tarjetaId && `Tarjeta: #${filters.tarjetaId}`,
     filters.creadoPorId && `Usuario: #${filters.creadoPorId}`
 ].filter(Boolean).join(' · ');

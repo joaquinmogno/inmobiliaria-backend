@@ -51,6 +51,7 @@ model Inmobiliaria {
   actasEntregaLlaves         ActaEntregaLlaves[]
   movimientosInternos        MovimientoInterno[]
   recibosMovimientos         ReciboMovimiento[]
+  tarjetas                   TarjetaCredito[]
 }
 
 enum CondicionIva {
@@ -829,6 +830,11 @@ model MovimientoCaja {
   adjuntos                   AdjuntoMovimientoCaja[]
   recibo                     ReciboMovimiento?
 
+  tarjetaId          Int?
+  tarjetaDescripcion String? @db.VarChar(200)
+  tarjeta            TarjetaCredito? @relation(fields: [tarjetaId, inmobiliariaId], references: [id, inmobiliariaId], onDelete: Restrict)
+
+  @@index([inmobiliariaId, tarjetaId, fecha])
   @@index([inmobiliariaId])
   @@index([fecha])
   @@index([tipo])
@@ -896,6 +902,11 @@ model MovimientoInterno {
   adjuntos           AdjuntoMovimientoInterno[]
   recibo             ReciboMovimiento?
 
+  tarjetaId          Int?
+  tarjetaDescripcion String? @db.VarChar(200)
+  tarjeta            TarjetaCredito? @relation(fields: [tarjetaId, inmobiliariaId], references: [id, inmobiliariaId], onDelete: Restrict)
+
+  @@index([inmobiliariaId, tarjetaId, fecha])
   @@index([inmobiliariaId, ambito, fecha, id])
   @@index([inmobiliariaId, ambito, anuladoEn, moneda, tipo], map: "MovimientoInterno_ambito_totales_idx")
   @@index([inmobiliariaId, ambito, categoria])
@@ -1181,6 +1192,7 @@ enum TipoMovimiento {
 }
 
 enum MetodoPago {
+  TARJETA_CREDITO
   EFECTIVO
   TRANSFERENCIA
   CHEQUE
@@ -1212,6 +1224,7 @@ enum EstadoPropiedad {
 }
 
 enum CuentaCaja {
+  TARJETA
   CAJA
   BANCO
 }
@@ -1361,4 +1374,31 @@ model OperacionFinanciera {
 
   @@unique([inmobiliariaId, clave])
   @@index([usuarioId])
+}
+
+// Sólo identificación: nunca se almacena número completo, vencimiento ni código de seguridad.
+enum AmbitoTarjeta {
+  CAJA
+  INTERNO
+  TEODORO
+  DANIEL
+}
+
+model TarjetaCredito {
+  id Int @id @default(autoincrement())
+  inmobiliariaId Int
+  ambito AmbitoTarjeta
+  nombre String @db.VarChar(80)
+  banco String @db.VarChar(80)
+  ultimosCuatro String @db.VarChar(4)
+  activa Boolean @default(true)
+  version Int @default(1)
+  fechaCreacion DateTime @default(now())
+  inmobiliaria Inmobiliaria @relation(fields: [inmobiliariaId], references: [id], onDelete: Restrict)
+  movimientosCaja MovimientoCaja[]
+  movimientosInternos MovimientoInterno[]
+
+  @@unique([id, inmobiliariaId])
+  @@unique([inmobiliariaId, ambito, nombre, banco, ultimosCuatro], map: "TarjetaCredito_identidad_key")
+  @@index([inmobiliariaId, ambito, activa])
 }

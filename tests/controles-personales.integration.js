@@ -15,7 +15,7 @@ const clients = [
 
 for (const { slug, title, scope } of clients) {
   const { slug: peerSlug, title: peerTitle, scope: peerScope } = clients.find(client => client.scope !== scope);
-  test(`${title}: operaciones completas con permisos y datos independientes de Control interno`, async t => {
+  test(`${title}: operaciones completas con permisos y datos independientes de Finanzas Ricardo`, async t => {
     const unique = `${slug}-${Date.now()}`;
     const clientPath = `/${slug}`;
     const peerPath = `/${peerSlug}`;
@@ -176,7 +176,7 @@ for (const { slug, title, scope } of clients) {
         assert.ok(!parsed.stdout.includes('Registro del otro cliente'));
         const internalResponse = await api(internal, `/control-interno/reportes/excel?periodo=2026-11&creadoPorId=${internalUser.id}`);
         await book.xlsx.load(Buffer.from(await internalResponse.arrayBuffer()));
-        assert.equal(book.getWorksheet('Movimientos').getCell('A1').value, `${agency.nombre} · Control interno`);
+        assert.equal(book.getWorksheet('Movimientos').getCell('A1').value, `${agency.nombre} · Finanzas Ricardo`);
         assert.equal(book.getWorksheet('Movimientos').rowCount, 6);
       });
 

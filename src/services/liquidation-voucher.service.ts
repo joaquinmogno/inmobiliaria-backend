@@ -282,13 +282,13 @@ export const createLiquidationVoucherSnapshot = async ({
         pagos: liquidacion.pagos.map(item => ({
             id: item.id, monto: asNumber(item.monto), moneda: item.moneda, fechaPago: asDate(item.fechaPago)!, metodoPago: item.metodoPago,
             comprobante: item.comprobante || null, observaciones: item.observaciones || null,
-            cuenta: item.movimientoCaja?.cuentaBancaria ? `${item.movimientoCaja.cuentaBancaria.banco} · ${item.movimientoCaja.cuentaBancaria.nombre}` : item.movimientoCaja?.cuenta || null,
+            cuenta: item.movimientoCaja?.tarjetaDescripcion || (item.movimientoCaja?.cuentaBancaria ? `${item.movimientoCaja.cuentaBancaria.banco} · ${item.movimientoCaja.cuentaBancaria.nombre}` : item.movimientoCaja?.cuenta || null),
             imputacionesCuotas: item.imputacionesCuotas.map(allocation => ({ cuotaId: allocation.cuotaId, monto: asNumber(allocation.monto), concepto: allocation.cuota.plan.concepto, numeroCuota: allocation.cuota.numeroCuota }))
         })),
         pagosPropietario: liquidacion.pagosPropietario.map(item => ({
             id: item.id, monto: asNumber(item.monto), moneda: item.moneda, fechaPago: asDate(item.fechaPago)!, metodoPago: item.metodoPago,
             comprobante: item.comprobante || null, observaciones: item.observaciones || null,
-            cuenta: item.movimientoCaja?.cuentaBancaria ? `${item.movimientoCaja.cuentaBancaria.banco} · ${item.movimientoCaja.cuentaBancaria.nombre}` : item.cuenta
+            cuenta: item.movimientoCaja?.tarjetaDescripcion || (item.movimientoCaja?.cuentaBancaria ? `${item.movimientoCaja.cuentaBancaria.banco} · ${item.movimientoCaja.cuentaBancaria.nombre}` : item.cuenta)
         })),
         aplicacionesCredito: liquidacion.aplicacionesCredito.map(item => ({
             id: item.id, monto: asNumber(item.monto), fechaAplicacion: asDate(item.fechaAplicacion)!, creditoInquilinoId: item.creditoInquilinoId,

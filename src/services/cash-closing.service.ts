@@ -192,6 +192,7 @@ export async function reopenCashPeriod(
 }
 
 export async function isCashPeriodClosed(db: Prisma.TransactionClient | any, input: CashPeriodInput) {
+  if (input.cuenta === CuentaCaja.TARJETA) return false;
   const scope = closingScope(input);
   // Un cierre bancario legado no tenía cuenta concreta. Se conserva como
   // bloqueo consolidado de ese mes hasta que sea reabierto, sin hacer que los

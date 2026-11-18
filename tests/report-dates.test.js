@@ -29,7 +29,7 @@ test('emisión y auditoría usan reloj de 24 horas independiente de la zona del 
 });
 
 test('XLSX de los tres módulos conserva fecha operativa y hora de carga completa en Buenos Aires', async () => {
-  for (const title of ['Control interno', 'Teodoro', 'Daniel']) {
+  for (const title of ['Finanzas Ricardo', 'Teodoro', 'Daniel']) {
     const rows = cases.map(([date], index) => ({
       id: index + 1, fecha: new Date('2026-11-10T00:00:00Z'), fechaCreacion: new Date(date),
       tipo: 'GASTO', detalle: 'Prueba de horario', monto: '135760.25', moneda: 'ARS',

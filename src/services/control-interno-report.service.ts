@@ -9,7 +9,7 @@ import type { FiltroControlInterno } from '../validation/control-interno.schemas
 type InternalReport = { rows: InternalMovementRow[]; filters: FiltroControlInterno; agency: string; title?: string };
 const state = (row: InternalMovementRow) => row.anuladoEn ? 'Anulado' : 'Vigente';
 
-export async function buildInternalExcel({ rows, filters, agency, title = 'Control interno' }: InternalReport) {
+export async function buildInternalExcel({ rows, filters, agency, title = 'Finanzas Ricardo' }: InternalReport) {
     const book = new ExcelJS.Workbook();
     book.creator = 'PropControl';
     book.created = new Date();
@@ -40,7 +40,7 @@ export async function buildInternalExcel({ rows, filters, agency, title = 'Contr
     });
     for (const row of rows) {
         const added = sheet.addRow([
-            row.id, row.fecha, row.tipo === 'GASTO' ? 'Gasto' : 'Ingreso', row.detalle, row.categoria || '', row.metodoPago || '', row.moneda,
+            row.id, row.fecha, row.tipo === 'GASTO' ? 'Gasto' : 'Ingreso', row.detalle, row.categoria || '', [row.metodoPago, row.tarjetaDescripcion].filter(Boolean).join(' · '), row.moneda,
             Number(row.monto), row.creadoPor.nombreCompleto, state(row), row.motivoAnulacion || '', row.observaciones || '',
             row.adjuntos.map(file => file.nombreArchivo).join('\n'), row.fechaCreacion, row.cuentaPago || ''
         ]);
@@ -88,7 +88,7 @@ function wrapReportText(doc: PDFKit.PDFDocument, value: string, width: number): 
     return lines;
 }
 
-export function buildInternalPdf({ rows, filters, agency, title = 'Control interno' }: InternalReport): Promise<Buffer> {
+export function buildInternalPdf({ rows, filters, agency, title = 'Finanzas Ricardo' }: InternalReport): Promise<Buffer> {
     return new Promise((resolve, reject) => {
         const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 38, bufferPages: true });
         const chunks: Buffer[] = [];
@@ -137,7 +137,7 @@ export function buildInternalPdf({ rows, filters, agency, title = 'Control inter
         const nextPage = () => { doc.addPage(); startPage(); };
         startPage();
         for (const row of rows) {
-            const paymentDetails = [row.metodoPago || 'Medio sin especificar', row.cuentaPago ? `Cuenta: ${row.cuentaPago}` : null].filter(Boolean).join('\n');
+            const paymentDetails = [row.metodoPago || 'Medio sin especificar', row.tarjetaDescripcion, row.cuentaPago ? `Cuenta: ${row.cuentaPago}` : null].filter(Boolean).join('\n');
             const values = [formatDatePdf(row.fecha), row.tipo === 'GASTO' ? 'Gasto' : 'Ingreso', row.detalle, row.categoria || '—', paymentDetails, row.moneda,
                 formatCurrency(Number(row.monto), row.moneda), row.creadoPor.nombreCompleto, state(row), String(row.adjuntos.length)];
             doc.font('Helvetica').fontSize(8);

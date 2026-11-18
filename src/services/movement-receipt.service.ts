@@ -24,7 +24,7 @@ export type ReceiptInput = z.infer<typeof receiptInputSchema>;
 export type ReceiptFields = Pick<ReceiptInput, 'pagador' | 'receptor' | 'documentoReceptor' | 'inmueble' | 'descripcion'>;
 export type ReceiptMovement = {
     id: number; ambito: ReceiptScope; tipo: 'INGRESO' | 'EGRESO'; fecha: string;
-    concepto: string; monto: string; moneda: 'ARS' | 'USD'; metodoPago: string | null;
+    concepto: string; monto: string; moneda: 'ARS' | 'USD'; metodoPago: string | null; tarjetaDescripcion?: string | null;
 };
 export type ReceiptSnapshot = {
     formato: 1; movimiento: ReceiptMovement; datos: ReceiptFields;
@@ -66,13 +66,13 @@ export async function loadReceiptSource(tx: Prisma.TransactionClient, scope: Rec
     if (scope === 'CAJA') {
         const row = await tx.movimientoCaja.findFirst({
             where: { id, inmobiliariaId },
-            select: { id: true, tipo: true, fecha: true, concepto: true, monto: true, moneda: true, metodoPago: true, anuladoEn: true,
+            select: { id: true, tipo: true, fecha: true, concepto: true, monto: true, moneda: true, metodoPago: true, tarjetaDescripcion: true, anuladoEn: true,
                 reversionDeId: true, transferenciaInternaId: true, reversion: { select: { id: true } },
                 pago: { select: { liquidacionId: true } }, pagoPropietario: { select: { liquidacionId: true } },
                 contrato: { select: { propiedad: { select: { direccion: true } } } } }
         });
         if (!row) throw new AppError('Movimiento no encontrado', { statusCode: 404 });
-        movimiento = { id, ambito: scope, tipo: row.tipo === 'INGRESO' ? 'INGRESO' : 'EGRESO', fecha: row.fecha.toISOString().slice(0, 10), concepto: row.concepto, monto: row.monto.abs().toFixed(2), moneda: row.moneda, metodoPago: row.metodoPago };
+        movimiento = { id, ambito: scope, tipo: row.tipo === 'INGRESO' ? 'INGRESO' : 'EGRESO', fecha: row.fecha.toISOString().slice(0, 10), concepto: row.concepto, monto: row.monto.abs().toFixed(2), moneda: row.moneda, metodoPago: row.metodoPago, ...(row.tarjetaDescripcion ? { tarjetaDescripcion: row.tarjetaDescripcion } : {}) };
         anulado = Boolean(row.anuladoEn || row.reversion);
         permitido = !row.reversionDeId && !row.transferenciaInternaId && row.tipo !== 'DESCUENTO';
         inmueble = row.contrato?.propiedad.direccion || '';
@@ -82,10 +82,10 @@ export async function loadReceiptSource(tx: Prisma.TransactionClient, scope: Rec
     } else {
         const row = await tx.movimientoInterno.findFirst({
             where: { id, inmobiliariaId, ambito: scope },
-            select: { id: true, tipo: true, fecha: true, detalle: true, monto: true, moneda: true, metodoPago: true, anuladoEn: true }
+            select: { id: true, tipo: true, fecha: true, detalle: true, monto: true, moneda: true, metodoPago: true, tarjetaDescripcion: true, anuladoEn: true }
         });
         if (!row) throw new AppError('Movimiento no encontrado', { statusCode: 404 });
-        movimiento = { id, ambito: scope, tipo: row.tipo === 'INGRESO' ? 'INGRESO' : 'EGRESO', fecha: row.fecha.toISOString().slice(0, 10), concepto: row.detalle, monto: row.monto.toFixed(2), moneda: row.moneda, metodoPago: row.metodoPago };
+        movimiento = { id, ambito: scope, tipo: row.tipo === 'INGRESO' ? 'INGRESO' : 'EGRESO', fecha: row.fecha.toISOString().slice(0, 10), concepto: row.detalle, monto: row.monto.toFixed(2), moneda: row.moneda, metodoPago: row.metodoPago, ...(row.tarjetaDescripcion ? { tarjetaDescripcion: row.tarjetaDescripcion } : {}) };
         anulado = Boolean(row.anuladoEn);
     }
     const recibo = await tx.reciboMovimiento.findFirst({

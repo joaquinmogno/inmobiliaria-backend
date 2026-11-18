@@ -243,9 +243,9 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
             decisionesLiquidacion: true,
             liquidaciones: {
                 include: {
-                    pagos: { where: { anuladoEn: null }, select: { monto: true, moneda: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true } },
+                    pagos: { where: { anuladoEn: null }, select: { monto: true, moneda: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true, movimientoCaja: { select: { tarjetaDescripcion: true } } } },
                     aplicacionesCredito: { select: { monto: true } },
-                    pagosPropietario: { where: { anuladoEn: null }, select: { monto: true, moneda: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true } },
+                    pagosPropietario: { where: { anuladoEn: null }, select: { monto: true, moneda: true, fechaPago: true, metodoPago: true, observaciones: true, comprobante: true, movimientoCaja: { select: { tarjetaDescripcion: true } } } },
                     movimientos: { select: { concepto: true, observaciones: true, tipo: true, monto: true, moneda: true, esParaInmobiliaria: true } },
                     cuotas: { include: { plan: { select: { concepto: true, _count: { select: { cuotas: true } } } }, imputacionesPago: { where: { pago: { anuladoEn: null } }, select: { monto: true } } } },
                     ajustes: { select: { id: true, tipo: true, concepto: true, motivo: true, fechaCreacion: true } }
@@ -295,7 +295,7 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
             saldoPropietario: owner ? owner.saldo.toNumber() : 0,
             fechaVencimiento: liquidacion?.fechaVencimiento || null,
             pagos: liquidacion?.pagos || [],
-            pagosPropietario: liquidacion?.pagosPropietario || [],
+            pagosPropietario: liquidacion?.pagosPropietario.map(payment => ({ ...payment, tarjetaDescripcion: payment.movimientoCaja?.tarjetaDescripcion })) || [],
             cuotas: liquidacion?.cuotas.map(cuota => ({
                 id: cuota.id, concepto: cuota.plan.concepto, numeroCuota: cuota.numeroCuota,
                 cantidadCuotas: cuota.plan._count.cuotas, monto: Number(cuota.monto), estado: cuota.estado,
@@ -366,7 +366,7 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
                                     include: { liquidacion: { select: { id: true, periodo: true } } },
                                     orderBy: { fechaAplicacion: 'desc' }
                                 },
-                                movimientoDevolucion: { select: { id: true, fecha: true, metodoPago: true } }
+                                movimientoDevolucion: { select: { id: true, fecha: true, metodoPago: true, tarjetaDescripcion: true } }
                             }
                         }
                     },
@@ -385,7 +385,7 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
                         propietario: { select: { id: true, nombreCompleto: true } },
                         creadoPor: { select: { id: true, nombreCompleto: true } },
                         anuladoPor: { select: { id: true, nombreCompleto: true } },
-                        movimientoCaja: { select: { id: true, reversion: { select: { id: true, fecha: true, fechaCreacion: true } } } }
+                        movimientoCaja: { select: { id: true, tarjetaId: true, tarjetaDescripcion: true, reversion: { select: { id: true, fecha: true, fechaCreacion: true } } } }
                     },
                     orderBy: [{ fechaCreacion: 'asc' }, { id: 'asc' }]
                 },

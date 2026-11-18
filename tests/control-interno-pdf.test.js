@@ -48,7 +48,7 @@ function inspect(file, pdf) {
 }
 
 test('PDF mensual: 0, 1 y 3 movimientos caben en una página en los tres ámbitos', async () => {
-    for (const title of ['Control interno', 'Teodoro', 'Daniel']) {
+    for (const title of ['Finanzas Ricardo', 'Teodoro', 'Daniel']) {
         for (const count of [0, 1, 3]) {
             const { pdf } = await report(`${title}-${count}`, Array.from({ length: count }, (_, i) => sample(i)), { title });
             assert.equal(pageCount(pdf), 1, `${title}: ${count} movimientos`);

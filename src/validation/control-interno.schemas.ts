@@ -1,3 +1,4 @@
+import { isCreditCardMethod, optionalCardId } from '../services/credit-card.service';
 import { z } from 'zod';
 import { dateOnlyString, optionalText } from '../middlewares/validation.middleware';
 import { argentinaDateOnly } from '../utils/argentina-date';
@@ -12,12 +13,14 @@ const movimientoInternoBaseSchema = z.object({
     moneda: z.enum(['ARS', 'USD']).default('ARS'),
     categoria: optionalText(80),
     metodoPago: optionalText(80),
+    tarjetaId: optionalCardId,
     cuentaPago: z.string().trim().max(220, 'La cuenta admite hasta 220 caracteres').nullable().optional()
         .transform(value => value === undefined ? undefined : value || null),
     observaciones: optionalText(2000)
 });
 
 const requireTransferAccount = (data: z.output<typeof movimientoInternoBaseSchema>, context: z.RefinementCtx) => {
+    if (isCreditCardMethod(data.metodoPago) && data.tipo !== 'GASTO') context.addIssue({ code: 'custom', path: ['metodoPago'], message: 'Las tarjetas propias sólo se utilizan para gastos.' });
     const method = data.metodoPago?.trim().replace(/[_\s]+/g, ' ').toLowerCase();
     if ((method === 'transferencia' || method === 'transferencia bancaria') && !data.cuentaPago?.trim()) {
         context.addIssue({
@@ -44,6 +47,7 @@ export const filtroControlInternoSchema = z.object({
     categoria: z.string().trim().max(80).optional(),
     metodoPago: z.string().trim().max(80).optional(),
     search: z.string().trim().max(255).optional(),
+    tarjetaId: z.coerce.number().int().positive().optional(),
     creadoPorId: z.coerce.number().int().positive().optional(),
     estado: z.enum(['VIGENTES', 'ANULADOS', 'TODOS']).default('VIGENTES')
 });

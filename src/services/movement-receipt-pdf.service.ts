@@ -123,7 +123,7 @@ export function buildMovementReceiptPdf(snapshot: ReceiptSnapshot, identity: { n
             y += participantHeight + 12;
 
             const amount = amountLabel(movimiento.monto, movimiento.moneda);
-            const method = movimiento.metodoPago?.replace(/_/g, ' ') || 'No informado';
+            const method = movimiento.tarjetaDescripcion ? `Tarjeta de crédito · ${movimiento.tarjetaDescripcion}` : movimiento.metodoPago?.replace(/_/g, ' ') || 'No informado';
             const paymentHeight = height(`Medio de pago: ${method}`, width - 28, 9) + 70;
             ensure(paymentHeight + 12);
             doc.rect(left, y, width, paymentHeight).fillAndStroke(colors.tint, colors.line);
@@ -164,7 +164,7 @@ export function buildMovementReceiptPdf(snapshot: ReceiptSnapshot, identity: { n
             text('Aclaración y DNI/CUIT', left + colWidth + 24, y + 8, colWidth, 9, false, colors.muted);
 
             const pages = doc.bufferedPageRange();
-            const scope = { CAJA: 'Gestión financiera', INTERNO: 'Control interno', TEODORO: 'Teodoro', DANIEL: 'Daniel' }[movimiento.ambito];
+            const scope = { CAJA: 'Gestión financiera', INTERNO: 'Finanzas Ricardo', TEODORO: 'Teodoro', DANIEL: 'Daniel' }[movimiento.ambito];
             for (let i = pages.start; i < pages.start + pages.count; i++) {
                 doc.switchToPage(i);
                 const margin = doc.page.margins.bottom;

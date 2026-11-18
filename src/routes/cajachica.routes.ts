@@ -1,10 +1,11 @@
+import { outgoingPaymentMethodSchema, optionalCardId, resolvePaymentCard } from '../services/credit-card.service';
 import { Router } from 'express';
 import { createMovementReceiptRouter } from './movement-receipt.routes';
 import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { TipoMovimiento, MetodoPago, CuentaCaja, Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
-import { validateBody, requiredText, positiveMoney, dateOnlyString, optionalText, paymentMethodSchema } from '../middlewares/validation.middleware';
+import { validateBody, requiredText, positiveMoney, dateOnlyString, optionalText } from '../middlewares/validation.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
@@ -24,10 +25,11 @@ const movimientoCajaSchema = z.object({
     monto: positiveMoney('El monto'),
     moneda: z.enum(['ARS', 'USD']).optional().default('ARS'),
     fecha: dateOnlyString('La fecha'),
-    metodoPago: paymentMethodSchema.optional().default('EFECTIVO'),
+    metodoPago: outgoingPaymentMethodSchema.optional().default('EFECTIVO'),
+    tarjetaId: optionalCardId,
     cuentaBancariaId: z.coerce.number().int().positive().optional(),
     observaciones: optionalText(1000)
-});
+}).refine(data => data.metodoPago !== 'TARJETA_CREDITO' || data.tipo === 'EGRESO', { path: ['metodoPago'], message: 'Las tarjetas propias sólo se utilizan para egresos.' });
 
 const transferenciaInternaSchema = z.object({
     fecha: dateOnlyString('La fecha'),
@@ -49,7 +51,7 @@ const anulacionSchema = z.object({
 // Obtener movimientos de caja con filtros y paginación
 router.get('/', authenticateToken, requirePermission('caja_chica.ver'), withPagination(50), async (req, res) => {
     const { inmobiliariaId } = (req as AuthRequest).user!;
-    const { tipo, cuenta, cuentaBancariaId, search, mes, anio, estado } = req.query;
+    const { tipo, cuenta, cuentaBancariaId, search, mes, anio, estado, tarjetaId } = req.query;
 
     const { page: pageNum, limit: limitNum, skip } = res.locals.pagination;
 
@@ -63,7 +65,12 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), withPagi
         const conditions: Prisma.MovimientoCajaWhereInput[] = [];
 
         if (tipo) whereClause.tipo = tipo as TipoMovimiento;
-        if (cuenta === 'CAJA' || cuenta === 'BANCO') whereClause.cuenta = cuenta as CuentaCaja;
+        if (cuenta === 'CAJA' || cuenta === 'BANCO' || cuenta === 'TARJETA') whereClause.cuenta = cuenta as CuentaCaja;
+        if (tarjetaId !== undefined) {
+            const cardId = Number(tarjetaId);
+            if (!Number.isSafeInteger(cardId) || cardId <= 0) return res.status(400).json({ message: 'Tarjeta inválida.' });
+            whereClause.tarjetaId = cardId;
+        }
         if (cuentaBancariaId !== undefined) {
             const accountId = Number(cuentaBancariaId);
             if (!Number.isInteger(accountId) || accountId <= 0) {
@@ -76,7 +83,8 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), withPagi
         if (search) {
             conditions.push({ OR: [
                 { concepto: { contains: String(search), mode: 'insensitive' } },
-                { observaciones: { contains: String(search), mode: 'insensitive' } }
+                { observaciones: { contains: String(search), mode: 'insensitive' } },
+                { tarjetaDescripcion: { contains: String(search), mode: 'insensitive' } }
             ] });
         }
 
@@ -125,6 +133,11 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), withPagi
             reversion: { select: { id: true, fechaCreacion: true } }
         } satisfies Prisma.MovimientoCajaInclude;
 
+        const cardAmounts = (tarjetaId || cuenta === 'TARJETA') && !isReversalsFilter
+            ? await prisma.movimientoCaja.groupBy({ by: ['moneda'], where: { AND: [whereClause, { cuenta: 'TARJETA', tipo: 'EGRESO', anuladoEn: null, reversionDeId: null, reversion: null }] }, _sum: { monto: true } })
+            : [];
+        const gastosTarjetaFiltrados = Object.fromEntries(['ARS', 'USD'].map(moneda => [moneda, Number(cardAmounts.find(row => row.moneda === moneda)?._sum.monto || 0)]));
+
         if (isReversalsFilter) {
             // Se pagina por corrección, en lugar de por asiento: un resultado puede
             // contener el original anulado y su reversión, siempre consecutivos.
@@ -170,7 +183,7 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), withPagi
                 }));
             const total = orderedGroups.length;
 
-            return res.json({ data: movimientos, meta: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) } });
+            return res.json({ data: movimientos, gastosTarjetaFiltrados, meta: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) } });
         }
 
         const [total, movimientos] = await Promise.all([
@@ -184,7 +197,7 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), withPagi
             })
         ]);
 
-        res.json({ data: movimientos, meta: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) } });
+        res.json({ data: movimientos, gastosTarjetaFiltrados, meta: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) } });
     } catch (error) {
         console.error('Error fetching caja chica:', error);
         res.status(500).json({ message: 'Error al obtener la caja chica' });
@@ -213,6 +226,7 @@ router.get('/resumen', authenticateToken, requirePermission('caja_chica.ver'), a
             // del mes y por eso puede utilizarse para cerrar períodos históricos.
             totalIngresos: delPeriodo.ingresos,
             totalEgresos: delPeriodo.egresos,
+            gastosTarjeta: delPeriodo.gastosTarjeta,
             balance: alCierre.saldo,
             balanceCaja: alCierre.cuentas.CAJA.saldo,
             balanceBanco: alCierre.cuentas.BANCO.saldo,
@@ -397,16 +411,15 @@ router.post('/cierres/:id/reabrir', authenticateToken, requirePermission('caja_c
 // y no alteran el importe ni el impacto contable del asiento.
 router.post('/', authenticateToken, requirePermission('caja_chica.crear'), upload.array('comprobantes', 10), validateUploadedFilesContent, cleanupFailedUpload, validateBody(movimientoCajaSchema), async (req, res) => {
     const { inmobiliariaId, id: usuarioId } = (req as AuthRequest).user!;
-    const { tipo, concepto, monto, moneda, fecha, metodoPago, cuentaBancariaId, observaciones } = req.body;
+    const { tipo, concepto, monto, moneda, fecha, metodoPago, tarjetaId, cuentaBancariaId, observaciones } = req.body;
     const uploadedFiles = Array.isArray(req.files) ? req.files : [];
 
     if (!tipo || !concepto || !monto || !fecha) {
         return res.status(400).json({ message: 'Faltan campos obligatorios' });
     }
 
-    // La cuenta interna no se elige manualmente: efectivo va a caja y los demás
-    // métodos se registran en banco. Así se evita una combinación inconsistente.
-    const cuentaFinal: CuentaCaja = metodoPago === 'EFECTIVO' ? 'CAJA' : 'BANCO';
+    // El crédito se registra separado de los fondos disponibles en caja y banco.
+    const cuentaFinal: CuentaCaja = metodoPago === 'EFECTIVO' ? 'CAJA' : metodoPago === 'TARJETA_CREDITO' ? 'TARJETA' : 'BANCO';
 
     const persistedAttachments: Array<{ rutaArchivo: string; nombreArchivo: string }> = [];
     let movimiento;
@@ -418,6 +431,7 @@ router.post('/', authenticateToken, requirePermission('caja_chica.crear'), uploa
         // La validación y la creación comparten transacción para que un cierre
         // concurrente no pueda intercalarse entre ambas operaciones.
         movimiento = await prisma.$transaction(async tx => {
+            const card = await resolvePaymentCard(tx, { inmobiliariaId, ambito: 'CAJA', metodoPago, tarjetaId });
             const fechaMovimiento = parseDateOnly(fecha);
             assertOperationalDateIsNotFuture(fechaMovimiento, 'La fecha del movimiento de caja');
             let cuentaBancariaFinal: number | null = null;
@@ -450,6 +464,7 @@ router.post('/', authenticateToken, requirePermission('caja_chica.crear'), uploa
                     moneda: moneda || 'ARS',
                     fecha: fechaMovimiento,
                     metodoPago: (metodoPago as MetodoPago) || 'EFECTIVO',
+                    ...card,
                     cuenta: cuentaFinal,
                     cuentaBancariaId: cuentaBancariaFinal,
                     observaciones,
@@ -691,6 +706,8 @@ router.post('/:id/anular', authenticateToken, requirePermission('caja_chica.elim
                     metodoPago: movimiento.metodoPago,
                     cuenta: movimiento.cuenta,
                     cuentaBancariaId: movimiento.cuentaBancariaId,
+                    tarjetaId: movimiento.tarjetaId,
+                    tarjetaDescripcion: movimiento.tarjetaDescripcion,
                     observaciones: motivo,
                     creadoPorId: usuarioId,
                     reversionDeId: movimiento.id
