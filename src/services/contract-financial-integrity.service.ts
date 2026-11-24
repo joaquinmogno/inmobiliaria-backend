@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
-import { getOwnerPaymentSettlement, getTenantSettlement } from './tenant-credit.service';
+import { getLiquidationCurrencyDecimalSummaries, liquidationCurrencyRelations } from './liquidation-currency.service';
 
 type Tx = Prisma.TransactionClient;
 
@@ -9,16 +9,18 @@ export type ContractFinancialHistory = {
     pagos: number;
     movimientosCaja: number;
     planesCuotas: number;
+    anticiposAlquiler: number;
 };
 
 export const getContractFinancialHistory = async (tx: Tx, contratoId: number): Promise<ContractFinancialHistory> => {
-    const [liquidaciones, pagos, movimientosCaja, planesCuotas] = await Promise.all([
+    const [liquidaciones, pagos, movimientosCaja, planesCuotas, anticiposAlquiler] = await Promise.all([
         tx.liquidacion.count({ where: { contratoId } }),
         tx.pago.count({ where: { contratoId } }),
         tx.movimientoCaja.count({ where: { contratoId } }),
-        tx.planCuotas.count({ where: { contratoId } })
+        tx.planCuotas.count({ where: { contratoId } }),
+        tx.anticipoAlquiler.count({ where: { contratoId } })
     ]);
-    return { liquidaciones, pagos, movimientosCaja, planesCuotas };
+    return { liquidaciones, pagos, movimientosCaja, planesCuotas, anticiposAlquiler };
 };
 
 export const hasContractFinancialHistory = (history: ContractFinancialHistory) =>
@@ -27,6 +29,7 @@ export const hasContractFinancialHistory = (history: ContractFinancialHistory) =
 export type ContractOutstandingObligations = {
     cobrosPendientesInquilino: Array<{ liquidacionId: number; periodo: Date; saldo: string; moneda: string }>;
     pagosPendientesPropietario: Array<{ liquidacionId: number; periodo: Date; saldo: string; moneda: string }>;
+    cobrosPendientesPropietario: Array<{ liquidacionId: number; periodo: Date; saldo: string; moneda: string }>;
     cuotasPendientes: number;
     saldosAFavorInquilino: Array<{ creditoId: number; saldo: string; moneda: string }>;
 };
@@ -35,7 +38,7 @@ export const getContractOutstandingObligations = async (tx: Tx, contratoId: numb
     const [liquidaciones, cuotasPendientes, creditos] = await Promise.all([
         tx.liquidacion.findMany({
             where: { contratoId, estado: { notIn: ['BORRADOR', 'ANULADA'] } },
-            include: { pagos: { where: { anuladoEn: null } }, aplicacionesCredito: true, pagosPropietario: { where: { anuladoEn: null } } },
+            include: liquidationCurrencyRelations,
             orderBy: { periodo: 'asc' }
         }),
         tx.cuotaPlan.count({
@@ -49,29 +52,19 @@ export const getContractOutstandingObligations = async (tx: Tx, contratoId: numb
 
     const cobrosPendientesInquilino: ContractOutstandingObligations['cobrosPendientesInquilino'] = [];
     const pagosPendientesPropietario: ContractOutstandingObligations['pagosPendientesPropietario'] = [];
+    const cobrosPendientesPropietario: ContractOutstandingObligations['cobrosPendientesPropietario'] = [];
     for (const liquidacion of liquidaciones) {
-        const settlement = getTenantSettlement(liquidacion);
-        if (settlement.saldo.greaterThan(0)) {
-            cobrosPendientesInquilino.push({
-                liquidacionId: liquidacion.id,
-                periodo: liquidacion.periodo,
-                saldo: settlement.saldo.toFixed(2),
-                moneda: liquidacion.moneda
-            });
-        }
-        const saldoPropietario = getOwnerPaymentSettlement(liquidacion).saldo;
-        if (saldoPropietario.greaterThan(0)) {
-            pagosPendientesPropietario.push({
-                liquidacionId: liquidacion.id,
-                periodo: liquidacion.periodo,
-                saldo: saldoPropietario.toFixed(2),
-                moneda: liquidacion.moneda
-            });
+        for (const summary of getLiquidationCurrencyDecimalSummaries(liquidacion)) {
+            const entry = (amount: Decimal) => ({ liquidacionId: liquidacion.id, periodo: liquidacion.periodo, saldo: amount.toFixed(2), moneda: summary.moneda });
+            if (summary.saldoInquilino.greaterThan(0)) cobrosPendientesInquilino.push(entry(summary.saldoInquilino));
+            if (summary.saldoPropietario.greaterThan(0)) pagosPendientesPropietario.push(entry(summary.saldoPropietario));
+            if (summary.saldoACobrarPropietario.greaterThan(0)) cobrosPendientesPropietario.push(entry(summary.saldoACobrarPropietario));
         }
     }
 
     return {
         cobrosPendientesInquilino,
+        cobrosPendientesPropietario,
         pagosPendientesPropietario,
         cuotasPendientes,
         saldosAFavorInquilino: creditos.map(credito => ({
@@ -85,5 +78,6 @@ export const getContractOutstandingObligations = async (tx: Tx, contratoId: numb
 export const hasContractOutstandingObligations = (obligations: ContractOutstandingObligations) =>
     obligations.cobrosPendientesInquilino.length > 0
     || obligations.pagosPendientesPropietario.length > 0
+    || (obligations.cobrosPendientesPropietario?.length || 0) > 0
     || obligations.cuotasPendientes > 0
     || obligations.saldosAFavorInquilino.length > 0;

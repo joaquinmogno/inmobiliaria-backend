@@ -19,6 +19,7 @@ const { optionalPhone } = require('../dist/middlewares/validation.middleware');
 function mockTransaction(contract, dependencies = {}) {
   const deleted = [];
   const tx = {
+    anticipoAlquiler: { count: async () => dependencies.anticiposAlquiler || 0 },
     contrato: {
       findFirst: async () => contract,
       delete: async args => deleted.push(args.where.id)

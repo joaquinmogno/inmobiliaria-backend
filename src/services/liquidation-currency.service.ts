@@ -28,6 +28,11 @@ export type LiquidationCurrencySummary = {
     pagadoPropietario: number;
     saldoPropietario: number;
     capitalPropioExpuesto: number;
+    alquilerAnticipado: number;
+    importeAEntregarPropietario: number;
+    honorariosACobrarPropietario: number;
+    cobradoPropietario: number;
+    saldoACobrarPropietario: number;
 };
 
 export type MultiCurrencyLiquidation = {
@@ -36,6 +41,9 @@ export type MultiCurrencyLiquidation = {
     pagaHonorarios?: string;
     netoACobrar?: Decimal | number | string;
     montoPropietario?: Decimal | number | string;
+    montoAlquilerAnticipado?: Decimal | number | string;
+    cobradoPropietarioARS?: Decimal | number | string;
+    cobradoPropietarioUSD?: Decimal | number | string;
     movimientos?: CurrencyMovement[];
     pagos?: AmountWithCurrency[];
     pagosPropietario?: AmountWithCurrency[];
@@ -92,11 +100,22 @@ export function getLiquidationCurrencyDecimalSummaries(liquidacion: MultiCurrenc
             const pagos = sumRows(activeRowsInCurrency(liquidacion.pagos, moneda, liquidacion.moneda));
             const creditosAplicados = sumRows(activeRowsInCurrency(liquidacion.aplicacionesCredito, moneda, liquidacion.moneda));
             const pagadoPropietario = sumRows(activeRowsInCurrency(liquidacion.pagosPropietario, moneda, liquidacion.moneda));
-            const saldoInquilino = Decimal.max(new Decimal(0), netoACobrar.minus(pagos).minus(creditosAplicados));
-            const saldoPropietario = Decimal.max(new Decimal(0), montoPropietario.minus(pagadoPropietario));
+            const alquilerAnticipado = contractCurrency ? asDecimal(liquidacion.montoAlquilerAnticipado) : new Decimal(0);
+            const anticipoActivo = asDecimal(liquidacion.montoAlquilerAnticipado).greaterThan(0);
+            // El propietario ya recibió el alquiler. Sus honorarios se cobran
+            // por separado; no se descuentan de una entrega que no ocurrirá.
+            const honorariosACobrarPropietario = anticipoActivo && contractCurrency ? asDecimal(liquidacion.montoHonorarios) : new Decimal(0);
+            const netoDisponible = montoPropietario.plus(honorariosACobrarPropietario).minus(alquilerAnticipado);
+            const importeAEntregarPropietario = Decimal.max(0, netoDisponible);
+            const cobradoPropietario = asDecimal(moneda === 'ARS' ? liquidacion.cobradoPropietarioARS : liquidacion.cobradoPropietarioUSD);
+            const saldoACobrarPropietario = anticipoActivo
+                ? Decimal.max(0, honorariosACobrarPropietario.plus(Decimal.max(0, netoDisponible.negated())).minus(cobradoPropietario))
+                : new Decimal(0);
+            const saldoInquilino = Decimal.max(0, netoACobrar.minus(alquilerAnticipado).minus(pagos).minus(creditosAplicados));
+            const saldoPropietario = Decimal.max(0, importeAEntregarPropietario.minus(pagadoPropietario));
 
             return {
-                moneda,
+                moneda, alquilerAnticipado, importeAEntregarPropietario, honorariosACobrarPropietario, cobradoPropietario, saldoACobrarPropietario,
                 totalIngresos: totals.totalIngresos,
                 totalDescuentos: totals.totalDescuentos,
                 netoACobrar,
@@ -141,14 +160,14 @@ export function getTenantCollectionStateByCurrency(liquidacion: MultiCurrencyLiq
     const summaries = getLiquidationCurrencyDecimalSummaries(liquidacion).filter(summary => summary.netoACobrar.greaterThan(0));
     if (!summaries.length) return EstadoCobroInquilino.NO_APLICA;
     if (summaries.every(summary => summary.saldoInquilino.lessThanOrEqualTo(0))) return EstadoCobroInquilino.COBRADO;
-    if (summaries.some(summary => summary.cobradoInquilino.greaterThan(0) || summary.creditoAplicadoInquilino.greaterThan(0))) return EstadoCobroInquilino.PARCIAL;
+    if (summaries.some(summary => summary.cobradoInquilino.greaterThan(0) || summary.creditoAplicadoInquilino.greaterThan(0) || summary.alquilerAnticipado.greaterThan(0))) return EstadoCobroInquilino.PARCIAL;
     return EstadoCobroInquilino.PENDIENTE;
 }
 
 export function getOwnerPaymentStateByCurrency(liquidacion: MultiCurrencyLiquidation): EstadoPagoPropietario {
-    const summaries = getLiquidationCurrencyDecimalSummaries(liquidacion).filter(summary => summary.montoPropietario.greaterThan(0));
+    const summaries = getLiquidationCurrencyDecimalSummaries(liquidacion).filter(summary => summary.importeAEntregarPropietario.greaterThan(0) || summary.honorariosACobrarPropietario.greaterThan(0) || summary.saldoACobrarPropietario.greaterThan(0) || summary.cobradoPropietario.greaterThan(0));
     if (!summaries.length) return EstadoPagoPropietario.NO_APLICA;
-    if (summaries.every(summary => summary.saldoPropietario.lessThanOrEqualTo(0))) return EstadoPagoPropietario.PAGADO;
-    if (summaries.some(summary => summary.pagadoPropietario.greaterThan(0))) return EstadoPagoPropietario.PARCIAL;
+    if (summaries.every(summary => summary.saldoPropietario.lessThanOrEqualTo(0) && summary.saldoACobrarPropietario.lessThanOrEqualTo(0))) return EstadoPagoPropietario.PAGADO;
+    if (summaries.some(summary => summary.pagadoPropietario.greaterThan(0) || summary.cobradoPropietario.greaterThan(0))) return EstadoPagoPropietario.PARCIAL;
     return EstadoPagoPropietario.PENDIENTE;
 }

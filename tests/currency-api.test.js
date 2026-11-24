@@ -94,6 +94,8 @@ function resetState() {
 }
 
 function installPrismaMocks() {
+  prisma.$executeRaw = async () => 0;
+  prisma.anticipoAlquiler = { findFirst: async () => null };
   prisma.operacionFinanciera = { findUnique: async () => null, create: async ({ data }) => data };
   prisma.$queryRaw = async () => [];
   const allPermissions = permissionsService.MODULE_PERMISSIONS.map((clave) => ({ permiso: { clave } }));

@@ -69,7 +69,7 @@ router.get('/dashboard', requirePermission('reportes.dashboard.ver'), async (req
                 cobrosPendientes++;
                 if (row.fechaVencimiento && row.fechaVencimiento < today) liquidacionesVencidas++;
             }
-            if (currencies.some(item => item.saldoPropietario.greaterThan(0))) pagosPropietarioPendientes++;
+            if (currencies.some(item => item.saldoPropietario.greaterThan(0) || item.saldoACobrarPropietario.greaterThan(0))) pagosPropietarioPendientes++;
         }
 
         const emptyMetrics = {

@@ -318,6 +318,45 @@ model NotaPropiedad {
   @@index([propiedadId, fechaCreacion])
 }
 
+model AnticipoAlquiler {
+  id Int @id @default(autoincrement())
+  inmobiliariaId Int
+  contratoId Int
+  contrato Contrato @relation(fields: [contratoId, inmobiliariaId], references: [id, inmobiliariaId], onDelete: Restrict)
+  periodoDesde DateTime @db.Date
+  periodoHasta DateTime @db.Date
+  fechaPago DateTime @db.Date
+  montoMensual Decimal @db.Decimal(10, 2)
+  montoTotal Decimal @db.Decimal(12, 2)
+  moneda Moneda
+  propietarioNombre String
+  observaciones String @db.Text
+  creadoPorId Int
+  creadoEn DateTime @default(now())
+  anuladoEn DateTime?
+  motivoAnulacion String?
+  liquidaciones Liquidacion[]
+  @@unique([id, inmobiliariaId])
+  @@index([contratoId, periodoDesde, periodoHasta])
+}
+
+model CobroPropietario {
+  id Int @id @default(autoincrement())
+  inmobiliariaId Int
+  liquidacionId Int
+  liquidacion Liquidacion @relation(fields: [liquidacionId, inmobiliariaId], references: [id, inmobiliariaId], onDelete: Restrict)
+  movimientoCajaId Int @unique
+  @@unique([movimientoCajaId, inmobiliariaId])
+  movimientoCaja MovimientoCaja @relation(fields: [movimientoCajaId, inmobiliariaId], references: [id, inmobiliariaId], onDelete: Restrict)
+  monto Decimal @db.Decimal(10, 2)
+  moneda Moneda
+  fechaPago DateTime @db.Date
+  creadoPorId Int
+  anuladoEn DateTime?
+  motivoAnulacion String?
+  @@index([liquidacionId])
+}
+
 model Contrato {
   id                           Int                          @id @default(autoincrement())
   version                      Int                          @default(1)
@@ -382,6 +421,8 @@ model Contrato {
   serviciosGastos              ServicioGastoContrato[]
   decisionesLiquidacion        DecisionLiquidacionMensual[]
   creditosInquilino            CreditoInquilino[]
+  anticiposAlquiler AnticipoAlquiler[]
+  @@unique([id, inmobiliariaId])
 
   @@index([inmobiliariaId])
   @@index([propiedadId])
@@ -525,6 +566,13 @@ model AdjuntoBorradorContrato {
 }
 
 model Liquidacion {
+  anticipoAlquilerId Int?
+  anticipoAlquiler AnticipoAlquiler? @relation(fields: [anticipoAlquilerId, inmobiliariaId], references: [id, inmobiliariaId], onDelete: Restrict)
+  montoAlquilerAnticipado Decimal @default(0) @db.Decimal(10, 2)
+  cobradoPropietarioARS Decimal @default(0) @db.Decimal(10, 2)
+  cobradoPropietarioUSD Decimal @default(0) @db.Decimal(10, 2)
+  cobrosPropietario CobroPropietario[]
+  @@unique([id, inmobiliariaId])
   id                          Int                          @id @default(autoincrement())
   version                     Int                          @default(1)
   periodo                     DateTime                     @db.Date
@@ -791,6 +839,7 @@ enum AuditSeverity {
 }
 
 model MovimientoCaja {
+  cobroPropietario CobroPropietario?
   id                         Int                     @id @default(autoincrement())
   tipo                       TipoMovimiento
   concepto                   String                  @db.VarChar(255)
@@ -829,6 +878,7 @@ model MovimientoCaja {
   pagoPropietario            PagoPropietario?        @relation("PagoPropietarioMovimiento")
   adjuntos                   AdjuntoMovimientoCaja[]
   recibo                     ReciboMovimiento?
+  copiasPersonales           MovimientoInterno[] @relation("CopiaMovimientoCaja")
 
   tarjetaId          Int?
   tarjetaDescripcion String? @db.VarChar(200)
@@ -841,6 +891,7 @@ model MovimientoCaja {
   @@index([cuenta])
   @@index([cuentaBancariaId])
   @@index([transferenciaInternaId])
+  @@unique([id, inmobiliariaId])
   @@index([inmobiliariaId, fecha])
   @@index([inmobiliariaId, moneda, tipo, fecha])
   @@index([inmobiliariaId, anuladoEn])
@@ -901,6 +952,8 @@ model MovimientoInterno {
   anuladoPor         Usuario?                   @relation("MovimientoInternoAnuladoPor", fields: [anuladoPorId], references: [id], onDelete: SetNull)
   adjuntos           AdjuntoMovimientoInterno[]
   recibo             ReciboMovimiento?
+  movimientoCajaOrigenId Int?
+  movimientoCajaOrigen MovimientoCaja? @relation("CopiaMovimientoCaja", fields: [movimientoCajaOrigenId, inmobiliariaId], references: [id, inmobiliariaId], onDelete: Restrict)
 
   tarjetaId          Int?
   tarjetaDescripcion String? @db.VarChar(200)
@@ -910,6 +963,7 @@ model MovimientoInterno {
   @@index([inmobiliariaId, ambito, fecha, id])
   @@index([inmobiliariaId, ambito, anuladoEn, moneda, tipo], map: "MovimientoInterno_ambito_totales_idx")
   @@index([inmobiliariaId, ambito, categoria])
+  @@unique([movimientoCajaOrigenId, ambito])
 }
 
 // El recibo documenta un movimiento existente y nunca genera asientos.

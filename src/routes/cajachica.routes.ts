@@ -5,8 +5,10 @@ import { prisma } from '../prisma';
 import { authenticateToken, AuthRequest, requireRecentAuthentication } from '../middlewares/auth.middleware';
 import { TipoMovimiento, MetodoPago, CuentaCaja, Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
-import { validateBody, requiredText, positiveMoney, dateOnlyString, optionalText } from '../middlewares/validation.middleware';
+import { validateBody, requiredText, positiveMoney, dateOnlyString, optionalText, idParamSchema } from '../middlewares/validation.middleware';
 import { requirePermission } from '../middlewares/permissions.middleware';
+import { userHasPermission } from '../services/permissions.service';
+import { copyCashMovement, personalCopySelect } from '../services/cash-personal-copy.service';
 import { z } from 'zod';
 import { auditService } from '../services/audit.service';
 import { cached, invalidatePerformanceCache } from '../services/performance-cache.service';
@@ -18,6 +20,19 @@ import { cleanupFailedUpload, commitUploadedFile, removeUploadedFile, upload, va
 
 const router = Router();
 router.use('/:id/recibos', authenticateToken, createMovementReceiptRouter('CAJA', { view: 'caja_chica.ver', issue: ['caja_chica.crear'] }));
+
+for (const destino of ['TEODORO', 'DANIEL'] as const) {
+    const slug = destino === 'TEODORO' ? 'teodoro' : 'daniel';
+    router.post(`/:id/duplicar/${slug}`, authenticateToken, requirePermission('caja_chica.ver'),
+        requirePermission(`${slug}.ver`), requirePermission(`${slug}.crear`),
+        validateBody(z.object({}).strict()), async (req, res) => {
+            const parsed = idParamSchema.safeParse(req.params.id);
+            if (!parsed.success) return res.status(400).json({ message: 'Movimiento inválido' });
+            const user = (req as AuthRequest).user!;
+            const result = await copyCashMovement({ movimientoId: parsed.data, inmobiliariaId: user.inmobiliariaId, usuarioId: user.id, destino });
+            res.status(result.creada ? 201 : 200).json(result);
+        });
+}
 
 const movimientoCajaSchema = z.object({
     tipo: z.enum(['INGRESO', 'DESCUENTO', 'EGRESO']),
@@ -123,7 +138,12 @@ router.get('/', authenticateToken, requirePermission('caja_chica.ver'), withPagi
             whereClause.AND = conditions;
         }
 
+        const user = (req as AuthRequest).user!;
+        const visibleScopes = (await Promise.all((['TEODORO', 'DANIEL'] as const).map(async ambito =>
+            await userHasPermission(user.id, user.tipo, ambito === 'TEODORO' ? 'teodoro.ver' : 'daniel.ver') ? ambito : null
+        ))).filter((ambito): ambito is 'TEODORO' | 'DANIEL' => ambito !== null);
         const includeRelations = {
+            copiasPersonales: { where: { inmobiliariaId, ambito: { in: visibleScopes } }, select: personalCopySelect },
             cuentaBancaria: { select: { id: true, banco: true, nombre: true, moneda: true } },
             transferenciaInterna: { select: { id: true, concepto: true } },
             adjuntos: { select: { id: true, rutaArchivo: true, nombreArchivo: true, fechaCreacion: true } },

@@ -80,6 +80,7 @@ function draftDatabase(overrides = {}) {
     { id: 2, liquidacionId: 10, tipo: 'INGRESO', concepto: 'Expensas', moneda: 'USD', monto: new Decimal(100), esParaInmobiliaria: false },
   ];
   const db = {
+    anticipoAlquiler: { findFirst: async () => null },
     liquidacion: {
       findUniqueOrThrow: async () => ({ ...draft }),
       updateMany: async ({ where, data }) => {

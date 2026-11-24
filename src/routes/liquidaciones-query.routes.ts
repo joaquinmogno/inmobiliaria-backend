@@ -269,7 +269,7 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
         const owner = liquidacion ? getOwnerPaymentSettlement(liquidacion) : null;
         const currencies = liquidacion ? getLiquidationCurrencySummaries(liquidacion) : [];
         const tenantPending = currencies.some(item => item.saldoInquilino > 0);
-        const ownerPending = currencies.some(item => item.saldoPropietario > 0);
+        const ownerPending = currencies.some(item => (item.saldoPropietario > 0 || item.saldoACobrarPropietario > 0));
         const estado = liquidacion?.estado === 'ANULADA' ? 'ANULADA'
             : liquidacion?.estado === 'BORRADOR' ? 'BORRADOR'
                 : liquidacion && tenantPending && liquidacion.fechaVencimiento && liquidacion.fechaVencimiento < today ? 'EN_MORA'
@@ -319,7 +319,7 @@ router.get('/contrato/:contratoId/periodos', requirePermission('liquidaciones.ve
         || periodos.find(item => item.periodo.slice(0, 7) === current)?.periodo || periodos[periodos.length - 1]?.periodo;
     res.json({
         contrato: {
-            id: contrato.id, version: contrato.version, estado: contrato.estado, moneda: contrato.moneda, fechaEntregaLlaves: contrato.fechaEntregaLlaves,
+            id: contrato.id, montoAlquiler: contrato.montoAlquiler, version: contrato.version, estado: contrato.estado, moneda: contrato.moneda, fechaEntregaLlaves: contrato.fechaEntregaLlaves,
             fechaInicio: contrato.fechaInicio, fechaFin: contrato.fechaFin, fechaProximaActualizacion: contrato.fechaProximaActualizacion,
             frecuenciaActualizacionMeses: contrato.frecuenciaActualizacionMeses,
             requiereActualizacion: contrato.requiereActualizacion, diaVencimiento: contrato.diaVencimiento,
@@ -343,6 +343,8 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
         const liquidacion = await prisma.liquidacion.findFirst({
             where: { id: liquidationId, inmobiliariaId },
             include: {
+                anticipoAlquiler: true,
+                cobrosPropietario: { include: { movimientoCaja: { select: { metodoPago: true, comprobante: true, observaciones: true } } }, orderBy: { id: 'asc' } },
                 movimientos: true,
                 contrato: {
                     include: {
@@ -415,7 +417,7 @@ router.get('/:id', requirePermission('liquidaciones.ver'), withPagination(10, {
         });
         const { comprobantes, pagosPropietario, ...detalleLiquidacion } = liquidacion;
         const tenantSettlement = getTenantSettlement(liquidacion);
-        const ownerSettlement = getOwnerPaymentSettlement({ montoPropietario: liquidacion.montoPropietario, moneda: liquidacion.moneda, pagosPropietario: pagosPropietario.filter(payment => !payment.anuladoEn) });
+        const ownerSettlement = getOwnerPaymentSettlement({ ...liquidacion, pagosPropietario: pagosPropietario.filter(payment => !payment.anuladoEn) });
         const resumenMonedas = getLiquidationCurrencySummaries({
             ...liquidacion,
             pagosPropietario: pagosPropietario.filter(payment => !payment.anuladoEn)

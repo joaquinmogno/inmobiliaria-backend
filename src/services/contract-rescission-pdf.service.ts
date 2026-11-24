@@ -95,10 +95,11 @@ export function sendRescissionPdf(res: Response, snapshot: RescissionSnapshot, v
 
     section('SALDOS REGISTRADOS POR LA APLICACIÓN AL EMITIR');
     for (const item of saldosRegistrados.cobrosPendientesInquilino) line(`Cobro pendiente · liquidación #${item.liquidacionId} (${new Date(item.periodo).toISOString().slice(0, 7)})`, money(item.saldo, item.moneda));
+    for (const item of saldosRegistrados.cobrosPendientesPropietario || []) line(`Cobro pendiente al propietario · liquidación #${item.liquidacionId}`, money(item.saldo, item.moneda));
     for (const item of saldosRegistrados.pagosPendientesPropietario) line(`Pago pendiente al propietario · liquidación #${item.liquidacionId} (${new Date(item.periodo).toISOString().slice(0, 7)})`, money(item.saldo, item.moneda));
     line('Cuotas pendientes', String(saldosRegistrados.cuotasPendientes));
     for (const item of saldosRegistrados.saldosAFavorInquilino) line(`Crédito a favor del inquilino #${item.creditoId}`, money(item.saldo, item.moneda));
-    if (!saldosRegistrados.cobrosPendientesInquilino.length && !saldosRegistrados.pagosPendientesPropietario.length && !saldosRegistrados.saldosAFavorInquilino.length && !saldosRegistrados.cuotasPendientes) {
+    if (!saldosRegistrados.cobrosPendientesInquilino.length && !saldosRegistrados.cobrosPendientesPropietario?.length && !saldosRegistrados.pagosPendientesPropietario.length && !saldosRegistrados.saldosAFavorInquilino.length && !saldosRegistrados.cuotasPendientes) {
         doc.text('No se registran saldos pendientes en la aplicación al momento de emitir esta acta.', { lineGap: 3 });
     }
 

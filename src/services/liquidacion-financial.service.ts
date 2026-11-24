@@ -1,3 +1,4 @@
+import { applyRentPrepayment } from './rent-prepayment-application.service';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PagadorHonorarios, Prisma, TipoMovimiento } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -60,14 +61,14 @@ export const calculateLiquidationTotals = (
     };
 };
 
-export const assertValidLiquidationTotals = (totals: ReturnType<typeof calculateLiquidationTotals>) => {
+export const assertValidLiquidationTotals = (totals: ReturnType<typeof calculateLiquidationTotals>, allowOwnerDebt = false) => {
     if (totals.netoACobrar.lessThan(0)) {
         throw Object.assign(
             new Error('Los descuentos no pueden superar el total a cobrar al inquilino'),
             { statusCode: 409, code: 'NEGATIVE_TENANT_TOTAL' }
         );
     }
-    if (totals.montoPropietario.lessThan(0)) {
+    if (!allowOwnerDebt && totals.montoPropietario.lessThan(0)) {
         throw Object.assign(
             new Error('Los honorarios y conceptos de la inmobiliaria no pueden superar el importe disponible para el propietario'),
             { statusCode: 409, code: 'NEGATIVE_OWNER_TOTAL' }
@@ -119,10 +120,11 @@ export const recalculateLiquidationTotals = async (
     liquidacionId: number,
     db: Prisma.TransactionClient | typeof prisma = prisma
 ) => {
+    await applyRentPrepayment(db, liquidacionId);
     const [liquidacion, movimientos] = await Promise.all([
         db.liquidacion.findUniqueOrThrow({
             where: { id: liquidacionId },
-            select: { montoHonorarios: true, pagaHonorarios: true, moneda: true }
+            select: { montoHonorarios: true, pagaHonorarios: true, moneda: true, montoAlquilerAnticipado: true }
         }),
         db.movimiento.findMany({ where: { liquidacionId } })
     ]);
@@ -130,7 +132,7 @@ export const recalculateLiquidationTotals = async (
     // contractual. Los conceptos de una segunda moneda se exponen y liquidan
     // por separado, nunca se convierten ni se suman a este total.
     const movementsInContractCurrency = movimientos.filter(movement => movement.moneda === liquidacion.moneda);
-    const totals = assertValidLiquidationTotals(calculateLiquidationTotals(liquidacion, movementsInContractCurrency));
+    const totals = assertValidLiquidationTotals(calculateLiquidationTotals(liquidacion, movementsInContractCurrency), Number(liquidacion.montoAlquilerAnticipado) > 0);
 
     return db.liquidacion.update({
         where: { id: liquidacionId },

@@ -4,6 +4,7 @@ import { parseDateOnly } from '../utils/argentina-date';
 import type { FiltroControlInterno } from '../validation/control-interno.schemas';
 
 export const internalMovementInclude = {
+    movimientoCajaOrigen: { select: { id: true, fecha: true, concepto: true, anuladoEn: true, reversion: { select: { id: true } } } },
     creadoPor: { select: { id: true, nombreCompleto: true } },
     actualizadoPor: { select: { id: true, nombreCompleto: true } },
     anuladoPor: { select: { id: true, nombreCompleto: true } },

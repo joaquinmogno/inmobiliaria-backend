@@ -208,6 +208,7 @@ export const getMonthlyLiquidationPreparation = async (inmobiliariaId: number, p
             estadoPagoPropietario: ownerState,
             proximaAccion: existing?.estado === 'BORRADOR' ? 'Revisar borrador'
                 : existing?.estado === 'CONFIRMADA' && hasTenantCollectionPending(tenantState) ? 'Registrar cobro del inquilino'
+                    : existing?.estado === 'CONFIRMADA' && resumenMonedas.some(s => s.saldoACobrarPropietario > 0) ? 'Cobrar al propietario'
                     : existing?.estado === 'CONFIRMADA' && hasOwnerPaymentPending(ownerState) ? `Pagar a ${existing.propietarioNombre || contract.propietarios[0]?.persona.nombreCompleto || 'propietario'}`
                         : existing?.estado === 'CONFIRMADA' ? 'Ver comprobantes'
                             : status === 'LISTA' && contract.fechaEntregaLlaves ? 'Generar liquidación final y cargar alquiler manual'

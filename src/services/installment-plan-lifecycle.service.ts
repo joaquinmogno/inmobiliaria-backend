@@ -1,6 +1,6 @@
 import { EstadoCuota, EstadoPlanCuotas, Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
-import { getTenantSettlement } from './tenant-credit.service';
+import { getLiquidationCurrencyDecimalSummaries, liquidationCurrencyRelations } from './liquidation-currency.service';
 
 type Tx = Prisma.TransactionClient;
 
@@ -47,14 +47,14 @@ export const syncInstallmentsForLiquidationSettlement = async ({
 }) => {
     const liquidacion = await tx.liquidacion.findUnique({
         where: { id: liquidacionId },
-        include: { pagos: { where: { anuladoEn: null } }, aplicacionesCredito: true }
+        include: liquidationCurrencyRelations
     });
     if (!liquidacion) return;
 
-    const settlement = getTenantSettlement(liquidacion);
+    const settlements = getLiquidationCurrencyDecimalSummaries(liquidacion);
     const cuotas = await tx.cuotaPlan.findMany({
         where: { liquidacionId },
-        select: { id: true, planId: true, estado: true, monto: true, imputacionesPago: { where: { pago: { anuladoEn: null } }, select: { monto: true } } }
+        select: { id: true, planId: true, estado: true, monto: true, moneda: true, imputacionesPago: { where: { pago: { anuladoEn: null } }, select: { monto: true } } }
     });
     if (!cuotas.length) return;
 
@@ -64,7 +64,7 @@ export const syncInstallmentsForLiquidationSettlement = async ({
         // La imputación explícita permite cancelar una cuota antes de que se
         // cobre el resto de la liquidación. Un cobro total también cancela las
         // cuotas de los flujos generales que no ofrecen imputación detallada.
-        const pagada = imputado.greaterThanOrEqualTo(cuota.monto) || settlement.saldo.isZero();
+        const pagada = imputado.greaterThanOrEqualTo(cuota.monto) || Boolean(settlements.find(item => item.moneda === (cuota.moneda || liquidacion.moneda))?.saldoInquilino.isZero());
         const estadoObjetivo = pagada ? EstadoCuota.PAGADA : EstadoCuota.PENDIENTE;
         if (cuota.estado !== estadoObjetivo) await tx.cuotaPlan.updateMany({ where: { id: cuota.id, estado: { in: [cuota.estado] } }, data: { estado: estadoObjetivo } });
     }

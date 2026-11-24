@@ -16,9 +16,14 @@ export type LiquidationVoucherSnapshot = {
     schemaVersion: 1;
     version: number;
     emitidoEn: string;
-    evento?: 'CONFIRMACION' | 'AJUSTE' | 'COBRO_INQUILINO' | 'ANULACION_COBRO' | 'PAGO_PROPIETARIO' | 'ANULACION_PAGO_PROPIETARIO' | 'NOTA_LIQUIDACION';
+    evento?: 'CONFIRMACION' | 'AJUSTE' | 'COBRO_INQUILINO' | 'ANULACION_COBRO' | 'PAGO_PROPIETARIO' | 'ANULACION_PAGO_PROPIETARIO' | 'NOTA_LIQUIDACION' | 'ALQUILER_ANTICIPADO' | 'ANULACION_ANTICIPO' | 'COBRO_PROPIETARIO' | 'ANULACION_COBRO_PROPIETARIO';
     totalesOriginales: Totals;
+    anticipoAlquiler?: { id: number; fechaPago: string; periodoDesde: string; periodoHasta: string; propietarioNombre: string; observaciones: string } | null;
+    cobrosPropietario?: Array<{ id: number; monto: number; moneda: string; fechaPago: string; metodoPago: string; comprobante: string | null; observaciones: string | null }>;
     liquidacion: {
+        montoAlquilerAnticipado?: number;
+        cobradoPropietarioARS?: number;
+        cobradoPropietarioUSD?: number;
         id: number;
         estado: string;
         periodo: string;
@@ -126,6 +131,7 @@ export const getVoucherSummary = (
         importeCorregido: snapshot?.liquidacion.totales.netoACobrar || 0,
         importePropietarioOriginal: snapshot?.totalesOriginales.montoPropietario || 0,
         importePropietarioCorregido: snapshot?.liquidacion.totales.montoPropietario || 0,
+        resumenAnticipo: source && Number(source.montoAlquilerAnticipado) > 0 ? corrected : undefined,
         importesPorMoneda: corrected.map(summary => {
             const previous = original.find(item => item.moneda === summary.moneda)!;
             return {
@@ -170,6 +176,8 @@ export const createLiquidationVoucherSnapshot = async ({
     const liquidacion = await tx.liquidacion.findFirst({
         where: { id: liquidacionId, inmobiliariaId },
         include: {
+            anticipoAlquiler: true,
+            cobrosPropietario: { where: { anuladoEn: null }, include: { movimientoCaja: true }, orderBy: { id: 'asc' } },
             movimientos: true,
             propietarioPago: true,
             contrato: {
@@ -234,7 +242,12 @@ export const createLiquidationVoucherSnapshot = async ({
         emitidoEn: new Date().toISOString(),
         evento,
         totalesOriginales: snapshotAnterior?.totalesOriginales || totalesActuales,
+        anticipoAlquiler: liquidacion.anticipoAlquiler ? { id: liquidacion.anticipoAlquiler.id, fechaPago: asDate(liquidacion.anticipoAlquiler.fechaPago)!, periodoDesde: asDate(liquidacion.anticipoAlquiler.periodoDesde)!, periodoHasta: asDate(liquidacion.anticipoAlquiler.periodoHasta)!, propietarioNombre: liquidacion.anticipoAlquiler.propietarioNombre, observaciones: liquidacion.anticipoAlquiler.observaciones } : null,
+        cobrosPropietario: (liquidacion.cobrosPropietario || []).map(row => ({ id: row.id, monto: asNumber(row.monto), moneda: row.moneda, fechaPago: asDate(row.fechaPago)!, metodoPago: row.movimientoCaja.metodoPago, comprobante: row.movimientoCaja.comprobante, observaciones: row.movimientoCaja.observaciones })),
         liquidacion: {
+            montoAlquilerAnticipado: asNumber(liquidacion.montoAlquilerAnticipado),
+            cobradoPropietarioARS: asNumber(liquidacion.cobradoPropietarioARS),
+            cobradoPropietarioUSD: asNumber(liquidacion.cobradoPropietarioUSD),
             id: liquidacion.id,
             estado: liquidacion.estado,
             periodo: asDate(liquidacion.periodo)!,
@@ -360,6 +373,11 @@ export const restoreVoucherSnapshotCurrencies = async (
 
 // Adaptador para reutilizar los dos generadores PDF con los datos históricos.
 export const voucherSnapshotToPdfData = (snapshot: LiquidationVoucherSnapshot) => ({
+    montoAlquilerAnticipado: snapshot.liquidacion.montoAlquilerAnticipado || 0,
+    cobradoPropietarioARS: snapshot.liquidacion.cobradoPropietarioARS || 0,
+    cobradoPropietarioUSD: snapshot.liquidacion.cobradoPropietarioUSD || 0,
+    anticipoAlquiler: snapshot.anticipoAlquiler || null,
+    cobrosPropietario: snapshot.cobrosPropietario || [],
     id: snapshot.liquidacion.id,
     estado: snapshot.liquidacion.estado,
     periodo: snapshot.liquidacion.periodo,

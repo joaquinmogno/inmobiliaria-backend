@@ -19,7 +19,7 @@ import { getTenantCollectionState, getTenantSettlement } from '../services/tenan
 import { syncInstallmentsForLiquidationSettlement } from '../services/installment-plan-lifecycle.service';
 import { userHasPermission } from '../services/permissions.service';
 import { createLiquidationVoucherSnapshot } from '../services/liquidation-voucher.service';
-import { getLiquidationCurrencySummaries, getTenantCollectionStateByCurrency } from '../services/liquidation-currency.service';
+import { getLiquidationCurrencySummaries, getTenantCollectionStateByCurrency, liquidationCurrencyRelations } from '../services/liquidation-currency.service';
 
 const router = Router();
 
@@ -386,9 +386,7 @@ router.post('/', authenticateToken, requirePermission('pagos.crear'), validateBo
                         statusCode: 409, code: 'LIQUIDATION_CHANGED'
                     });
                 }
-                if (paymentCurrency === liq.moneda) {
-                    await syncInstallmentsForLiquidationSettlement({ tx, liquidacionId: liq.id, usuarioId });
-                }
+                await syncInstallmentsForLiquidationSettlement({ tx, liquidacionId: liq.id, usuarioId });
                 await createLiquidationVoucherSnapshot({ tx, liquidacionId: liq.id, inmobiliariaId, usuarioId, evento: 'COBRO_INQUILINO' });
             }
 
@@ -596,12 +594,9 @@ router.post('/:id/anular', authenticateToken, requirePermission('pagos.eliminar'
 
             const liquidacionActualizada = await tx.liquidacion.findUniqueOrThrow({
                 where: { id: pago.liquidacionId },
-                include: {
-                    pagos: { where: { anuladoEn: null } },
-                    aplicacionesCredito: true
-                }
+                include: liquidationCurrencyRelations
             });
-            const estadoCobroActualizado = getTenantCollectionState(liquidacionActualizada);
+            const estadoCobroActualizado = getTenantCollectionStateByCurrency(liquidacionActualizada);
             await tx.liquidacion.update({
                 where: { id: pago.liquidacionId },
                 data: { estadoCobroInquilino: estadoCobroActualizado, version: { increment: 1 } }

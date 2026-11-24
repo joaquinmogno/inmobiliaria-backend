@@ -10,13 +10,14 @@ export const sumAmounts = (rows: Amount[] = [], moneda?: string) =>
 
 export const getTenantSettlement = (liquidacion: {
     netoACobrar: Decimal | number | string;
+    montoAlquilerAnticipado?: Decimal | number | string;
     moneda?: string;
     pagos?: Amount[];
     aplicacionesCredito?: Amount[];
 }) => {
     const pagos = sumAmounts(liquidacion.pagos, liquidacion.moneda);
     const creditosAplicados = sumAmounts(liquidacion.aplicacionesCredito);
-    const totalAplicado = pagos.plus(creditosAplicados);
+    const totalAplicado = pagos.plus(creditosAplicados).plus(liquidacion.montoAlquilerAnticipado || 0);
     const saldo = Decimal.max(new Decimal(0), new Decimal(liquidacion.netoACobrar).minus(totalAplicado));
 
     return { pagos, creditosAplicados, totalAplicado, saldo };
@@ -24,6 +25,7 @@ export const getTenantSettlement = (liquidacion: {
 
 export const getTenantCollectionState = (liquidacion: {
     netoACobrar: Decimal | number | string;
+    montoAlquilerAnticipado?: Decimal | number | string;
     pagos?: Amount[];
     aplicacionesCredito?: Amount[];
 }): EstadoCobroInquilino => {
@@ -40,23 +42,38 @@ export const getTenantCollectionState = (liquidacion: {
 
 export const getOwnerPaymentSettlement = (liquidacion: {
     montoPropietario: Decimal | number | string;
+    montoAlquilerAnticipado?: Decimal | number | string;
+    montoHonorarios?: Decimal | number | string;
     moneda?: string;
+    cobradoPropietarioARS?: Decimal | number | string;
+    cobradoPropietarioUSD?: Decimal | number | string;
     pagosPropietario?: Amount[];
 }) => {
     const pagado = sumAmounts(liquidacion.pagosPropietario, liquidacion.moneda);
-    const saldo = Decimal.max(new Decimal(0), new Decimal(liquidacion.montoPropietario).minus(pagado));
-    return { pagado, saldo };
+    const anticipo = new Decimal(liquidacion.montoAlquilerAnticipado || 0);
+    const honorarios = anticipo.greaterThan(0) ? new Decimal(liquidacion.montoHonorarios || 0) : new Decimal(0);
+    const disponible = new Decimal(liquidacion.montoPropietario).plus(honorarios).minus(anticipo);
+    const saldo = Decimal.max(0, disponible.minus(pagado));
+    const cobrado = new Decimal((liquidacion.moneda === 'USD' ? liquidacion.cobradoPropietarioUSD : liquidacion.cobradoPropietarioARS) || 0);
+    const saldoACobrar = anticipo.greaterThan(0) ? Decimal.max(0, honorarios.plus(Decimal.max(0, disponible.negated())).minus(cobrado)) : new Decimal(0);
+    return { pagado, saldo, saldoACobrar, cobrado };
 };
 
 export const getOwnerPaymentState = (liquidacion: {
     montoPropietario: Decimal | number | string;
+    montoAlquilerAnticipado?: Decimal | number | string;
+    montoHonorarios?: Decimal | number | string;
+    moneda?: string;
+    cobradoPropietarioARS?: Decimal | number | string;
+    cobradoPropietarioUSD?: Decimal | number | string;
     pagosPropietario?: Amount[];
 }): EstadoPagoPropietario => {
     const totalDocumentado = new Decimal(liquidacion.montoPropietario);
-    if (totalDocumentado.lessThanOrEqualTo(0)) return EstadoPagoPropietario.NO_APLICA;
-    const { pagado, saldo } = getOwnerPaymentSettlement(liquidacion);
-    if (pagado.lessThanOrEqualTo(0)) return EstadoPagoPropietario.PENDIENTE;
-    return saldo.greaterThan(0) ? EstadoPagoPropietario.PARCIAL : EstadoPagoPropietario.PAGADO;
+    if (totalDocumentado.lessThanOrEqualTo(0) && !Number(liquidacion.montoAlquilerAnticipado)) return EstadoPagoPropietario.NO_APLICA;
+    const { pagado, saldo, saldoACobrar, cobrado } = getOwnerPaymentSettlement(liquidacion);
+    if (saldo.isZero() && saldoACobrar.isZero()) return EstadoPagoPropietario.PAGADO;
+    if (pagado.plus(cobrado).lessThanOrEqualTo(0)) return EstadoPagoPropietario.PENDIENTE;
+    return saldo.greaterThan(0) || saldoACobrar.greaterThan(0) ? EstadoPagoPropietario.PARCIAL : EstadoPagoPropietario.PAGADO;
 };
 
 /**

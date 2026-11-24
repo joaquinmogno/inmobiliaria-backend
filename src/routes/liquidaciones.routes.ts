@@ -1,3 +1,5 @@
+import { acquireInstallationLock, INSTALLATION_LOCKS } from '../utils/advisory-lock';
+import rentPrepaymentRouter from './rent-prepayment.routes';
 import { resolvePaymentCard } from '../services/credit-card.service';
 import { financialOperation, financialError } from '../services/financial-operation.service';
 import { Router } from 'express';
@@ -66,7 +68,7 @@ import {
 } from '../services/liquidation-voucher.service';
 import { calculateLiquidationAdjustment } from '../services/liquidation-adjustment.service';
 import { nextContractUpdateDate } from '../utils/contract-update-schedule';
-import { getLiquidationCurrencySummaries, getOwnerPaymentStateByCurrency } from '../services/liquidation-currency.service';
+import { getLiquidationCurrencySummaries, getTenantCollectionStateByCurrency, getOwnerPaymentStateByCurrency } from '../services/liquidation-currency.service';
 import { updateLiquidationNote } from '../services/liquidation-note.service';
 import { updateContractInternalNote } from '../services/contract-internal-note.service';
 
@@ -272,6 +274,8 @@ router.use('/:id', async (req, res, next) => {
     } catch (error) { return next(error); }
 });
 
+router.use(rentPrepaymentRouter);
+
 // Preparación mensual idempotente: genera únicamente contratos listos y deja
 // las excepciones para revisión individual.
 router.post('/generar-periodo', requirePermission('liquidaciones.crear'), validateBody(generarPeriodoSchema), async (req, res) => {
@@ -343,6 +347,7 @@ router.post('/', requirePermission('liquidaciones.crear'), validateBody(liquidac
     try {
         const liquidationPeriod = parseDateOnly(periodo);
         const runTransaction = () => prisma.$transaction(async (tx) => {
+            await acquireInstallationLock(tx, INSTALLATION_LOCKS.monthlyLiquidations, inmobiliariaId);
             const contrato = await tx.contrato.findFirst({
                 where: { id: Number(contratoId), inmobiliariaId },
                 include: {
@@ -712,13 +717,13 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
             if (new Decimal(recalculated.netoACobrar.toString()).lessThanOrEqualTo(0)) {
                 throw Object.assign(new Error('El total a cobrar al inquilino debe ser mayor que cero'), { statusCode: 409, code: 'TENANT_TOTAL_NOT_POSITIVE' });
             }
-            if (new Decimal(recalculated.montoPropietario.toString()).lessThanOrEqualTo(0)) {
+            if (!Number(recalculated.montoAlquilerAnticipado) && new Decimal(recalculated.montoPropietario.toString()).lessThanOrEqualTo(0)) {
                 throw Object.assign(new Error('El importe a entregar al propietario debe ser mayor que cero'), { statusCode: 409, code: 'OWNER_TOTAL_NOT_POSITIVE' });
             }
-            const currencySummaries = getLiquidationCurrencySummaries(liquidacion);
+            const currencySummaries = getLiquidationCurrencySummaries(recalculated);
             const invalidCurrencySummary = currencySummaries.find(summary =>
                 (summary.totalIngresos > 0 || summary.totalDescuentos > 0)
-                && (summary.netoACobrar <= 0 || summary.montoPropietario < 0)
+                && (Number(recalculated.montoAlquilerAnticipado) > 0 ? summary.netoACobrar < summary.alquilerAnticipado : (summary.netoACobrar <= 0 || summary.montoPropietario < 0))
             );
             if (invalidCurrencySummary) {
                 throw Object.assign(new Error(`La liquidación en ${invalidCurrencySummary.moneda} debe dejar un importe válido para el inquilino y el propietario`), {
@@ -738,8 +743,8 @@ router.patch('/:id/confirmar', requirePermission('liquidaciones.confirmar'), val
                 },
                 data: {
                     estado: EstadoLiquidacion.CONFIRMADA,
-                    estadoCobroInquilino: 'PENDIENTE',
-                    estadoPagoPropietario: 'PENDIENTE',
+                    estadoCobroInquilino: getTenantCollectionStateByCurrency(recalculated),
+                    estadoPagoPropietario: getOwnerPaymentStateByCurrency(recalculated),
                     version: { increment: 1 },
                     fechaConfirmacion: new Date(),
                     confirmadoPorId: (req as AuthRequest).user!.id,
@@ -1149,10 +1154,14 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
                 montoHistorico
             } = adjustmentAmounts;
             const correctedTenant = new Decimal(liquidation.netoACobrar.toString()).plus(impactoInquilino);
+            if (correctedTenant.lessThan(liquidation.montoAlquilerAnticipado || 0)) throw Object.assign(new Error('La corrección no puede reducir el alquiler cubierto por un anticipo recibido por el propietario. Revisá el anticipo antes de continuar.'), { statusCode: 409, code: 'ADJUSTMENT_BELOW_PREPAID_RENT' });
             const correctedOwner = new Decimal(liquidation.montoPropietario.toString()).plus(impactoPropietario);
-            if (correctedTenant.lessThan(0) || correctedOwner.lessThan(0)) throw Object.assign(new Error('El ajuste dejaría un importe negativo'), { statusCode: 409, code: 'NEGATIVE_ADJUSTED_TOTAL' });
+            if (correctedTenant.lessThan(0) || (!Number(liquidation.montoAlquilerAnticipado) && correctedOwner.lessThan(0))) throw Object.assign(new Error('El ajuste dejaría un importe negativo'), { statusCode: 409, code: 'NEGATIVE_ADJUSTED_TOTAL' });
             const { pagado: ownerAlreadyPaid } = getOwnerPaymentSettlement(liquidation);
-            if (ownerAlreadyPaid.greaterThan(correctedOwner)) {
+            const correctedOwnerSettlement = getOwnerPaymentSettlement({ ...liquidation, montoPropietario: correctedOwner, pagosPropietario: [], cobradoPropietarioARS: 0, cobradoPropietarioUSD: 0 });
+            const ownerCollected = liquidation.moneda === 'ARS' ? liquidation.cobradoPropietarioARS : liquidation.cobradoPropietarioUSD;
+            if (Number(ownerCollected) > 0 && new Decimal(ownerCollected).greaterThan(correctedOwnerSettlement.saldoACobrar)) throw Object.assign(new Error('La corrección reduciría el saldo del propietario por debajo de lo ya cobrado. Anulá primero el cobro que corresponda.'), { statusCode: 409, code: 'OWNER_COLLECTION_EXCEEDS_CORRECTED_TOTAL' });
+            if (ownerAlreadyPaid.greaterThan(correctedOwnerSettlement.saldo)) {
                 throw Object.assign(new Error('El ajuste reduciría el importe del propietario por debajo de lo ya entregado. Registrá primero la devolución o la corrección de esa entrega.'), {
                     statusCode: 409, code: 'OWNER_PAYMENT_EXCEEDS_CORRECTED_TOTAL'
                 });
@@ -1160,7 +1169,7 @@ router.post('/:id/ajustes', requirePermission('liquidaciones.ajustar'), requireR
 
             const settlementBeforeCorrection = getTenantSettlement(liquidation);
             const excessSettlement = Decimal.max(new Decimal(0), settlementBeforeCorrection.totalAplicado.minus(correctedTenant));
-            const cashExcess = Decimal.max(new Decimal(0), settlementBeforeCorrection.pagos.minus(correctedTenant));
+            const cashExcess = Decimal.max(new Decimal(0), settlementBeforeCorrection.pagos.minus(correctedTenant.minus(liquidation.montoAlquilerAnticipado || 0)));
             const creditApplicationExcess = excessSettlement.minus(cashExcess);
 
             // Si una parte del excedente provenía de otro saldo a favor, se lo
@@ -1492,7 +1501,7 @@ router.patch('/:id/pagar-propietario', requirePermission('liquidaciones.pagar_pr
             return {
                 ...actualizada,
                 montoPropietario: montoPropietario.toString(), montoPagadoPropietario: primarySummary.pagadoPropietario.toString(),
-                saldoPropietario: montoPropietario.minus(nuevoMontoPagado).toString(), esAdelanto,
+                saldoPropietario: String(getLiquidationCurrencySummaries(paymentStateSource).find(s => s.moneda === paymentCurrency)!.saldoPropietario), esAdelanto,
                 moneda: paymentCurrency,
                 propiedadDireccion: liquidacion.contrato?.propiedad?.direccion || 'Sin dirección',
                 propietarioNombre: principalOwner.nombreCompleto,
@@ -1930,9 +1939,16 @@ router.get('/:id/pdf', requirePermission('liquidaciones.ver'), async (req, res) 
                 { background: '#FEF2F2', color: '#991B1B', discount: true });
         }
 
+        if (Number(liquidacion.montoAlquilerAnticipado) > 0) {
+            y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'ALQUILER CUBIERTO POR ANTICIPO AL PROPIETARIO',
+                currencySummaries.filter(s => s.alquilerAnticipado > 0).map(s => ({ moneda: s.moneda, monto: s.alquilerAnticipado })), { background: '#ECFDF5', color: '#065F46' });
+            y = ensurePdfSpace(doc, y, 34);
+            doc.fillColor('#475569').fontSize(9).font('Helvetica').text(`Recibido por el propietario${liquidacion.anticipoAlquiler ? ` el ${formatDatePdf(liquidacion.anticipoAlquiler.fechaPago)}` : ''}. Aplicación del anticipo sin un nuevo cobro.`, 58, y, { width: pageWidth - 16 });
+            y += 30;
+        }
         // Neto
         y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'NETO A PAGAR',
-            currencySummaries.map(summary => ({ moneda: summary.moneda, monto: summary.netoACobrar })),
+            currencySummaries.map(summary => ({ moneda: summary.moneda, monto: Math.max(0, summary.netoACobrar - summary.alquilerAnticipado) })),
             { background: INDIGO, color: 'white', prominent: true });
 
         y = drawVoucherCorrectionsPdf(doc, y, pageWidth, snapshot, moneyPdf, 'INQUILINO');
@@ -2204,10 +2220,25 @@ router.get('/:id/pdf-propietario', requirePermission('liquidaciones.ver'), async
             .text(moneyPdf(montoHonorarios), 50 + pageWidth - 80, y + 7, { width: 70, align: 'right' });
         y += 32;
 
+        if (Number(liquidacion.montoAlquilerAnticipado) > 0) {
+            y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'ALQUILER YA RECIBIDO POR ANTICIPADO',
+                currencySummaries.filter(s => s.alquilerAnticipado > 0).map(s => ({ moneda: s.moneda, monto: s.alquilerAnticipado })), { background: '#ECFDF5', color: '#065F46' });
+            y = ensurePdfSpace(doc, y, 34);
+            doc.fillColor('#475569').fontSize(9).font('Helvetica').text(`El alquiler fue recibido por el propietario${liquidacion.anticipoAlquiler ? ` el ${formatDatePdf(liquidacion.anticipoAlquiler.fechaPago)}` : ''}. Los honorarios se abonan por separado.`, 58, y, { width: pageWidth - 16 }); y += 30;
+        }
         y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'NETO A TRANSFERIR AL PROPIETARIO',
-            currencySummaries.map(summary => ({ moneda: summary.moneda, monto: summary.montoPropietario })),
+            currencySummaries.map(summary => ({ moneda: summary.moneda, monto: summary.importeAEntregarPropietario })),
             { background: TEAL, color: 'white', prominent: true });
 
+        if (Number(liquidacion.montoAlquilerAnticipado) > 0) {
+            y = drawCurrencyTotalsPdf(doc, y, pageWidth, 'ADMINISTRACIÓN Y GASTOS PENDIENTES DEL PROPIETARIO',
+                currencySummaries.map(s => ({ moneda: s.moneda, monto: s.saldoACobrarPropietario })), { background: '#EEF2FF', color: '#312E81', prominent: true });
+            if (liquidacion.cobrosPropietario?.length) {
+                y = ensurePdfSpace(doc, y, 40);
+                doc.fillColor('#312E81').fontSize(11).font('Helvetica-Bold').text('COBROS AL PROPIETARIO', 50, y); y += 22;
+                y = drawPaymentRowsPdf(doc, y, pageWidth, liquidacion.cobrosPropietario, moneyPdf);
+            }
+        }
         y = drawVoucherCorrectionsPdf(doc, y, pageWidth, snapshot, moneyPdf, 'PROPIETARIO');
         y = drawLiquidationNotePdf(doc, y, pageWidth, liquidacion, 'PROPIETARIO');
         y = ensurePdfSpace(doc, y, 60);

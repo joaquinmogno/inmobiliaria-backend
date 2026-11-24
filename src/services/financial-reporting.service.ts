@@ -199,6 +199,8 @@ type AccruedTotals = {
   creditoAplicadoInquilinos: Decimal;
   pagadoPropietarios: Decimal;
   saldoPendientePropietarios: Decimal;
+  saldoACobrarPropietarios: Decimal;
+  alquilerAnticipadoAplicado: Decimal;
 };
 
 export const calculateAccruedReport = (liquidations: AccruedLiquidationRow[], period: ReportPeriod) => {
@@ -211,7 +213,9 @@ export const calculateAccruedReport = (liquidations: AccruedLiquidationRow[], pe
     cobradoInquilinos: new Decimal(0),
     creditoAplicadoInquilinos: new Decimal(0),
     pagadoPropietarios: new Decimal(0),
-    saldoPendientePropietarios: new Decimal(0)
+    saldoPendientePropietarios: new Decimal(0),
+    saldoACobrarPropietarios: new Decimal(0),
+    alquilerAnticipadoAplicado: new Decimal(0)
   }])) as Record<ReportCurrency, AccruedTotals>;
 
   liquidations.forEach(liquidacion => {
@@ -223,11 +227,13 @@ export const calculateAccruedReport = (liquidations: AccruedLiquidationRow[], pe
       total.facturado = total.facturado.plus(summary.netoACobrar);
       total.importePropietariosDevengado = total.importePropietariosDevengado.plus(summary.montoPropietario);
       total.honorariosDevengados = total.honorariosDevengados.plus(summary.netoACobrar.minus(summary.montoPropietario));
-      total.cobradoAplicado = total.cobradoAplicado.plus(Decimal.min(summary.netoACobrar, summary.cobradoInquilino.plus(summary.creditoAplicadoInquilino)));
+      total.cobradoAplicado = total.cobradoAplicado.plus(Decimal.min(summary.netoACobrar, summary.cobradoInquilino.plus(summary.creditoAplicadoInquilino).plus(summary.alquilerAnticipado)));
       total.saldoPendienteInquilinos = total.saldoPendienteInquilinos.plus(summary.saldoInquilino);
       total.cobradoInquilinos = total.cobradoInquilinos.plus(summary.cobradoInquilino);
       total.creditoAplicadoInquilinos = total.creditoAplicadoInquilinos.plus(summary.creditoAplicadoInquilino);
       total.pagadoPropietarios = total.pagadoPropietarios.plus(summary.pagadoPropietario);
+      total.saldoACobrarPropietarios = total.saldoACobrarPropietarios.plus(summary.saldoACobrarPropietario);
+      total.alquilerAnticipadoAplicado = total.alquilerAnticipadoAplicado.plus(summary.alquilerAnticipado);
       total.saldoPendientePropietarios = total.saldoPendientePropietarios.plus(summary.saldoPropietario);
     }
   });

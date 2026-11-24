@@ -20,6 +20,7 @@ function mockDatabase() {
   const movements = drafts.map(draft => ({ id: draft.id, liquidacionId: draft.id, tipo: 'INGRESO', concepto: 'Alquiler Mensual', monto: draft.montoAlquilerBase, moneda: 'ARS', esParaInmobiliaria: false }));
   const updates = [];
   const matches = (row, where) => row.contratoId === where.contratoId && row.inmobiliariaId === where.inmobiliariaId && row.estado === where.estado && (!where.periodo?.gte || row.periodo >= where.periodo.gte) && (where.alquilerExcepcional === undefined || row.alquilerExcepcional === where.alquilerExcepcional);
+  prisma.anticipoAlquiler = { findFirst: async () => null };
   prisma.contrato = {
     findFirst: async () => ({ ...contract }),
     findUniqueOrThrow: async () => ({ ...contract }),
